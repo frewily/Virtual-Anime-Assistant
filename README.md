@@ -9,9 +9,10 @@ Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron
 - 根据 CPU、时间和应用持续时间触发场景提醒。
 - 优先调用 GPT-SoVITS，失败时回退到 EdgeTTS。
 - 通过 WebSocket 驱动角色表情、动作和语音播放。
+- 使用统一消息模型和会话编排处理桌面交互与场景事件。
 - 仅在本机回环地址暴露 API，Electron renderer 不具备 Node.js 权限。
 
-聊天回复目前仍是固定占位逻辑；QQ 机器人和正式安装包尚未实现。
+聊天已经经过统一会话入口，但回复生成仍是固定占位逻辑；大模型、QQ 机器人和正式安装包尚未实现。
 
 ## 环境要求
 
@@ -122,10 +123,10 @@ npm --prefix desktop-app test
 ## 项目结构
 
 ```text
-backend/       FastAPI API、运行时、场景引擎、TTS 和平台监控
+backend/       FastAPI API、统一消息、会话编排、场景、TTS 和平台监控
 config/        声线、回复和场景 YAML 配置
 desktop-app/   Electron 主进程、preload 和 renderer
-docs/          设计与实施计划
+docs/          架构规格与分阶段实施计划
 ```
 
 ## License

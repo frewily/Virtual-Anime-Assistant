@@ -59,7 +59,7 @@
 - 检查：当前所有未提交文件
 - 提交：FastAPI 重构、Electron 安全加固、TTS、场景、Windows 监控、CI、README 和既有计划文档
 
-- [ ] **步骤 1：检查未提交范围和敏感信息**
+- [x] **步骤 1：检查未提交范围和敏感信息**
 
 运行：
 
@@ -75,7 +75,7 @@ rg -n "(api[_-]?key|token|secret|password)\s*[:=]\s*[^$<{]" . \
 
 预期：改动只包含已审查的项目加固内容；未发现真实 API Key、Token、密码或 Cookie。示例环境变量名称和测试假数据允许保留。
 
-- [ ] **步骤 2：运行完整基线验证**
+- [x] **步骤 2：运行完整基线验证**
 
 运行：
 
@@ -90,7 +90,7 @@ git diff --check
 
 预期：Python 编译退出码为 0，现有 23 个测试全部通过，renderer 构建和 Node.js 语法检查通过，`git diff --check` 无输出。
 
-- [ ] **步骤 3：暂存基线并确认提交范围**
+- [x] **步骤 3：暂存基线并确认提交范围**
 
 运行：
 
@@ -102,7 +102,7 @@ git diff --cached --name-status
 
 预期：暂存区不包含本计划后续尚未实现的 `backend/application/`、`backend/channels/` 和 `backend/domain/`；格式检查无输出。
 
-- [ ] **步骤 4：提交加固基线**
+- [x] **步骤 4：提交加固基线**
 
 运行：
 
@@ -121,7 +121,7 @@ git commit -m "refactor: 完成 FastAPI 项目加固基线"
 - 创建：`backend/domain/responses.py`
 - 测试：`backend/tests/test_domain_models.py`
 
-- [ ] **步骤 1：编写失败的领域模型测试**
+- [x] **步骤 1：编写失败的领域模型测试**
 
 创建 `backend/tests/test_domain_models.py`：
 
@@ -176,7 +176,7 @@ class DomainModelTests(unittest.TestCase):
             )
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：
 
@@ -186,7 +186,7 @@ python3 -m unittest discover -s backend/tests -p 'test_domain_models.py' -v
 
 预期：FAIL，错误包含 `ModuleNotFoundError: No module named 'domain'`。
 
-- [ ] **步骤 3：实现统一消息模型**
+- [x] **步骤 3：实现统一消息模型**
 
 创建空文件 `backend/domain/__init__.py`，创建 `backend/domain/messages.py`：
 
@@ -255,7 +255,7 @@ class IncomingMessage(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 ```
 
-- [ ] **步骤 4：实现统一响应模型**
+- [x] **步骤 4：实现统一响应模型**
 
 创建 `backend/domain/responses.py`：
 
@@ -299,7 +299,7 @@ class AssistantResponse(BaseModel):
         return self
 ```
 
-- [ ] **步骤 5：运行领域模型测试**
+- [x] **步骤 5：运行领域模型测试**
 
 运行：
 
@@ -309,7 +309,7 @@ python3 -m unittest discover -s backend/tests -p 'test_domain_models.py' -v
 
 预期：4 个测试全部通过。
 
-- [ ] **步骤 6：提交领域模型**
+- [x] **步骤 6：提交领域模型**
 
 运行：
 
@@ -329,7 +329,7 @@ git commit -m "refactor: 建立统一消息与响应模型"
 - 创建：`backend/channels/desktop.py`
 - 测试：`backend/tests/test_desktop_channel.py`
 
-- [ ] **步骤 1：编写失败的渠道契约测试**
+- [x] **步骤 1：编写失败的渠道契约测试**
 
 创建 `backend/tests/test_desktop_channel.py`：
 
@@ -407,7 +407,7 @@ class DesktopChannelTests(unittest.TestCase):
             client_payload_to_message({"type": "unknown"})
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：
 
@@ -417,7 +417,7 @@ python3 -m unittest discover -s backend/tests -p 'test_desktop_channel.py' -v
 
 预期：FAIL，错误包含 `ModuleNotFoundError: No module named 'channels'`。
 
-- [ ] **步骤 3：实现 Desktop 渠道转换**
+- [x] **步骤 3：实现 Desktop 渠道转换**
 
 创建空文件 `backend/channels/__init__.py`，创建 `backend/channels/desktop.py`：
 
@@ -507,7 +507,7 @@ def response_to_desktop_payload(response: AssistantResponse) -> dict[str, Any]:
     return payload
 ```
 
-- [ ] **步骤 4：运行渠道契约测试**
+- [x] **步骤 4：运行渠道契约测试**
 
 运行：
 
@@ -517,7 +517,7 @@ python3 -m unittest discover -s backend/tests -p 'test_desktop_channel.py' -v
 
 预期：5 个测试全部通过。
 
-- [ ] **步骤 5：提交 Desktop 渠道适配器**
+- [x] **步骤 5：提交 Desktop 渠道适配器**
 
 运行：
 
@@ -538,7 +538,7 @@ git commit -m "refactor: 隔离桌面消息协议"
 - 创建：`backend/application/sessions.py`
 - 测试：`backend/tests/test_application_foundation.py`
 
-- [ ] **步骤 1：编写失败的事件与会话测试**
+- [x] **步骤 1：编写失败的事件与会话测试**
 
 创建 `backend/tests/test_application_foundation.py`：
 
@@ -624,7 +624,7 @@ class ApplicationFoundationTests(unittest.TestCase):
         self.assertEqual(registry.get_state("desktop:user-1").turn_count, 2)
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：
 
@@ -634,7 +634,7 @@ python3 -m unittest discover -s backend/tests -p 'test_application_foundation.py
 
 预期：FAIL，错误包含 `ModuleNotFoundError: No module named 'application'`。
 
-- [ ] **步骤 3：实现类型化响应发布器**
+- [x] **步骤 3：实现类型化响应发布器**
 
 创建空文件 `backend/application/__init__.py`，创建 `backend/application/events.py`：
 
@@ -676,7 +676,7 @@ class ResponsePublisher:
                 )
 ```
 
-- [ ] **步骤 4：实现会话串行化**
+- [x] **步骤 4：实现会话串行化**
 
 创建 `backend/application/sessions.py`：
 
@@ -727,7 +727,7 @@ class SessionRegistry:
         return self._states.get(conversation_id)
 ```
 
-- [ ] **步骤 5：运行事件与会话测试**
+- [x] **步骤 5：运行事件与会话测试**
 
 运行：
 
@@ -737,7 +737,7 @@ python3 -m unittest discover -s backend/tests -p 'test_application_foundation.py
 
 预期：3 个测试全部通过。日志允许记录测试订阅者的 `RuntimeError`，测试进程仍以 0 退出。
 
-- [ ] **步骤 6：提交应用基础模块**
+- [x] **步骤 6：提交应用基础模块**
 
 运行：
 
@@ -756,7 +756,7 @@ git commit -m "refactor: 增加会话与响应事件基础"
 - 创建：`backend/application/assistant.py`
 - 修改：`backend/tests/test_application_foundation.py`
 
-- [ ] **步骤 1：编写失败的对话编排测试**
+- [x] **步骤 1：编写失败的对话编排测试**
 
 向 `backend/tests/test_application_foundation.py` 增加导入：
 
@@ -819,7 +819,7 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertEqual(result.avatar.expression, "worried")
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：
 
@@ -829,7 +829,7 @@ python3 -m unittest discover -s backend/tests -p 'test_application_foundation.py
 
 预期：FAIL，错误包含 `ModuleNotFoundError: No module named 'application.assistant'`。
 
-- [ ] **步骤 3：实现统一应用编排**
+- [x] **步骤 3：实现统一应用编排**
 
 创建 `backend/application/assistant.py`：
 
@@ -907,7 +907,7 @@ class AssistantApplication:
         raise ValueError(f"unsupported content type: {type(content).__name__}")
 ```
 
-- [ ] **步骤 4：运行应用编排测试**
+- [x] **步骤 4：运行应用编排测试**
 
 运行：
 
@@ -917,7 +917,7 @@ python3 -m unittest discover -s backend/tests -p 'test_application_foundation.py
 
 预期：原有 3 个测试和新增 3 个测试全部通过。
 
-- [ ] **步骤 5：提交应用编排入口**
+- [x] **步骤 5：提交应用编排入口**
 
 运行：
 
@@ -945,7 +945,7 @@ git commit -m "refactor: 统一助手对话编排入口"
 - 修改：`backend/tests/test_scenario.py`
 - 删除：`backend/core/router.py`
 
-- [ ] **步骤 1：先修改测试以描述统一入口**
+- [x] **步骤 1：先修改测试以描述统一入口**
 
 在 `backend/tests/test_scenario.py` 的最高优先级测试中增加：
 
@@ -1133,7 +1133,7 @@ class ApiTests(unittest.TestCase):
         )
 ```
 
-- [ ] **步骤 2：运行测试验证迁移尚未完成**
+- [x] **步骤 2：运行测试验证迁移尚未完成**
 
 运行：
 
@@ -1143,7 +1143,7 @@ python3 -m unittest discover -s backend/tests -v
 
 预期：FAIL，错误指出 `AssistantRuntime` 尚不接受 `application`、场景结果缺少 `scenarioId` 或 `runtime.application` 尚不存在。
 
-- [ ] **步骤 3：让场景结果保留场景 ID**
+- [x] **步骤 3：让场景结果保留场景 ID**
 
 在 `backend/core/scenario.py` 的返回值中加入：
 
@@ -1158,7 +1158,7 @@ return {
 }
 ```
 
-- [ ] **步骤 4：迁移 Runtime 到统一应用入口**
+- [x] **步骤 4：迁移 Runtime 到统一应用入口**
 
 将 `backend/core/runtime.py` 改为：
 
@@ -1209,7 +1209,7 @@ class AssistantRuntime:
 runtime = AssistantRuntime()
 ```
 
-- [ ] **步骤 5：迁移 HTTP 入口**
+- [x] **步骤 5：迁移 HTTP 入口**
 
 将 `backend/api/chat.py` 的处理函数改为：
 
@@ -1248,7 +1248,7 @@ async def perform_action(action: AvatarActionRequest):
     return {"status": "ok", "action": response_to_desktop_payload(response)}
 ```
 
-- [ ] **步骤 6：迁移 WebSocket 输入与输出**
+- [x] **步骤 6：迁移 WebSocket 输入与输出**
 
 在 `backend/api/ws.py` 中导入转换器和响应类型：
 
@@ -1282,7 +1282,7 @@ async def broadcast_to_desktop(response: AssistantResponse) -> None:
                 await ws.send_json({"type": "error", "message": str(exc)})
 ```
 
-- [ ] **步骤 7：在应用生命周期订阅 Desktop 输出**
+- [x] **步骤 7：在应用生命周期订阅 Desktop 输出**
 
 将 `backend/api/app.py` 生命周期开始和结束部分改为：
 
@@ -1307,7 +1307,7 @@ async def lifespan(_: FastAPI):
                 await task
 ```
 
-- [ ] **步骤 8：删除旧路由并修正剩余测试引用**
+- [x] **步骤 8：删除旧路由并修正剩余测试引用**
 
 删除 `backend/core/router.py`。运行以下搜索：
 
@@ -1317,7 +1317,7 @@ rg -n "MessageRouter|runtime\.router|set_ws_broadcaster|handle_client_message" b
 
 预期：没有生产代码命中。若测试仍命中，按步骤 1 的统一入口改写，不能保留兼容别名。
 
-- [ ] **步骤 9：运行后端回归测试**
+- [x] **步骤 9：运行后端回归测试**
 
 运行：
 
@@ -1328,7 +1328,7 @@ python3 -m unittest discover -s backend/tests -v
 
 预期：全部测试通过，测试总数不少于 35 个。
 
-- [ ] **步骤 10：提交 Runtime 和 API 迁移**
+- [x] **步骤 10：提交 Runtime 和 API 迁移**
 
 运行：
 
@@ -1347,7 +1347,7 @@ git commit -m "refactor: 统一运行时消息处理链路"
 - 修改：`README.md`
 - 修改：`docs/superpowers/plans/2026-07-22-message-session-orchestration-foundation.md`
 
-- [ ] **步骤 1：更新 README 架构状态**
+- [x] **步骤 1：更新 README 架构状态**
 
 在 README 当前能力中增加：
 
@@ -1370,7 +1370,7 @@ desktop-app/   Electron 主进程、preload 和 renderer
 docs/          架构规格与分阶段实施计划
 ```
 
-- [ ] **步骤 2：执行完整验证**
+- [x] **步骤 2：执行完整验证**
 
 运行：
 
@@ -1385,7 +1385,7 @@ git diff --check
 
 预期：Python 编译、全部后端测试、renderer 构建和 Node.js 语法检查均通过；`git diff --check` 无输出。
 
-- [ ] **步骤 3：检查需求覆盖和未提交范围**
+- [x] **步骤 3：检查需求覆盖和未提交范围**
 
 运行：
 
@@ -1397,7 +1397,7 @@ git diff --stat
 
 预期：旧路由搜索无命中；未提交文件只包含 README 和本计划执行状态，不包含遗漏的生产代码。
 
-- [ ] **步骤 4：记录执行结果并提交阶段文档**
+- [x] **步骤 4：记录执行结果并提交阶段文档**
 
 在本计划末尾追加实际测试数量、构建结果和已知外部资源限制，然后运行：
 
@@ -1409,7 +1409,7 @@ git commit -m "docs: 记录消息编排基础实施结果"
 
 预期：提交成功，工作区没有本阶段遗留改动。
 
-- [ ] **步骤 5：检查分支提交序列**
+- [x] **步骤 5：检查分支提交序列**
 
 运行：
 
@@ -1419,6 +1419,17 @@ git status --short --branch
 ```
 
 预期：可以看到基线、领域模型、Desktop 适配器、会话事件、对话编排、运行时迁移和文档收尾等独立提交；分支名为 `codex/project-hardening`。
+
+## 2026-07-22 执行结果
+
+- Python 编译检查通过。
+- 后端单元与集成测试共 39 个，全部通过。
+- `npm ci` 按锁文件安装 423 个包并以 0 退出；npm 报告 2 个依赖安装脚本未获自动执行许可，但 renderer 构建不受影响。
+- renderer bundle 构建通过，当前未压缩体积约为 2.1 MB。
+- Electron 主进程和 preload 的 Node.js 语法检查通过。
+- `git diff --check` 无格式错误。
+- 旧 `MessageRouter`、`runtime.router` 和 `set_ws_broadcaster` 在后端中均无残留引用。
+- 本阶段未解决 Live2D 模型、Cubism Core SDK、Electron GUI 首启和代码签名等外部资源问题；它们属于后续独立阶段。
 
 ## 完成标准
 

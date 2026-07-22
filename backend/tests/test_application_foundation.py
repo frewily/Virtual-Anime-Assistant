@@ -6,9 +6,17 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from application.assistant import AssistantApplication
 from application.events import ResponsePublisher
 from application.sessions import SessionRegistry
-from domain.messages import ChatContent, IncomingMessage, MessageSource, SenderIdentity
+from domain.messages import (
+    ChatContent,
+    IncomingMessage,
+    InteractionContent,
+    MessageSource,
+    ScenarioContent,
+    SenderIdentity,
+)
 from domain.responses import AssistantResponse, ResponseKind
 
 
@@ -77,3 +85,54 @@ class ApplicationFoundationTests(unittest.TestCase):
 
         self.assertEqual(max_active, 1)
         self.assertEqual(registry.get_state("desktop:user-1").turn_count, 2)
+
+
+class AssistantApplicationTests(unittest.TestCase):
+    def setUp(self):
+        self.tts = AsyncMock()
+        self.tts.synthesize.return_value = {
+            "audio_url": "/api/tts/audio/example.wav",
+            "text": "电脑好热啊",
+        }
+        self.publisher = ResponsePublisher()
+        self.subscriber = AsyncMock()
+        self.publisher.subscribe(self.subscriber)
+        self.application = AssistantApplication(
+            tts=self.tts,
+            publisher=self.publisher,
+        )
+
+    def test_chat_returns_compatible_fixed_reply(self):
+        result = asyncio.run(self.application.handle(message()))
+
+        self.assertEqual(result.kind, ResponseKind.SPEAK)
+        self.assertEqual(result.text, "主人说得有道理~")
+        self.subscriber.assert_awaited_once_with(result)
+
+    def test_interaction_returns_avatar_action(self):
+        item = message()
+        item.content = InteractionContent(action="click", x=10, y=20)
+
+        result = asyncio.run(self.application.handle(item))
+
+        self.assertEqual(result.kind, ResponseKind.ACTION)
+        self.assertEqual(result.avatar.motion, "tap_body")
+
+    def test_scenario_synthesizes_audio(self):
+        item = IncomingMessage(
+            conversation_id="scenario:high_cpu",
+            source=MessageSource.SCENARIO,
+            sender=SenderIdentity(id="scenario-engine"),
+            content=ScenarioContent(
+                scenario_id="high_cpu",
+                text="电脑好热啊",
+                expression="worried",
+                motion="shake",
+            ),
+        )
+
+        result = asyncio.run(self.application.handle(item))
+
+        self.tts.synthesize.assert_awaited_once_with("电脑好热啊")
+        self.assertEqual(result.audio_url, "/api/tts/audio/example.wav")
+        self.assertEqual(result.avatar.expression, "worried")

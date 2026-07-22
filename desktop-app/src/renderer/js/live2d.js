@@ -5,8 +5,12 @@ let app;
 let model;
 
 async function initLive2D() {
+    const container = document.getElementById('live2d-container');
+    const status = document.getElementById('assistant-status');
+    const canvas = document.createElement('canvas');
+    container.replaceChildren(canvas);
     app = new PIXI.Application({
-        view: document.getElementById('live2d-container'),
+        view: canvas,
         transparent: true,
         autoStart: true,
         width: 400,
@@ -14,6 +18,9 @@ async function initLive2D() {
     });
 
     try {
+        if (!window.Live2DCubismCore) {
+            throw new Error('缺少本地 Live2D Cubism Core SDK');
+        }
         model = await Live2DModel.from('assets/models/hiyori/hiyori.model3.json');
         
         app.stage.addChild(model);
@@ -31,8 +38,10 @@ async function initLive2D() {
             }
         });
         
+        status.hidden = true;
         console.log('Live2D model loaded successfully');
     } catch (error) {
+        status.textContent = `${error.message}。请查看 README 的模型配置说明。`;
         console.error('Failed to load Live2D model:', error);
     }
 }
@@ -52,6 +61,9 @@ function playMotion(motionName) {
 function getModel() {
     return model;
 }
+
+window.setExpression = setExpression;
+window.playMotion = playMotion;
 
 window.addEventListener('DOMContentLoaded', initLive2D);
 

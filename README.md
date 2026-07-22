@@ -1,140 +1,133 @@
-# Virtual Anime Assistant (二次元桌面助手)
+# Virtual Anime Assistant（二次元桌面助手）
 
-> 🚧 **长期开发项目** - 目前处于刚开发阶段
+Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron 负责 Live2D 渲染与用户交互，FastAPI 负责系统监控、场景判断、语音合成和实时消息分发。
 
-基于 Java + Spring Boot 的兴趣驱动学习项目，打造一个能"看懂"你在做什么的二次元桌面助手。
+## 当前能力
 
-## 项目状态
+- 监控 CPU、内存和系统运行时间。
+- 在 macOS 和 Windows 上识别前台应用。
+- 根据 CPU、时间和应用持续时间触发场景提醒。
+- 优先调用 GPT-SoVITS，失败时回退到 EdgeTTS。
+- 通过 WebSocket 驱动角色表情、动作和语音播放。
+- 仅在本机回环地址暴露 API，Electron renderer 不具备 Node.js 权限。
 
-| 状态 | 说明 |
-|------|------|
-| 🔨 开发中 | 项目刚刚启动，正在搭建基础框架 |
-
-## 功能特性（规划中）
-
-- 🖥️ 监控电脑状态（CPU/内存/当前窗口）
-- 🎙️ 语音播报与提醒（GPT-SoVITS 自定义声线）
-- 💬 即时通讯机器人交互（QQ/钉钉）
-- 🎭 Live2D 虚拟形象展示
-- 🔄 多端同步交互
-
-## 技术栈
-
-| 模块 | 技术 |
-|------|------|
-| 后端 | Java 17 + Spring Boot 3.x |
-| 系统监控 | OSHI |
-| 窗口监控 | Python + pywin32 |
-| 语音合成 | GPT-SoVITS / EdgeTTS |
-| 虚拟形象 | Electron + Live2D |
-| QQ机器人 | NapCatQQ (OneBot 11) |
-
-## 项目结构
-
-```
-Virtual-Anime-Assistant-Long-term-project-/
-├── backend/           # Java Spring Boot 后端
-│   ├── src/main/java/com/assistant/
-│   │   ├── controller/    # REST API 控制器
-│   │   ├── service/       # 业务逻辑层
-│   │   ├── model/         # 数据模型
-│   │   ├── websocket/     # WebSocket 处理
-│   │   └── config/        # 配置类
-│   └── pom.xml
-│
-├── desktop-app/       # Electron 桌面应用 (Live2D)
-│   ├── src/
-│   │   ├── main.js        # Electron 主进程
-│   │   └── renderer/      # 渲染进程
-│   └── package.json
-│
-├── agent/             # Python 数据采集 Agent
-│   ├── window_monitor.py  # 窗口监控
-│   ├── app_identifier.py  # 应用识别
-│   └── reporter.py        # 数据上报
-│
-├── config/            # 配置文件
-│   ├── voices.yml         # 声线配置
-│   ├── scenarios.yml      # 场景规则
-│   └── replies.yml        # 回复模板
-│
-└── docs/              # 文档
-    ├── 项目纲要.md
-    ├── 项目纲要_精简版.md
-    └── API接口文档.md
-```
-
-## 开发阶段
-
-| 阶段 | 目标 | 状态 |
-|------|------|------|
-| Phase 1 | MVP验证 - 系统状态接口 | 🔨 开发中 |
-| Phase 2 | 窗口监控 Agent | 📋 待开发 |
-| Phase 3 | 语音合成 (GPT-SoVITS) | 📋 待开发 |
-| Phase 4 | 智能响应引擎 | 📋 待开发 |
-| Phase 5 | Live2D 虚拟形象 | 📋 待开发 |
-| Phase 6 | QQ 机器人集成 | 📋 待开发 |
-| Phase 7 | Web 管理界面 | 📋 可选 |
+聊天回复目前仍是固定占位逻辑；QQ 机器人和正式安装包尚未实现。
 
 ## 环境要求
 
-- JDK 17+
-- Maven 3.8+
-- Node.js 18+
 - Python 3.10+
-- Docker（GPT-SoVITS 部署，可选）
+- Node.js 20+
+- npm 10+
 
-## 快速开始
+## 安装与运行
 
-### 1. 克隆项目
-
-```bash
-git clone https://github.com/frewily/Virtual-Anime-Assistant-Long-term-project-.git
-cd Virtual-Anime-Assistant-Long-term-project-
-```
-
-### 2. 启动后端
+### 1. 启动后端
 
 ```bash
 cd backend
-mvn spring-boot:run
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 main.py
 ```
 
-### 3. 启动 Agent
+Windows PowerShell 激活虚拟环境时使用：
 
-```bash
-cd agent
-pip install -r requirements.txt
-python window_monitor.py
+```powershell
+.venv\Scripts\Activate.ps1
 ```
 
-### 4. 启动桌面应用
+后端默认监听 `http://127.0.0.1:8080`。
+
+### 2. 启动桌面端
 
 ```bash
 cd desktop-app
-npm install
+npm ci
 npm start
 ```
 
-### 5. 验证
+`npm start` 会先通过 esbuild 生成本地 renderer bundle，再启动 Electron。页面不会从远程 CDN 执行脚本。
 
-- 浏览器访问: http://localhost:8080/api/status
-- 桌面应用显示 Live2D 角色
+## Live2D 模型
 
-## 文档
+仓库不附带受授权限制的 Cubism Core SDK 和 Live2D 模型。请将合法授权的模型放入：
 
-- [完整项目纲要](docs/项目纲要.md) - 详细的技术方案和实现思路
-- [精简版纲要](docs/项目纲要_精简版.md) - 快速了解项目
-- [API接口文档](docs/API接口文档.md) - 后端接口说明
+```text
+desktop-app/src/renderer/assets/models/hiyori/
+└── hiyori.model3.json
+```
 
-## 贡献
+模型相关的 `.moc3`、纹理、动作和表情文件必须保持模型配置声明的相对目录结构。资源缺失时 Electron 仍可启动，但控制台会显示模型加载错误。
 
-这是一个兴趣驱动的学习项目，欢迎交流讨论！
+Cubism 4 模型还需要官方 Cubism Core SDK。将获得授权的 `live2dcubismcore.min.js` 放到 renderer 的本地资源目录，并在 `index.html` 的 `dist/renderer.js` 之前通过本地 `<script>` 标签加载。不要恢复运行时 CDN 脚本。
+
+## GPT-SoVITS 配置
+
+声线配置位于 `config/voices.yml`。每条声线可以配置参考音频和提示文本：
+
+```yaml
+referenceAudio: voices/character_001.wav
+promptText: 大家好，我是小樱，很高兴认识你们！
+```
+
+默认 GPT-SoVITS 地址为 `http://127.0.0.1:9880`，可以通过环境变量覆盖：
+
+```bash
+export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
+```
+
+可用环境变量：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ASSISTANT_HOST` | `127.0.0.1` | FastAPI 监听地址 |
+| `ASSISTANT_PORT` | `8080` | FastAPI 监听端口 |
+| `ASSISTANT_GPT_SOVITS_URL` | `http://127.0.0.1:9880` | GPT-SoVITS 服务地址 |
+| `ASSISTANT_AUDIO_MAX_AGE_SECONDS` | `86400` | 生成音频的最大保留时间 |
+
+## 场景配置
+
+场景规则位于 `config/scenarios.yml`。规则支持：
+
+- `priority`：同时匹配时优先级较高的场景先触发。
+- `cooldownSeconds`：同一场景的冷却时间。
+- `duration`：CPU 规则按秒计算，应用持续时间规则按分钟计算。
+- 跨午夜时间范围，例如 `23:00` 到 `06:00`。
+
+## API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/status` | 获取 CPU、内存和运行时间 |
+| POST | `/api/tts/speak` | 合成语音 |
+| GET | `/api/tts/voices` | 获取声线列表 |
+| POST | `/api/report/window` | 上报窗口变化，供外部适配器使用 |
+| POST | `/api/chat/message` | 发送聊天消息 |
+| GET | `/api/avatar/status` | 获取桌面端连接状态 |
+| POST | `/api/avatar/action` | 触发角色动作 |
+| WS | `/ws/avatar` | 双向角色消息通道 |
+
+## 测试
+
+```bash
+python3 -m compileall -q backend
+python3 -m unittest discover -s backend/tests -v
+npm --prefix desktop-app ci
+npm --prefix desktop-app test
+```
+
+完整优化清单与实施状态见 [项目优化实施计划](docs/superpowers/plans/2026-07-22-project-hardening.md)。
+
+## 项目结构
+
+```text
+backend/       FastAPI API、运行时、场景引擎、TTS 和平台监控
+config/        声线、回复和场景 YAML 配置
+desktop-app/   Electron 主进程、preload 和 renderer
+docs/          设计与实施计划
+```
 
 ## License
 
 MIT
-
----
-
-*最后更新: 2024年*

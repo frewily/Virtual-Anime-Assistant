@@ -1,4 +1,5 @@
-const WS_URL = 'ws://localhost:8080/ws/avatar';
+const WS_URL = 'ws://127.0.0.1:8080/ws/avatar';
+const BACKEND_URL = 'http://127.0.0.1:8080';
 
 let ws;
 
@@ -42,7 +43,7 @@ function handleMessage(message) {
 
 function handleSpeak(message) {
     if (message.audioUrl) {
-        const audio = new Audio(message.audioUrl);
+        const audio = new Audio(new URL(message.audioUrl, BACKEND_URL));
         audio.play();
     }
     

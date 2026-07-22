@@ -1,4 +1,5 @@
 const { app, BrowserWindow, Tray, Menu } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 let mainWindow;
@@ -14,11 +15,15 @@ function createWindow() {
         skipTaskbar: true,
         resizable: false,
         webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false
+            preload: path.join(__dirname, 'preload.js'),
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true
         }
     });
 
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
     mainWindow.loadFile(path.join(__dirname, 'renderer/index.html'));
 
     mainWindow.on('closed', () => {
@@ -27,11 +32,17 @@ function createWindow() {
 }
 
 function createTray() {
-    tray = new Tray(path.join(__dirname, 'assets/icon.png'));
+    const iconPath = path.join(__dirname, 'assets/icon.png');
+    if (!fs.existsSync(iconPath)) {
+        console.warn(`[Tray] Icon not found: ${iconPath}`);
+        return;
+    }
+
+    tray = new Tray(iconPath);
     
     const contextMenu = Menu.buildFromTemplate([
-        { label: '显示', click: () => mainWindow.show() },
-        { label: '隐藏', click: () => mainWindow.hide() },
+        { label: '显示', click: () => mainWindow?.show() },
+        { label: '隐藏', click: () => mainWindow?.hide() },
         { type: 'separator' },
         { label: '退出', click: () => app.quit() }
     ]);

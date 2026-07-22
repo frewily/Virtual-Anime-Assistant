@@ -5,6 +5,6 @@ directories:
 files:
   - src/**/*
   - package.json
+asar: true
 win:
   target: nsis
-  icon: assets/icon.ico

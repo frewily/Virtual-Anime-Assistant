@@ -1,6 +1,8 @@
 scenarios:
   - id: high_cpu
     name: 高负载警告
+    priority: 80
+    cooldownSeconds: 300
     trigger:
       type: cpu_threshold
       threshold: 80
@@ -14,6 +16,8 @@ scenarios:
         
   - id: gaming
     name: 摸鱼检测
+    priority: 60
+    cooldownSeconds: 900
     trigger:
       type: app_detect
       apps: ["原神", "Steam", "游戏"]
@@ -29,6 +33,8 @@ scenarios:
         
   - id: late_night
     name: 深夜提醒
+    priority: 40
+    cooldownSeconds: 3600
     trigger:
       type: time_range
       start: "23:00"
@@ -42,6 +48,8 @@ scenarios:
         
   - id: focus_mode
     name: 专注提醒
+    priority: 50
+    cooldownSeconds: 3600
     trigger:
       type: app_duration
       apps: ["VS Code", "IDEA"]

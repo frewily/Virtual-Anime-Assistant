@@ -4,18 +4,24 @@
   "description": "二次元桌面助手 - Live2D 虚拟形象",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron .",
-    "build": "electron-builder"
+    "build:renderer": "esbuild src/renderer/js/renderer.js --bundle --platform=browser --format=iife --outfile=src/renderer/dist/renderer.js",
+    "start": "npm run build:renderer && electron .",
+    "test": "npm run build:renderer && node --check src/main.js && node --check src/preload.js",
+    "build": "npm run build:renderer && electron-builder"
   },
   "keywords": ["electron", "live2d", "assistant"],
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1"
   },
   "dependencies": {
     "pixi.js": "^7.3.2",
     "pixi-live2d-display": "^0.4.0"
+  },
+  "overrides": {
+    "gh-pages": "^6.3.0"
   }
 }

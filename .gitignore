@@ -41,6 +41,11 @@ config/local/
 logs/
 *.log
 
+# Local assistant data
+*.db
+*.db-wal
+*.db-shm
+
 # Live2D models (large files)
 desktop-app/src/renderer/assets/models/*.moc3
 desktop-app/src/renderer/assets/models/**/*.moc3

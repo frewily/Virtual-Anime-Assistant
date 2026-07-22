@@ -42,6 +42,7 @@ class ScenarioEngine:
         self._cooldowns[selected["id"]] = self._clock()
         response = selected["response"]
         return {
+            "scenarioId": selected["id"],
             "text": random.choice(response["templates"]).format(
                 appName=(window or {}).get("appName", "当前应用")
             ),

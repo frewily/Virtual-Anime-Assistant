@@ -1,7 +1,10 @@
 import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from channels.desktop import client_payload_to_message, response_to_desktop_payload
 from core.runtime import runtime
+from domain.responses import AssistantResponse
 
 router = APIRouter()
 
@@ -23,7 +26,8 @@ def parse_client_message(raw_message: str) -> dict:
     return message
 
 
-async def broadcast_to_desktop(message: str) -> None:
+async def broadcast_to_desktop(response: AssistantResponse) -> None:
+    message = json.dumps(response_to_desktop_payload(response), ensure_ascii=False)
     disconnected: list[WebSocket] = []
     for ws in tuple(_sessions):
         try:
@@ -50,8 +54,9 @@ async def avatar_websocket(ws: WebSocket):
         while True:
             data = await ws.receive_text()
             try:
-                await runtime.router.handle_client_message(parse_client_message(data))
-            except ValueError as exc:
+                payload = parse_client_message(data)
+                await runtime.application.handle(client_payload_to_message(payload))
+            except (ValueError, TypeError) as exc:
                 await ws.send_json({"type": "error", "message": str(exc)})
     except WebSocketDisconnect:
         pass

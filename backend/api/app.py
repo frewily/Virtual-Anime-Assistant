@@ -39,7 +39,7 @@ async def supervise(name: str, task_factory) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    runtime.router.set_ws_broadcaster(broadcast_to_desktop)
+    unsubscribe = runtime.application.publisher.subscribe(broadcast_to_desktop)
     tasks = [
         asyncio.create_task(supervise("scenario-loop", scenario_loop)),
         asyncio.create_task(
@@ -49,6 +49,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        unsubscribe()
         for task in tasks:
             task.cancel()
         for task in tasks:

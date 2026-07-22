@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
+from channels.desktop import desktop_chat_to_message
 from core.runtime import runtime
 
 router = APIRouter(tags=["chat"])
@@ -15,7 +16,7 @@ class ChatMessage(BaseModel):
 
 @router.post("/chat/message")
 async def handle_message(msg: ChatMessage):
-    payload = await runtime.router.handle_client_message(
-        {"type": "chat", **msg.model_dump(by_alias=True)}
+    response = await runtime.application.handle(
+        desktop_chat_to_message(msg.sender_id, msg.content)
     )
-    return {"reply": payload["text"], "status": "ok"}
+    return {"reply": response.text, "status": "ok"}

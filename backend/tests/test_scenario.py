@@ -33,6 +33,7 @@ class ScenarioEngineTests(unittest.TestCase):
         result = engine.detect({"cpu": {"percent": 50}})
 
         self.assertEqual(result["text"], "high")
+        self.assertEqual(result["scenarioId"], "high")
 
     def test_cpu_threshold_must_last_for_configured_seconds(self):
         current_time = [100.0]

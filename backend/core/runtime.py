@@ -1,13 +1,29 @@
 """Application runtime shared by HTTP, WebSocket, and background adapters."""
 
+from application.assistant import AssistantApplication
+from application.events import ResponsePublisher
+from channels.desktop import scenario_result_to_message
 from core.monitor import SystemMonitor
-from core.router import MessageRouter
+from core.scenario import ScenarioEngine
+from core.tts import TTSService
 
 
 class AssistantRuntime:
-    def __init__(self, monitor=None, router=None):
+    def __init__(
+        self,
+        monitor=None,
+        application=None,
+        scenario_engine=None,
+    ):
         self.monitor = monitor or SystemMonitor()
-        self.router = router or MessageRouter()
+        if application is None:
+            publisher = ResponsePublisher()
+            application = AssistantApplication(
+                tts=TTSService(),
+                publisher=publisher,
+            )
+        self.application = application
+        self.scenario_engine = scenario_engine or ScenarioEngine()
         self._current_window: dict | None = None
 
     def report_window(self, window: dict) -> None:
@@ -20,7 +36,9 @@ class AssistantRuntime:
         return self.monitor.get_status()
 
     async def check_scenarios(self) -> None:
-        await self.router.handle_scenario_check(self.status(), self.current_window())
+        result = self.scenario_engine.detect(self.status(), self.current_window())
+        if result is not None:
+            await self.application.handle(scenario_result_to_message(result))
 
 
 runtime = AssistantRuntime()

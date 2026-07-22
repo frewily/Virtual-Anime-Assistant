@@ -35,3 +35,20 @@ class ApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response["type"], "error")
         self.assertIn("JSON object", response["message"])
+
+    def test_chat_http_contract_remains_compatible(self):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/message",
+                json={
+                    "source": "desktop",
+                    "senderId": "user-1",
+                    "content": "你好",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"reply": "主人说得有道理~", "status": "ok"},
+        )

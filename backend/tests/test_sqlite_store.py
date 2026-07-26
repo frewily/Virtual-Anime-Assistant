@@ -601,6 +601,80 @@ class SqliteStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             asyncio.run(store.recent_messages("conversation-1", 0))
 
+    def test_claim_conversation_preserves_existing_scope_and_title(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="alice",
+                title="Alice title",
+            )
+        )
+
+        self.assertTrue(
+            asyncio.run(
+                store.claim_conversation(
+                    "conversation-1",
+                    source="desktop",
+                    owner_id="alice",
+                )
+            )
+        )
+        self.assertFalse(
+            asyncio.run(
+                store.claim_conversation(
+                    "conversation-1",
+                    source="qq",
+                    owner_id="bob",
+                )
+            )
+        )
+
+        with sqlite3.connect(self.database_path) as connection:
+            conversation = connection.execute(
+                "SELECT source, owner_id, title "
+                "FROM conversations WHERE id = ?",
+                ("conversation-1",),
+            ).fetchone()
+
+        self.assertEqual(conversation, ("desktop", "alice", "Alice title"))
+
+    def test_claim_message_is_atomic_and_find_message_round_trips(self):
+        store = self.open_store()
+        self.assertTrue(
+            asyncio.run(
+                store.claim_conversation(
+                    "conversation-1",
+                    source="desktop",
+                    owner_id="alice",
+                )
+            )
+        )
+        original = StoredMessage(
+            id="message-1",
+            conversation_id="conversation-1",
+            role="user",
+            content="original",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        conflicting = original.model_copy(
+            update={
+                "conversation_id": "conversation-2",
+                "content": "changed",
+            }
+        )
+
+        self.assertTrue(asyncio.run(store.claim_message(original)))
+        self.assertFalse(asyncio.run(store.claim_message(conflicting)))
+        found = asyncio.run(store.find_message(original.id))
+
+        self.assertEqual(found, original)
+        self.assertEqual(
+            asyncio.run(store.list_messages("conversation-1")),
+            [original],
+        )
+
     def test_memory_upsert_and_deletes_are_scoped_by_source_and_owner(self):
         store = self.open_store()
         created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)

@@ -5,6 +5,13 @@ from .models import MemoryItem, ModelCallRecord, StoredMessage
 
 @runtime_checkable
 class ConversationRepository(Protocol):
+    async def claim_conversation(
+        self,
+        conversation_id: str,
+        source: str,
+        owner_id: str,
+    ) -> bool: ...
+
     async def upsert_conversation(
         self,
         conversation_id: str,
@@ -15,7 +22,14 @@ class ConversationRepository(Protocol):
 
     async def has_message(self, message_id: str) -> bool: ...
 
+    async def claim_message(self, message: StoredMessage) -> bool: ...
+
     async def save_message(self, message: StoredMessage) -> None: ...
+
+    async def find_message(
+        self,
+        message_id: str,
+    ) -> StoredMessage | None: ...
 
     async def find_assistant_by_correlation(
         self,

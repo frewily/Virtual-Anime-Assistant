@@ -82,6 +82,16 @@ class MemoryCommandTests(unittest.TestCase):
 
 
 class ConversationContextBuilderTests(unittest.TestCase):
+    def test_limits_are_exposed_as_read_only_properties(self):
+        builder = ConversationContextBuilder(7, 321)
+
+        self.assertEqual(builder.max_messages, 7)
+        self.assertEqual(builder.max_chars, 321)
+        with self.assertRaises(AttributeError):
+            builder.max_messages = 8
+        with self.assertRaises(AttributeError):
+            builder.max_chars = 322
+
     def test_starts_with_fixed_safety_system_prompt(self):
         context = ConversationContextBuilder(10, 1000).build([], [])
 

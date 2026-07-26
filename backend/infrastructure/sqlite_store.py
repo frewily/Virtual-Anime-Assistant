@@ -131,11 +131,33 @@ class SqliteStore:
             title,
         )
 
+    async def claim_conversation(
+        self,
+        conversation_id: str,
+        source: str,
+        owner_id: str,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._claim_conversation_sync,
+            conversation_id,
+            source,
+            owner_id,
+        )
+
     async def has_message(self, message_id: str) -> bool:
         return await asyncio.to_thread(self._has_message_sync, message_id)
 
+    async def claim_message(self, message: StoredMessage) -> bool:
+        return await asyncio.to_thread(self._claim_message_sync, message)
+
     async def save_message(self, message: StoredMessage) -> None:
         await asyncio.to_thread(self._save_message_sync, message)
+
+    async def find_message(
+        self,
+        message_id: str,
+    ) -> StoredMessage | None:
+        return await asyncio.to_thread(self._find_message_sync, message_id)
 
     async def find_assistant_by_correlation(
         self,
@@ -254,6 +276,64 @@ class SqliteStore:
                 ),
             )
 
+    def _claim_conversation_sync(
+        self,
+        conversation_id: str,
+        source: str,
+        owner_id: str,
+    ) -> bool:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO conversations (
+                        id,
+                        source,
+                        owner_id,
+                        title,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, NULL, ?, ?)
+                    """,
+                    (
+                        conversation_id,
+                        source,
+                        owner_id,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                row = self._connection.execute(
+                    """
+                    SELECT source, owner_id
+                    FROM conversations
+                    WHERE id = ?
+                    """,
+                    (conversation_id,),
+                ).fetchone()
+                matches_scope = (
+                    row is not None
+                    and str(row["source"]) == source
+                    and str(row["owner_id"]) == owner_id
+                )
+                if matches_scope:
+                    self._connection.execute(
+                        """
+                        UPDATE conversations
+                        SET updated_at = ?
+                        WHERE id = ? AND source = ? AND owner_id = ?
+                        """,
+                        (timestamp, conversation_id, source, owner_id),
+                    )
+                self._connection.commit()
+                return matches_scope
+            except BaseException:
+                self._connection.rollback()
+                raise
+
     def _has_message_sync(self, message_id: str) -> bool:
         with self._lock:
             row = self._connection.execute(
@@ -262,9 +342,28 @@ class SqliteStore:
             ).fetchone()
             return row is not None
 
+    def _claim_message_sync(self, message: StoredMessage) -> bool:
+        with self._lock, self._connection:
+            cursor = self._insert_message(
+                message,
+                ignore_duplicate=True,
+            )
+            return cursor.rowcount > 0
+
     def _save_message_sync(self, message: StoredMessage) -> None:
         with self._lock, self._connection:
             self._insert_message(message)
+
+    def _find_message_sync(
+        self,
+        message_id: str,
+    ) -> StoredMessage | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM messages WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            return self._message_from_row(row) if row is not None else None
 
     def _find_assistant_by_correlation_sync(
         self,
@@ -436,9 +535,19 @@ class SqliteStore:
                 self._connection.rollback()
                 raise
 
-    def _insert_message(self, message: StoredMessage) -> None:
-        self._connection.execute(
-            """
+    def _insert_message(
+        self,
+        message: StoredMessage,
+        *,
+        ignore_duplicate: bool = False,
+    ) -> sqlite3.Cursor:
+        conflict_clause = (
+            "ON CONFLICT(id) DO NOTHING"
+            if ignore_duplicate
+            else ""
+        )
+        return self._connection.execute(
+            f"""
             INSERT INTO messages (
                 id,
                 conversation_id,
@@ -450,6 +559,7 @@ class SqliteStore:
                 created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            {conflict_clause}
             """,
             (
                 message.id,

@@ -33,6 +33,14 @@ class ConversationContextBuilder:
         self._max_messages = max_messages
         self._max_chars = max_chars
 
+    @property
+    def max_messages(self) -> int:
+        return self._max_messages
+
+    @property
+    def max_chars(self) -> int:
+        return self._max_chars
+
     def build(
         self,
         history: Sequence[StoredMessage],

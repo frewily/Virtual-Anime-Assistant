@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from core.tts import TTSService
+
+from api.dependencies import get_runtime
+from core.runtime import AssistantRuntime
 
 router = APIRouter(tags=["tts"])
-service = TTSService()
 
 
 class SpeakRequest(BaseModel):
@@ -19,9 +20,15 @@ class SpeakRequest(BaseModel):
 
 
 @router.post("/tts/speak")
-async def speak(req: SpeakRequest):
+async def speak(
+    req: SpeakRequest,
+    runtime: AssistantRuntime = Depends(get_runtime),
+):
     try:
-        result = await service.synthesize(req.text, req.voice_id)
+        result = await runtime.application.tts.synthesize(
+            req.text,
+            req.voice_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result is None:
@@ -30,5 +37,7 @@ async def speak(req: SpeakRequest):
 
 
 @router.get("/tts/voices")
-def get_voices():
-    return service.get_voice_list()
+def get_voices(
+    runtime: AssistantRuntime = Depends(get_runtime),
+):
+    return runtime.application.tts.get_voice_list()

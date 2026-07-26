@@ -3,14 +3,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from api.tts import SpeakRequest, speak
+from api.tts import SpeakRequest, get_voices, speak
 from core.tts import TTSService
 
 
@@ -80,8 +80,37 @@ class TTSServiceTests(unittest.TestCase):
             asyncio.run(service.synthesize("测试", "missing"))
 
     def test_api_returns_503_when_all_providers_fail(self):
-        with patch("api.tts.service.synthesize", AsyncMock(return_value=None)):
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(speak(SpeakRequest(text="测试")))
+        runtime = Mock()
+        runtime.application.tts.synthesize = AsyncMock(return_value=None)
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(speak(SpeakRequest(text="测试"), runtime))
 
         self.assertEqual(raised.exception.status_code, 503)
+
+    def test_tts_endpoints_use_the_runtime_application_service(self):
+        runtime = Mock()
+        runtime.application.tts.synthesize = AsyncMock(
+            return_value={
+                "audio_url": "/api/tts/audio/example.wav",
+                "text": "测试",
+            }
+        )
+        runtime.application.tts.get_voice_list.return_value = [
+            {"id": "character_001", "name": "小樱"}
+        ]
+
+        spoken = asyncio.run(
+            speak(
+                SpeakRequest(text="  测试  ", voice_id="character_001"),
+                runtime,
+            )
+        )
+        voices = get_voices(runtime)
+
+        self.assertEqual(spoken["text"], "测试")
+        runtime.application.tts.synthesize.assert_awaited_once_with(
+            "测试",
+            "character_001",
+        )
+        self.assertEqual(voices, [{"id": "character_001", "name": "小樱"}])

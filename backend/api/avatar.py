@@ -1,9 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from api.dependencies import get_runtime
 from api.ws import connected_count
 from channels.desktop import client_payload_to_message, response_to_desktop_payload
-from core.runtime import runtime
+from core.runtime import AssistantRuntime
 
 router = APIRouter(tags=["avatar"])
 
@@ -15,12 +16,18 @@ class AvatarActionRequest(BaseModel):
 
 
 @router.get("/avatar/status")
-def get_avatar_status():
+def get_avatar_status(
+    runtime: AssistantRuntime = Depends(get_runtime),
+):
+    del runtime
     return {"connected": connected_count() > 0, "expression": None}
 
 
 @router.post("/avatar/action")
-async def perform_action(action: AvatarActionRequest):
+async def perform_action(
+    action: AvatarActionRequest,
+    runtime: AssistantRuntime = Depends(get_runtime),
+):
     message = client_payload_to_message(
         {"type": "interaction", **action.model_dump()}
     )

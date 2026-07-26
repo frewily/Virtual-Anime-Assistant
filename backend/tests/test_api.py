@@ -1,35 +1,167 @@
 import asyncio
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
+
+from fastapi import HTTPException
+from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.chat import ChatMessage, handle_message
+from api.status import get_status
 from api.ws import broadcast_to_desktop, is_allowed_origin, parse_client_message
+from application.assistant import AssistantApplication
+from application.context import ConversationContextBuilder
+from application.events import ResponsePublisher
 from channels.desktop import client_payload_to_message
-from core.runtime import runtime
+from core.runtime import AssistantRuntime
 from core.scenario import ScenarioEngine
 from domain.responses import AssistantResponse, AvatarCue, ResponseKind
+from infrastructure.sqlite_store import SqliteStore
+from llm.errors import ModelServiceError
+from llm.models import ModelReply
 
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = SqliteStore(Path(self.directory.name) / "assistant.db")
+        self.llm = Mock()
+        self.llm.model_name = "fake-model"
+        self.llm.complete = AsyncMock(
+            return_value=ModelReply(text="模型回答", model="fake-model")
+        )
+        self.publisher = ResponsePublisher()
         self.subscriber = AsyncMock()
-        self.unsubscribe = runtime.application.publisher.subscribe(self.subscriber)
-
-    def tearDown(self):
-        self.unsubscribe()
-
-    def test_chat_endpoint_routes_a_message_to_the_desktop(self):
-        response = asyncio.run(
-            handle_message(ChatMessage(source="desktop", senderId="user", content="你好"))
+        self.publisher.subscribe(self.subscriber)
+        tts = Mock()
+        tts.synthesize = AsyncMock(return_value=None)
+        self.application = AssistantApplication(
+            tts=tts,
+            llm=self.llm,
+            store=self.store,
+            context_builder=ConversationContextBuilder(20, 12000),
+            publisher=self.publisher,
+        )
+        monitor = Mock()
+        monitor.get_status.return_value = {
+            "cpu": {"percent": 5},
+            "privatePath": "/private/data/assistant.db",
+        }
+        scenario_engine = Mock()
+        scenario_engine.detect.return_value = None
+        self.runtime = AssistantRuntime(
+            monitor=monitor,
+            application=self.application,
+            scenario_engine=scenario_engine,
         )
 
-        self.assertEqual(response, {"reply": "主人说得有道理~", "status": "ok"})
-        self.subscriber.assert_awaited_once()
+    def tearDown(self):
+        asyncio.run(self.runtime.aclose())
+        self.directory.cleanup()
+        from api import ws
+
+        ws._sessions.clear()
+
+    def test_chat_endpoint_routes_a_message_to_the_injected_runtime(self):
+        response = asyncio.run(
+            handle_message(
+                ChatMessage(
+                    source="desktop",
+                    senderId="local-user",
+                    content="你好",
+                    messageId="http-message-1",
+                ),
+                self.runtime,
+            )
+        )
+
+        self.assertEqual(response, {"reply": "模型回答", "status": "ok"})
+        self.assertEqual(self.llm.complete.await_count, 1)
+        published = self.subscriber.await_args.args[0]
+        self.assertEqual(published.correlation_id, "http-message-1")
+
+    def test_chat_request_rejects_unknown_sources_and_invalid_identifiers(self):
+        invalid_payloads = (
+            {
+                "source": "qq",
+                "senderId": "local-user",
+                "content": "你好",
+            },
+            {
+                "source": "desktop",
+                "senderId": "",
+                "content": "你好",
+            },
+            {
+                "source": "desktop",
+                "senderId": "local-user",
+                "content": "你好",
+                "messageId": "",
+            },
+            {
+                "source": "desktop",
+                "senderId": "x" * 201,
+                "content": "你好",
+            },
+        )
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValidationError):
+                    ChatMessage.model_validate(payload)
+
+    def test_chat_request_strips_text_fields_before_validation(self):
+        message = ChatMessage.model_validate(
+            {
+                "source": "desktop",
+                "senderId": "  local-user  ",
+                "content": "  你好  ",
+                "messageId": "  client-message  ",
+            }
+        )
+
+        self.assertEqual(message.sender_id, "local-user")
+        self.assertEqual(message.content, "你好")
+        self.assertEqual(message.message_id, "client-message")
+
+    def test_model_error_becomes_503_with_only_safe_application_text(self):
+        self.llm.complete.side_effect = ModelServiceError(
+            "private https://provider.example?key=secret"
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                handle_message(
+                    ChatMessage(
+                        source="desktop",
+                        senderId="local-user",
+                        content="你好",
+                    ),
+                    self.runtime,
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(
+            raised.exception.detail,
+            "模型服务暂时不可用，请稍后再试。",
+        )
+        self.assertNotIn("provider.example", raised.exception.detail)
+        self.assertNotIn("secret", raised.exception.detail)
+
+    def test_status_adds_llm_mode_without_configuration_secrets(self):
+        status = get_status(self.runtime)
+
+        self.assertEqual(status["assistant"], {"llmMode": "demo"})
+        serialized = json.dumps(status, ensure_ascii=False)
+        self.assertNotIn("base_url", serialized)
+        self.assertNotIn("api_key", serialized)
+        self.assertNotIn(str(self.store.database_path), serialized)
 
     def test_broadcast_serializes_response_for_each_live_websocket(self):
         class Socket:
@@ -68,8 +200,10 @@ class ApiTests(unittest.TestCase):
 
     def test_client_interaction_uses_the_shared_application(self):
         response = asyncio.run(
-            runtime.application.handle(
-                client_payload_to_message({"type": "interaction", "action": "click"})
+            self.runtime.application.handle(
+                client_payload_to_message(
+                    {"type": "interaction", "action": "click"}
+                )
             )
         )
 

@@ -3,7 +3,6 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from channels.desktop import client_payload_to_message, response_to_desktop_payload
-from core.runtime import runtime
 from domain.responses import AssistantResponse
 
 router = APIRouter()
@@ -55,6 +54,7 @@ async def avatar_websocket(ws: WebSocket):
             data = await ws.receive_text()
             try:
                 payload = parse_client_message(data)
+                runtime = ws.app.state.runtime
                 await runtime.application.handle(client_payload_to_message(payload))
             except (ValueError, TypeError) as exc:
                 await ws.send_json({"type": "error", "message": str(exc)})

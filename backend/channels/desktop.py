@@ -13,15 +13,37 @@ from domain.responses import AssistantResponse
 
 LOCAL_USER = SenderIdentity(id="local-user", display_name="本机用户")
 SCENARIO_SENDER = SenderIdentity(id="scenario-engine", display_name="场景引擎")
+_MESSAGE_ID_ERROR = "messageId must be between 1 and 200 characters"
 
 
-def desktop_chat_to_message(sender_id: str, content: str) -> IncomingMessage:
+def optional_client_message_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    message_id = value.strip()
+    if not message_id:
+        return None
+    if len(message_id) > 200:
+        raise ValueError(_MESSAGE_ID_ERROR)
+    return message_id
+
+
+def desktop_chat_to_message(
+    sender_id: str,
+    content: str,
+    message_id: str | None = None,
+) -> IncomingMessage:
     sender = SenderIdentity(id=sender_id)
+    message_data: dict[str, Any] = {
+        "conversation_id": f"desktop:{sender_id}",
+        "source": MessageSource.DESKTOP,
+        "sender": sender,
+        "content": ChatContent(text=content),
+    }
+    validated_message_id = optional_client_message_id(message_id)
+    if validated_message_id is not None:
+        message_data["message_id"] = validated_message_id
     return IncomingMessage(
-        conversation_id=f"desktop:{sender_id}",
-        source=MessageSource.DESKTOP,
-        sender=sender,
-        content=ChatContent(text=content),
+        **message_data,
     )
 
 
@@ -31,11 +53,18 @@ def client_payload_to_message(payload: dict[str, Any]) -> IncomingMessage:
     conversation_id = str(payload.get("conversationId") or f"desktop:{sender_id}")
 
     if message_type == "chat":
+        message_id = payload.get("messageId")
+        message_data: dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "source": MessageSource.DESKTOP,
+            "sender": SenderIdentity(id=sender_id),
+            "content": ChatContent(text=str(payload.get("content") or "")),
+        }
+        validated_message_id = optional_client_message_id(message_id)
+        if validated_message_id is not None:
+            message_data["message_id"] = validated_message_id
         return IncomingMessage(
-            conversation_id=conversation_id,
-            source=MessageSource.DESKTOP,
-            sender=SenderIdentity(id=sender_id),
-            content=ChatContent(text=str(payload.get("content") or "")),
+            **message_data,
         )
     if message_type == "interaction":
         return IncomingMessage(

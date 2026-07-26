@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from inspect import signature
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from infrastructure.database_config import DatabaseSettings
 from infrastructure.sqlite_store import SqliteStore
 from memory.models import MemoryItem, MessageStatus, ModelCallRecord, StoredMessage
-from memory.repositories import MemoryRepository
+from memory.repositories import (
+    ConversationRepository,
+    MemoryRepository,
+    ModelCallRepository,
+)
 
 
 EXPECTED_TABLES = {
@@ -504,6 +508,348 @@ class SqliteStoreTests(unittest.TestCase):
         asyncio.run(store.close())
         asyncio.run(store.close())
         self.store = None
+
+    def test_conversation_and_messages_round_trip_in_chronological_order(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+                title="Original title",
+            )
+        )
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="discord",
+                owner_id="owner-2",
+                title=None,
+            )
+        )
+
+        with sqlite3.connect(self.database_path) as connection:
+            conversation = connection.execute(
+                "SELECT source, owner_id, title FROM conversations WHERE id = ?",
+                ("conversation-1",),
+            ).fetchone()
+
+        self.assertEqual(
+            conversation,
+            ("discord", "owner-2", "Original title"),
+        )
+
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        messages = [
+            StoredMessage(
+                id="message-3",
+                conversation_id="conversation-1",
+                correlation_id="request-1",
+                role="assistant",
+                content="third",
+                model="demo-model",
+                status=MessageStatus.FAILED,
+                created_at=created_at + timedelta(seconds=3),
+            ),
+            StoredMessage(
+                id="message-1",
+                conversation_id="conversation-1",
+                correlation_id="request-1",
+                role="user",
+                content="first",
+                created_at=created_at + timedelta(seconds=1),
+            ),
+            StoredMessage(
+                id="message-2",
+                conversation_id="conversation-1",
+                correlation_id="request-1",
+                role="assistant",
+                content="second",
+                model="demo-model",
+                created_at=created_at + timedelta(seconds=2),
+            ),
+            StoredMessage(
+                id="message-4",
+                conversation_id="conversation-1",
+                correlation_id="request-1",
+                role="user",
+                content="fourth",
+                created_at=created_at + timedelta(seconds=4),
+            ),
+        ]
+        for message in messages:
+            asyncio.run(store.save_message(message))
+
+        self.assertTrue(asyncio.run(store.has_message("message-1")))
+        self.assertFalse(asyncio.run(store.has_message("missing-message")))
+
+        listed = asyncio.run(store.list_messages("conversation-1"))
+        recent = asyncio.run(store.recent_messages("conversation-1", 2))
+        correlated = asyncio.run(
+            store.find_assistant_by_correlation("request-1")
+        )
+
+        self.assertEqual(
+            [message.id for message in listed],
+            ["message-1", "message-2", "message-3", "message-4"],
+        )
+        self.assertEqual([message.id for message in recent], ["message-3", "message-4"])
+        self.assertEqual(listed[2].status, MessageStatus.FAILED)
+        self.assertEqual(listed[2].created_at, created_at + timedelta(seconds=3))
+        self.assertEqual(correlated.id if correlated else None, "message-3")
+
+        with self.assertRaises(ValueError):
+            asyncio.run(store.recent_messages("conversation-1", 0))
+
+    def test_memory_upsert_and_deletes_are_scoped_by_source_and_owner(self):
+        store = self.open_store()
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        original = MemoryItem(
+            id="memory-original",
+            source="desktop",
+            owner_id="alice",
+            content="Likes Tea",
+            normalized_content="likes tea",
+            source_message_id="message-1",
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        replacement = MemoryItem(
+            id="memory-replacement",
+            source="desktop",
+            owner_id="alice",
+            content="Really likes tea",
+            normalized_content="likes tea",
+            source_message_id="message-2",
+            created_at=created_at + timedelta(days=1),
+            updated_at=created_at + timedelta(days=1),
+        )
+        other_owner = MemoryItem(
+            id="memory-bob",
+            source="desktop",
+            owner_id="bob",
+            content="Likes Tea",
+            normalized_content="likes tea",
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+        first_saved = asyncio.run(store.save_memory(original))
+        replacement_saved = asyncio.run(store.save_memory(replacement))
+        asyncio.run(store.save_memory(other_owner))
+
+        self.assertEqual(first_saved.id, "memory-original")
+        self.assertEqual(replacement_saved.id, "memory-original")
+        self.assertEqual(replacement_saved.content, "Really likes tea")
+        self.assertEqual(replacement_saved.source_message_id, "message-2")
+        self.assertEqual(replacement_saved.created_at, created_at)
+        self.assertEqual(
+            replacement_saved.updated_at,
+            created_at + timedelta(days=1),
+        )
+        self.assertEqual(
+            [item.id for item in asyncio.run(store.list_memories("desktop", "alice"))],
+            ["memory-original"],
+        )
+        self.assertEqual(
+            [item.id for item in asyncio.run(store.list_memories("desktop", "bob"))],
+            ["memory-bob"],
+        )
+
+        self.assertFalse(
+            asyncio.run(
+                store.delete_memory_by_content("desktop", "charlie", "likes tea")
+            )
+        )
+        self.assertFalse(
+            asyncio.run(
+                store.delete_memory_by_id(
+                    "memory-original",
+                    source="desktop",
+                    owner_id="bob",
+                )
+            )
+        )
+        self.assertTrue(
+            asyncio.run(
+                store.delete_memory_by_content("desktop", "alice", "likes tea")
+            )
+        )
+        self.assertEqual(
+            asyncio.run(store.list_memories("desktop", "alice")),
+            [],
+        )
+        self.assertEqual(
+            [item.id for item in asyncio.run(store.list_memories("desktop", "bob"))],
+            ["memory-bob"],
+        )
+        self.assertTrue(
+            asyncio.run(
+                store.delete_memory_by_id(
+                    "memory-bob",
+                    source="desktop",
+                    owner_id="bob",
+                )
+            )
+        )
+
+    def test_model_call_accepts_arbitrary_status(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+            )
+        )
+        asyncio.run(
+            store.save_message(
+                StoredMessage(
+                    id="message-1",
+                    conversation_id="conversation-1",
+                    role="user",
+                    content="request",
+                )
+            )
+        )
+        record = ModelCallRecord(
+            id="call-1",
+            message_id="message-1",
+            model="demo-model",
+            status="timeout_error",
+            latency_ms=125,
+            prompt_tokens=10,
+            completion_tokens=4,
+            provider_request_id="provider-1",
+        )
+
+        asyncio.run(store.record_model_call(record))
+
+        with sqlite3.connect(self.database_path) as connection:
+            stored = connection.execute(
+                "SELECT status, latency_ms, prompt_tokens, completion_tokens, "
+                "provider_request_id FROM model_calls WHERE id = ?",
+                ("call-1",),
+            ).fetchone()
+
+        self.assertEqual(stored, ("timeout_error", 125, 10, 4, "provider-1"))
+
+    def test_save_model_result_rolls_back_assistant_when_model_call_insert_fails(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+            )
+        )
+        user_message = StoredMessage(
+            id="user-1",
+            conversation_id="conversation-1",
+            role="user",
+            content="request",
+        )
+        asyncio.run(store.save_message(user_message))
+        existing_record = ModelCallRecord(
+            id="call-rollback",
+            message_id="user-1",
+            model="original-model",
+            status="succeeded",
+            latency_ms=10,
+            provider_request_id="original-request",
+        )
+        asyncio.run(store.record_model_call(existing_record))
+        with sqlite3.connect(self.database_path) as connection:
+            original_record = connection.execute(
+                "SELECT * FROM model_calls WHERE id = ?",
+                ("call-rollback",),
+            ).fetchone()
+        assistant = StoredMessage(
+            id="assistant-rollback",
+            conversation_id="conversation-1",
+            correlation_id="user-1",
+            role="assistant",
+            content="new response",
+        )
+        duplicate_record = ModelCallRecord(
+            id="call-rollback",
+            message_id="user-1",
+            model="duplicate-model",
+            status="timeout_error",
+            latency_ms=99,
+            provider_request_id="duplicate-request",
+        )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            asyncio.run(store.save_model_result(duplicate_record, assistant))
+
+        with sqlite3.connect(self.database_path) as connection:
+            assistant_count = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE id = ?",
+                ("assistant-rollback",),
+            ).fetchone()[0]
+            stored_record = connection.execute(
+                "SELECT * FROM model_calls WHERE id = ?",
+                ("call-rollback",),
+            ).fetchone()
+
+        self.assertEqual(assistant_count, 0)
+        self.assertEqual(stored_record, original_record)
+
+    def test_delete_conversation_cascades_messages_and_model_calls(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+            )
+        )
+        user_message = StoredMessage(
+            id="user-1",
+            conversation_id="conversation-1",
+            role="user",
+            content="request",
+        )
+        asyncio.run(store.save_message(user_message))
+        assistant = StoredMessage(
+            id="assistant-1",
+            conversation_id="conversation-1",
+            correlation_id="user-1",
+            role="assistant",
+            content="hello",
+        )
+        record = ModelCallRecord(
+            id="call-1",
+            message_id="user-1",
+            model="demo-model",
+            status="succeeded",
+            latency_ms=10,
+        )
+        asyncio.run(store.save_model_result(record, assistant))
+
+        self.assertTrue(asyncio.run(store.delete_conversation("conversation-1")))
+        self.assertFalse(asyncio.run(store.delete_conversation("conversation-1")))
+
+        with sqlite3.connect(self.database_path) as connection:
+            message_count = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
+                ("conversation-1",),
+            ).fetchone()[0]
+            model_call_count = connection.execute(
+                "SELECT COUNT(*) FROM model_calls WHERE message_id = ?",
+                ("user-1",),
+            ).fetchone()[0]
+
+        self.assertEqual(message_count, 0)
+        self.assertEqual(model_call_count, 0)
+
+    def test_store_satisfies_all_repository_protocols_at_runtime(self):
+        store = self.open_store()
+
+        self.assertIsInstance(store, ConversationRepository)
+        self.assertIsInstance(store, MemoryRepository)
+        self.assertIsInstance(store, ModelCallRepository)
 
 
 if __name__ == "__main__":

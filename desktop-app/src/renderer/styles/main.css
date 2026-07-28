@@ -7,18 +7,36 @@
 body {
     background: transparent;
     overflow: hidden;
-    -webkit-app-region: drag;
+    -webkit-app-region: no-drag;
 }
 
 #live2d-container {
     width: 100%;
     height: 100%;
     position: relative;
+    -webkit-app-region: no-drag;
 }
 
 #live2d-container canvas {
     width: 100% !important;
     height: 100% !important;
+    display: block;
+    -webkit-app-region: no-drag;
+}
+
+.drag-handle {
+    position: absolute;
+    top: 0;
+    left: 12px;
+    right: 12px;
+    height: 32px;
+    z-index: 20;
+    cursor: grab;
+    -webkit-app-region: drag;
+}
+
+.drag-handle:active {
+    cursor: grabbing;
 }
 
 #assistant-status {
@@ -32,5 +50,6 @@ body {
     color: #fff;
     font: 14px/1.5 system-ui, sans-serif;
     text-align: center;
+    z-index: 30;
     -webkit-app-region: no-drag;
 }

@@ -4,6 +4,7 @@ directories:
   output: dist
 files:
   - src/**/*
+  - "!src/renderer/assets/dev-live2d/**/*"
   - package.json
 asar: true
 win:

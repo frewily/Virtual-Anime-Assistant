@@ -59,3 +59,96 @@ body {
     z-index: 30;
     -webkit-app-region: no-drag;
 }
+
+#tool-confirmation {
+    position: absolute;
+    left: 18px;
+    right: 18px;
+    bottom: 24px;
+    z-index: 50;
+    padding: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 18px;
+    background:
+        linear-gradient(145deg, rgba(37, 31, 55, 0.96), rgba(18, 20, 31, 0.94));
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.38);
+    color: #fff;
+    font: 13px/1.45 system-ui, sans-serif;
+    backdrop-filter: blur(16px);
+    -webkit-app-region: no-drag;
+}
+
+#tool-confirmation[hidden] {
+    display: none;
+}
+
+.tool-confirmation__eyebrow {
+    color: #f3a7d7;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+}
+
+#tool-confirmation-title {
+    margin-top: 4px;
+    font-size: 17px;
+}
+
+.tool-confirmation__tool,
+.tool-confirmation__expires {
+    margin-top: 4px;
+    color: rgba(255, 255, 255, 0.66);
+    font-size: 11px;
+}
+
+#tool-confirmation-arguments {
+    max-height: 96px;
+    margin: 10px 0;
+    padding: 9px 10px;
+    overflow: auto;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.2);
+    color: #f4eef8;
+    font: 11px/1.45 ui-monospace, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.tool-confirmation__error {
+    min-height: 18px;
+    margin-top: 6px;
+    color: #ffb5bd;
+    font-size: 11px;
+}
+
+.tool-confirmation__actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 6px;
+}
+
+.tool-confirmation button {
+    min-width: 86px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    cursor: pointer;
+    -webkit-app-region: no-drag;
+}
+
+.tool-confirmation button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.22);
+}
+
+.tool-confirmation button:disabled {
+    cursor: wait;
+    opacity: 0.55;
+}
+
+.tool-confirmation .tool-confirmation__approve {
+    background: linear-gradient(135deg, #ff7dbd, #9b78ff);
+    font-weight: 700;
+}

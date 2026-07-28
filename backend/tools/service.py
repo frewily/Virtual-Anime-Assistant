@@ -220,6 +220,15 @@ class ToolExecutionService:
             claim.request.request_id,
             None,
         )
+        await self.publisher.publish(
+            ToolEvent(
+                type=ToolEventType.CONFIRMATION_UPDATED,
+                request=self._to_view(
+                    claim.request,
+                    claim.confirmation,
+                ),
+            )
+        )
         if validated_arguments is None:
             failed = await self._transition(
                 claim.request,

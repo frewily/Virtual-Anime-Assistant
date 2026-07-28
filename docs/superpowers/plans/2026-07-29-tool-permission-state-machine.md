@@ -760,7 +760,7 @@ git commit -m "feat: 暴露工具确认与取消接口"
 - 修改：`desktop-app/src/renderer/styles/main.css`
 - 创建：`desktop-app/tests/tool-confirmation-contract.test.js`
 
-- [ ] **步骤 1：编写失败的桌面契约测试**
+- [x] **步骤 1：编写失败的桌面契约测试**
 
 ```javascript
 test('renderer loads the confirmation queue and exposes safe controls', () => {
@@ -784,7 +784,7 @@ test('desktop API uses the exact tool confirmation endpoints', () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试并确认模块缺失**
+- [x] **步骤 2：运行测试并确认模块缺失**
 
 运行：
 
@@ -795,7 +795,7 @@ npm run test:unit
 
 预期：确认模块、DOM 和 API 契约测试失败。
 
-- [ ] **步骤 3：实现 API 和队列**
+- [x] **步骤 3：实现 API 和队列**
 
 `api.js` 增加：
 
@@ -850,7 +850,7 @@ function handleConfirmationUpdate(update) {
 
 队列以确认 ID 去重，所有外部字段通过 `textContent` 设置。提交时禁用按钮，失败时恢复按钮并显示“无法提交决定，请稍后重试”。
 
-- [ ] **步骤 4：接入 WebSocket 和 DOM**
+- [x] **步骤 4：接入 WebSocket 和 DOM**
 
 `websocket.js`：
 
@@ -865,7 +865,7 @@ case 'tool_confirmation_updated':
 
 WebSocket `onopen` 调用 `restorePendingConfirmations()`。HTML 使用原生按钮和 `aria-live="polite"`，样式确保卡片可点击且不属于拖动区域。
 
-- [ ] **步骤 5：运行桌面测试和构建**
+- [x] **步骤 5：运行桌面测试和构建**
 
 ```bash
 cd desktop-app
@@ -874,7 +874,7 @@ npm test
 
 预期：Node.js 单元测试、renderer 构建和语法检查全部通过。
 
-- [ ] **步骤 6：提交桌面确认界面**
+- [x] **步骤 6：提交桌面确认界面**
 
 ```bash
 git add desktop-app/src/renderer desktop-app/tests/tool-confirmation-contract.test.js

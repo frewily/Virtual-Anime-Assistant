@@ -939,7 +939,7 @@ git add README.md docs/superpowers/plans/2026-07-29-tool-permission-state-machin
 git commit -m "docs: 记录工具权限与确认流程"
 ```
 
-- [ ] **步骤 5：推送并创建草稿 PR**
+- [x] **步骤 5：推送并创建草稿 PR**
 
 ```bash
 git push -u origin codex/action-policy

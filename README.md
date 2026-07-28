@@ -15,7 +15,7 @@ Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron
 - 支持客户端提供 `messageId` 作为幂等键；重复消息不会再次调用模型，冲突或模型故障只返回安全错误。
 - 默认监听 `127.0.0.1` 回环地址，Electron renderer 不具备 Node.js 权限。
 
-QQ 接入、主动电脑控制和正式安装包仍未实现。当前只能识别前台应用和接收窗口上报，不能代替用户操作电脑。仓库也不提供受授权限制的 Live2D 模型或 Cubism Core SDK。
+QQ 接入、主动电脑控制和正式安装包仍未实现。当前只能识别前台应用和接收窗口上报，不能代替用户操作电脑。仓库当前工作树不直接提供受授权限制的 Live2D 模型或 Cubism Core SDK；本地开发时可以按下文说明从归档标签恢复 Hiyori 样例资源。
 
 ## 环境要求
 
@@ -48,23 +48,48 @@ Windows PowerShell 激活虚拟环境时使用：
 ```bash
 cd desktop-app
 npm ci
+npm run setup:live2d-dev
 npm start
 ```
 
 `npm start` 会先通过 esbuild 生成本地 renderer bundle，再启动 Electron。页面不会从远程 CDN 执行脚本。
 
-## Live2D 模型
+`npm run setup:live2d-dev` 仅用于恢复本地开发样例。没有执行该命令时，Electron 仍可启动，并显示缺少 Live2D 开发资源的提示。
 
-仓库不附带受授权限制的 Cubism Core SDK 和 Live2D 模型。请将合法授权的模型放入：
+## Live2D 开发模型
 
-```text
-desktop-app/src/renderer/assets/models/hiyori/
-└── hiyori.model3.json
+项目使用 `pixi-live2d-display@0.4.0` 和 PixiJS 6 渲染 Cubism 4 模型。执行以下命令可以从归档标签恢复 Hiyori Momose、动作、纹理和 Cubism Core：
+
+```bash
+git fetch origin tag archive/legacy-java-qq-live2d-2026-07-28
+cd desktop-app
+npm run setup:live2d-dev
 ```
 
-模型相关的 `.moc3`、纹理、动作和表情文件必须保持模型配置声明的相对目录结构。资源缺失时 Electron 仍可启动，但控制台会显示模型加载错误。
+生成目录为：
 
-Cubism 4 模型还需要官方 Cubism Core SDK。将获得授权的 `live2dcubismcore.min.js` 放到 renderer 的本地资源目录，并在 `index.html` 的 `dist/renderer.js` 之前通过本地 `<script>` 标签加载。不要恢复运行时 CDN 脚本。
+```text
+desktop-app/src/renderer/assets/dev-live2d/
+├── live2dcubismcore4.min.js
+└── hiyori/
+    ├── Hiyori.model3.json
+    ├── Hiyori.moc3
+    ├── Hiyori.2048/
+    └── motions/
+```
+
+该目录受 Git 忽略，并由 `electron-builder.yml` 明确排除，不会默认进入 `.exe` 或 `.dmg`。Hiyori 当前只用于本地 SDK 集成验证，不能视为正式产品角色。
+
+模型加载成功后支持：
+
+- 随机待机动作、眨眼、物理摆动和姿势更新。
+- 鼠标视线跟随。
+- 点击身体播放 `TapBody` 动作。
+- 使用 `+`、`-`、`0` 调整或重置缩放。
+- 使用 `Ctrl/Command + 滚轮` 调整缩放。
+- 从窗口顶部透明区域拖动窗口。
+
+资源损坏或缺失时，重新运行 `npm run setup:live2d-dev` 并重启 Electron。第三方资源来源、版权说明和发布限制见 [Live2D 第三方开发资源说明](desktop-app/THIRD_PARTY_DEV_ASSETS.md)。
 
 ## GPT-SoVITS 配置
 

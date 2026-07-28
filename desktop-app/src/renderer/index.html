@@ -3,14 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src http://127.0.0.1:8080 ws://127.0.0.1:8080; media-src http://127.0.0.1:8080; object-src 'none'; base-uri 'none'; frame-src 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:8080 ws://127.0.0.1:8080; media-src http://127.0.0.1:8080; object-src 'none'; base-uri 'none'; frame-src 'none'">
     <title>桌面助手</title>
     <link rel="stylesheet" href="styles/main.css">
 </head>
 <body>
     <div id="live2d-container"></div>
+    <div class="drag-handle" aria-label="拖动桌面助手窗口"></div>
     <div id="assistant-status" role="status">正在加载 Live2D 模型…</div>
 
+    <script src="assets/dev-live2d/live2dcubismcore4.min.js"></script>
     <script src="dist/renderer.js"></script>
 </body>
 </html>

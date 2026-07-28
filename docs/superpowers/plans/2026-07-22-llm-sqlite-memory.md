@@ -73,7 +73,7 @@
 - 创建：`backend/llm/demo.py`
 - 测试：`backend/tests/test_llm_models_config.py`
 
-- [ ] **步骤 1：编写失败的领域模型和配置测试**
+- [x] **步骤 1：编写失败的领域模型和配置测试**
 
 ```python
 import asyncio
@@ -128,7 +128,7 @@ class LLMModelsAndConfigTests(unittest.TestCase):
         self.assertEqual(reply.text, "主人说得有道理~")
 ```
 
-- [ ] **步骤 2：运行测试并确认测试因模块尚不存在而失败**
+- [x] **步骤 2：运行测试并确认测试因模块尚不存在而失败**
 
 运行：
 
@@ -138,7 +138,7 @@ python3 -m unittest backend/tests/test_llm_models_config.py -v
 
 预期：FAIL，包含 `ModuleNotFoundError: No module named 'llm'`。
 
-- [ ] **步骤 3：实现最小领域契约**
+- [x] **步骤 3：实现最小领域契约**
 
 `backend/llm/models.py`：
 
@@ -277,7 +277,7 @@ class LLMSettings:
 
 `backend/llm/__init__.py` 只导出 `LanguageModelGateway`、`ModelMessage`、`ModelReply`、`ModelRequest` 和 `ModelRole`。
 
-- [ ] **步骤 4：运行模型契约和配置测试**
+- [x] **步骤 4：运行模型契约和配置测试**
 
 运行：
 
@@ -287,7 +287,7 @@ python3 -m unittest backend/tests/test_llm_models_config.py -v
 
 预期：4 个测试全部 PASS。
 
-- [ ] **步骤 5：运行格式检查并提交**
+- [x] **步骤 5：运行格式检查并提交**
 
 ```bash
 git diff --check
@@ -303,7 +303,7 @@ git commit -m "feat: 增加大模型网关基础契约"
 - 创建：`backend/llm/openai_compatible.py`
 - 测试：`backend/tests/test_openai_compatible.py`
 
-- [ ] **步骤 1：编写成功请求和错误映射测试**
+- [x] **步骤 1：编写成功请求和错误映射测试**
 
 ```python
 import asyncio
@@ -415,7 +415,7 @@ class OpenAICompatibleGatewayTests(unittest.TestCase):
             asyncio.run(gateway.complete(request()))
 ```
 
-- [ ] **步骤 2：运行测试并确认缺少错误模块**
+- [x] **步骤 2：运行测试并确认缺少错误模块**
 
 运行：
 
@@ -425,7 +425,7 @@ python3 -m unittest backend/tests/test_openai_compatible.py -v
 
 预期：FAIL，包含 `ModuleNotFoundError`。
 
-- [ ] **步骤 3：实现受控错误类型**
+- [x] **步骤 3：实现受控错误类型**
 
 `backend/llm/errors.py`：
 
@@ -458,7 +458,7 @@ class ModelServiceError(ModelGatewayError):
     code = "service_error"
 ```
 
-- [ ] **步骤 4：实现兼容 HTTP 请求和响应解析**
+- [x] **步骤 4：实现兼容 HTTP 请求和响应解析**
 
 `backend/llm/openai_compatible.py`：
 
@@ -548,7 +548,7 @@ class OpenAICompatibleGateway:
             raise ModelProtocolError("model response did not contain valid text") from exc
 ```
 
-- [ ] **步骤 5：运行适配器和模型基础测试**
+- [x] **步骤 5：运行适配器和模型基础测试**
 
 运行：
 
@@ -558,7 +558,7 @@ python3 -m unittest backend/tests/test_openai_compatible.py backend/tests/test_l
 
 预期：8 个测试全部 PASS。
 
-- [ ] **步骤 6：运行格式检查并提交**
+- [x] **步骤 6：运行格式检查并提交**
 
 ```bash
 git diff --check
@@ -579,7 +579,7 @@ git commit -m "feat: 增加 OpenAI 兼容模型适配器"
 - 修改：`.gitignore`
 - 测试：`backend/tests/test_sqlite_store.py`
 
-- [ ] **步骤 1：编写路径、迁移和重复初始化测试**
+- [x] **步骤 1：编写路径、迁移和重复初始化测试**
 
 ```python
 import asyncio
@@ -630,7 +630,7 @@ class SqliteInitializationTests(unittest.TestCase):
         )
 ```
 
-- [ ] **步骤 2：运行测试并确认基础设施模块尚不存在**
+- [x] **步骤 2：运行测试并确认基础设施模块尚不存在**
 
 运行：
 
@@ -640,7 +640,7 @@ python3 -m unittest backend/tests/test_sqlite_store.py -v
 
 预期：FAIL，包含 `ModuleNotFoundError: No module named 'infrastructure'`。
 
-- [ ] **步骤 3：实现数据库配置**
+- [x] **步骤 3：实现数据库配置**
 
 `backend/infrastructure/database_config.py`：
 
@@ -673,7 +673,7 @@ class DatabaseSettings:
         return cls(data_dir=data_dir, database_path=data_dir / "assistant.db")
 ```
 
-- [ ] **步骤 4：定义持久化模型和 Repository Protocol**
+- [x] **步骤 4：定义持久化模型和 Repository Protocol**
 
 `backend/memory/models.py` 定义：
 
@@ -762,7 +762,7 @@ class ModelCallRepository(Protocol):
     ) -> None: ...
 ```
 
-- [ ] **步骤 5：实现单连接存储和版本 1 Schema**
+- [x] **步骤 5：实现单连接存储和版本 1 Schema**
 
 `backend/infrastructure/sqlite_store.py` 使用 `sqlite3.connect(path, check_same_thread=False)`、`threading.RLock` 和 `asyncio.to_thread`。构造函数创建父目录并执行以下迁移：
 
@@ -829,7 +829,7 @@ self._connection.execute("PRAGMA busy_timeout=3000")
 
 不要执行 `PRAGMA journal_mode=WAL`。`schema_version` 查询最大迁移版本，`foreign_keys_enabled` 查询对应 PRAGMA，`table_names()` 只用于诊断和测试。`close()` 使用 `asyncio.to_thread` 在同一把锁内关闭连接。
 
-- [ ] **步骤 6：更新数据库忽略规则**
+- [x] **步骤 6：更新数据库忽略规则**
 
 在 `.gitignore` 的 Python 段加入：
 
@@ -840,7 +840,7 @@ self._connection.execute("PRAGMA busy_timeout=3000")
 *.db-shm
 ```
 
-- [ ] **步骤 7：运行初始化测试和全部后端测试**
+- [x] **步骤 7：运行初始化测试和全部后端测试**
 
 运行：
 
@@ -851,7 +851,7 @@ python3 -m unittest discover -s backend/tests -p 'test_*.py' -v
 
 预期：SQLite 初始化测试全部 PASS，现有后端测试无回归。
 
-- [ ] **步骤 8：运行格式检查并提交**
+- [x] **步骤 8：运行格式检查并提交**
 
 ```bash
 git diff --check
@@ -866,7 +866,7 @@ git commit -m "feat: 增加 SQLite 持久化基础"
 - 修改：`backend/infrastructure/sqlite_store.py`
 - 修改：`backend/tests/test_sqlite_store.py`
 
-- [ ] **步骤 1：增加会话幂等、近期消息和级联删除测试**
+- [x] **步骤 1：增加会话幂等、近期消息和级联删除测试**
 
 ```python
 from datetime import datetime, timezone
@@ -986,7 +986,7 @@ class SqliteRepositoryTests(unittest.TestCase):
         asyncio.run(exercise())
 ```
 
-- [ ] **步骤 2：运行测试并确认 Repository 方法缺失**
+- [x] **步骤 2：运行测试并确认 Repository 方法缺失**
 
 运行：
 
@@ -996,7 +996,7 @@ python3 -m unittest backend/tests/test_sqlite_store.py -v
 
 预期：FAIL，包含 `AttributeError`，指向 `upsert_conversation` 或其他尚未实现的方法。
 
-- [ ] **步骤 3：实现 Repository 公共异步方法**
+- [x] **步骤 3：实现 Repository 公共异步方法**
 
 每个异步方法只调用一次 `await asyncio.to_thread(self._locked_operation, ...)`。同步操作全部在 `threading.RLock` 内完成：
 
@@ -1357,7 +1357,7 @@ def count_model_calls(self) -> int:
     return int(row["count"])
 ```
 
-- [ ] **步骤 4：运行 SQLite Repository 测试**
+- [x] **步骤 4：运行 SQLite Repository 测试**
 
 运行：
 
@@ -1367,7 +1367,7 @@ python3 -m unittest backend/tests/test_sqlite_store.py -v
 
 预期：初始化、会话、记忆、模型调用和级联删除测试全部 PASS。
 
-- [ ] **步骤 5：运行格式检查并提交**
+- [x] **步骤 5：运行格式检查并提交**
 
 ```bash
 git diff --check
@@ -1383,7 +1383,7 @@ git commit -m "feat: 实现会话与记忆存储"
 - 创建：`backend/application/context.py`
 - 创建：`backend/tests/test_memory_context.py`
 
-- [ ] **步骤 1：编写命令和上下文预算测试**
+- [x] **步骤 1：编写命令和上下文预算测试**
 
 ```python
 import sys
@@ -1460,7 +1460,7 @@ class ConversationContextBuilderTests(unittest.TestCase):
         self.assertEqual([item.content for item in result[1:]], ["33333"])
 ```
 
-- [ ] **步骤 2：运行测试并确认命令和上下文模块缺失**
+- [x] **步骤 2：运行测试并确认命令和上下文模块缺失**
 
 运行：
 
@@ -1470,7 +1470,7 @@ python3 -m unittest backend/tests/test_memory_context.py -v
 
 预期：FAIL，包含 `ModuleNotFoundError`。
 
-- [ ] **步骤 3：实现确定性命令解析器**
+- [x] **步骤 3：实现确定性命令解析器**
 
 `backend/memory/commands.py`：
 
@@ -1520,7 +1520,7 @@ def parse_memory_command(text: str) -> MemoryCommand | None:
     )
 ```
 
-- [ ] **步骤 4：实现上下文构建器**
+- [x] **步骤 4：实现上下文构建器**
 
 `backend/application/context.py`：
 
@@ -1585,7 +1585,7 @@ class ConversationContextBuilder:
         return result
 ```
 
-- [ ] **步骤 5：运行记忆与上下文测试**
+- [x] **步骤 5：运行记忆与上下文测试**
 
 运行：
 
@@ -1595,7 +1595,7 @@ python3 -m unittest backend/tests/test_memory_context.py -v
 
 预期：5 个测试全部 PASS。
 
-- [ ] **步骤 6：运行格式检查并提交**
+- [x] **步骤 6：运行格式检查并提交**
 
 ```bash
 git diff --check
@@ -1610,7 +1610,7 @@ git commit -m "feat: 增加明确记忆与上下文规则"
 - 修改：`backend/application/assistant.py`
 - 修改：`backend/tests/test_application_foundation.py`
 
-- [ ] **步骤 1：把现有应用测试改为显式测试替身，并增加真实编排行为**
+- [x] **步骤 1：把现有应用测试改为显式测试替身，并增加真实编排行为**
 
 在 `backend/tests/test_application_foundation.py` 增加 `FakeStore`，它实现任务 3 中的 Repository 方法并将数据保存在列表中；为模型使用 `AsyncMock`：
 
@@ -1735,7 +1735,7 @@ def test_duplicate_message_reuses_saved_assistant_response(self):
     self.llm.complete.assert_awaited_once()
 ```
 
-- [ ] **步骤 2：运行应用测试并确认旧构造函数和固定回复不满足测试**
+- [x] **步骤 2：运行应用测试并确认旧构造函数和固定回复不满足测试**
 
 运行：
 
@@ -1745,7 +1745,7 @@ python3 -m unittest backend/tests/test_application_foundation.py -v
 
 预期：FAIL，原因是 `AssistantApplication` 尚未接收 `llm`、`store` 和 `context_builder`，或仍返回固定回复。
 
-- [ ] **步骤 3：实现聊天编排**
+- [x] **步骤 3：实现聊天编排**
 
 修改 `AssistantApplication.__init__`，显式接收：
 
@@ -1986,7 +1986,7 @@ async def _handle_chat(
 
 模型调用发生在两个短数据库事务之间，成功调用元数据和助手消息在同一 SQLite 事务内提交。本地记忆命令完全绕过模型网关。
 
-- [ ] **步骤 4：运行应用测试和现有领域测试**
+- [x] **步骤 4：运行应用测试和现有领域测试**
 
 运行：
 
@@ -1996,7 +1996,7 @@ python3 -m unittest backend/tests/test_application_foundation.py backend/tests/t
 
 预期：全部 PASS；原有交互动作和场景 TTS 行为保持不变。
 
-- [ ] **步骤 5：运行格式检查并提交**
+- [x] **步骤 5：运行格式检查并提交**
 
 ```bash
 git diff --check
@@ -2024,7 +2024,7 @@ git commit -m "feat: 接入模型与持久会话编排"
 - 修改：`backend/tests/test_integration.py`
 - 修改：`backend/tests/test_runtime.py`
 
-- [ ] **步骤 1：先增加渠道和 HTTP 契约测试**
+- [x] **步骤 1：先增加渠道和 HTTP 契约测试**
 
 在 `backend/tests/test_desktop_channel.py` 增加：
 
@@ -2070,7 +2070,7 @@ def test_chat_accepts_message_id_and_model_error_is_non_2xx(self):
     self.assertEqual(response.status_code, 503)
 ```
 
-- [ ] **步骤 2：运行渠道和 API 测试并确认功能缺失**
+- [x] **步骤 2：运行渠道和 API 测试并确认功能缺失**
 
 运行：
 
@@ -2080,7 +2080,7 @@ python3 -m unittest backend/tests/test_desktop_channel.py backend/tests/test_api
 
 预期：FAIL，原因包括消息 ID 未保留、新路由返回 404 或运行时尚未组装依赖。
 
-- [ ] **步骤 3：让 Desktop 适配器保留可选消息 ID**
+- [x] **步骤 3：让 Desktop 适配器保留可选消息 ID**
 
 修改两个入口：
 
@@ -2103,7 +2103,7 @@ def desktop_chat_to_message(
 
 `client_payload_to_message` 对聊天消息执行相同逻辑，只在 `messageId` 为非空字符串时覆盖默认 UUID。
 
-- [ ] **步骤 4：组装生产运行时**
+- [x] **步骤 4：组装生产运行时**
 
 `core/runtime.py` 增加以下导入，并用显式依赖组装替换构造函数：
 
@@ -2166,7 +2166,7 @@ class AssistantRuntime:
 
 保留现有窗口状态和场景方法。删除模块末尾的 `runtime = AssistantRuntime()`。测试显式传入 `application` 时不创建数据库；API 测试还要传入临时 Store。运行时使用 `gateway.model_name` 记录成功和失败调用所对应的模型名称，不得从异常正文猜测模型。
 
-- [ ] **步骤 5：增加运行时依赖和记忆、会话管理路由**
+- [x] **步骤 5：增加运行时依赖和记忆、会话管理路由**
 
 `backend/api/dependencies.py`：
 
@@ -2264,7 +2264,7 @@ async def delete_conversation(
     return Response(status_code=204)
 ```
 
-- [ ] **步骤 6：更新聊天错误、状态和应用路由**
+- [x] **步骤 6：更新聊天错误、状态和应用路由**
 
 - `ChatMessage` 增加可选 `message_id: str | None = Field(default=None, alias="messageId")`。
 - `handle_message` 通过 `Depends(get_runtime)` 获取运行时并将消息 ID 传给 Desktop 适配器；`ResponseKind.ERROR` 时抛出 HTTP 503，`detail` 只使用本地安全提示。
@@ -2344,7 +2344,7 @@ def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
 app = create_app()
 ```
 
-- [ ] **步骤 7：运行 API、渠道和集成测试**
+- [x] **步骤 7：运行 API、渠道和集成测试**
 
 运行：
 
@@ -2354,7 +2354,7 @@ python3 -m unittest backend/tests/test_desktop_channel.py backend/tests/test_api
 
 预期：全部 PASS；现有 HTTP 和 WebSocket 成功响应保持兼容。
 
-- [ ] **步骤 8：运行格式检查并提交**
+- [x] **步骤 8：运行格式检查并提交**
 
 ```bash
 git diff --check
@@ -2369,7 +2369,7 @@ git commit -m "feat: 增加模型运行时与记忆管理 API"
 - 修改：`README.md`
 - 修改：`docs/superpowers/plans/2026-07-22-llm-sqlite-memory.md`
 
-- [ ] **步骤 1：更新 README 当前能力和环境变量**
+- [x] **步骤 1：更新 README 当前能力和环境变量**
 
 将固定回复说明改为：未启用模型时运行演示网关；配置兼容服务后使用真实模型。环境变量表新增：
 
@@ -2396,7 +2396,7 @@ python3 backend/main.py
 
 说明 API Key 不得写进仓库，`记住：内容` 和 `忘记：内容` 只在本地处理，记忆管理 API 支持查询和永久删除。
 
-- [ ] **步骤 2：运行 Python 编译检查**
+- [x] **步骤 2：运行 Python 编译检查**
 
 运行：
 
@@ -2406,7 +2406,7 @@ python3 -m compileall -q backend
 
 预期：退出码 0，无输出。
 
-- [ ] **步骤 3：运行全部后端测试**
+- [x] **步骤 3：运行全部后端测试**
 
 运行：
 
@@ -2416,7 +2416,7 @@ python3 -m unittest discover -s backend/tests -p 'test_*.py' -v
 
 预期：所有测试 PASS，输出末尾为 `OK`。
 
-- [ ] **步骤 4：运行桌面端测试和 Renderer 构建**
+- [x] **步骤 4：运行桌面端测试和 Renderer 构建**
 
 ```bash
 npm --prefix desktop-app test
@@ -2425,7 +2425,7 @@ npm --prefix desktop-app run build:renderer
 
 预期：测试退出码 0；esbuild 成功生成 `desktop-app/src/renderer/dist/renderer.js`。
 
-- [ ] **步骤 5：检查敏感信息和兼容边界**
+- [x] **步骤 5：检查敏感信息和兼容边界**
 
 运行：
 
@@ -2439,11 +2439,11 @@ git status --short
 
 预期：前 2 条均无匹配；工具字段只允许出现在明确断言不发送工具的测试中；`git diff --check` 退出码 0；状态只包含 `README.md` 和本计划的收尾变更。
 
-- [ ] **步骤 6：更新计划复选框和实施结果**
+- [x] **步骤 6：更新计划复选框和实施结果**
 
 将已完成步骤改为 `- [x]`，并在文档末尾增加实际测试数量、命令结果、已知限制和真实模型尚需用户密钥的说明。
 
-- [ ] **步骤 7：提交文档与验证结果**
+- [x] **步骤 7：提交文档与验证结果**
 
 ```bash
 git add README.md docs/superpowers/plans/2026-07-22-llm-sqlite-memory.md
@@ -2452,17 +2452,62 @@ git commit -m "docs: 完成大模型与记忆阶段说明"
 
 ## 最终验收检查清单
 
-- [ ] 默认演示模式可以启动，不要求 API Key。
-- [ ] 启用真实模型但缺少地址或模型时拒绝启动。
-- [ ] OpenAI 兼容请求不包含 Tool Calling 字段。
-- [ ] 模型鉴权、限流、超时、协议和服务错误被安全归一化。
-- [ ] SQLite 使用单连接并启用外键，不默认启用 WAL。
-- [ ] 会话、消息和模型调用元数据可持久化。
-- [ ] 相同 `message_id` 不会触发第 2 次模型调用。
-- [ ] 长期记忆按来源和用户隔离。
-- [ ] 只有明确命令或管理 API 能写入长期记忆。
-- [ ] 记忆命令不调用模型服务。
-- [ ] 长期记忆作为不可信参考数据注入上下文。
-- [ ] 用户可以查询并永久删除会话和长期记忆。
-- [ ] HTTP、WebSocket、交互动作、场景 TTS 和 Renderer 构建无回归。
-- [ ] 代码、日志、数据库和 Git 中没有真实 API Key。
+- [x] 默认演示模式可以启动，不要求 API Key。
+- [x] 启用真实模型但缺少地址或模型时拒绝启动。
+- [x] OpenAI 兼容请求不包含 Tool Calling 字段。
+- [x] 模型鉴权、限流、超时、协议和服务错误被安全归一化。
+- [x] SQLite 使用单连接并启用外键，不默认启用 WAL。
+- [x] 会话、消息和模型调用元数据可持久化。
+- [x] 相同 `message_id` 不会触发第 2 次模型调用。
+- [x] 长期记忆按来源和用户隔离。
+- [x] 只有明确命令或管理 API 能写入长期记忆。
+- [x] 记忆命令不调用模型服务。
+- [x] 长期记忆作为不可信参考数据注入上下文。
+- [x] 用户可以查询并永久删除会话和长期记忆。
+- [x] HTTP、WebSocket、交互动作、场景 TTS 和 Renderer 构建无回归。
+- [x] 代码、日志、数据库和 Git 中没有真实 API Key。
+
+## 实施结果（2026-07-27）
+
+### 提交与阶段概述
+
+任务 1～7 已按独立阶段提交，任务 8 完成文档和最终验收收尾：
+
+| 任务 | 提交 | 结果 |
+|---|---|---|
+| 任务 1 | `e7473c8` | 建立大模型网关基础契约、配置和 Demo 网关 |
+| 任务 2 | `e09712b` | 增加 OpenAI 兼容适配器和安全错误归一化 |
+| 任务 3 | `00ffd34` | 增加 SQLite 配置、迁移和单连接生命周期 |
+| 任务 4 | `bba6d9a` | 实现会话、记忆和模型调用 Repository |
+| 任务 5 | `6ff528e` | 增加明确记忆命令和安全上下文构建 |
+| 任务 6 | `a42a4e` | 接入模型、持久会话和记忆编排 |
+| 任务 7 | `92943b0` | 组装生产运行时和记忆、会话管理 API |
+| 任务 8 | 本次文档收尾 | 更新 README、记录实施结果并执行完整回归 |
+
+### 最终验证
+
+- `python3 -m compileall -q backend`：退出码为 0，无输出。
+- `python3 -m unittest discover -s backend/tests -p 'test_*.py' -v`：后端 152 项测试全部通过，结果为 `OK`。
+- `npm --prefix desktop-app test`：renderer bundle、Electron 主进程和 preload 检查通过。
+- `npm --prefix desktop-app run build:renderer`：esbuild 成功生成 renderer bundle。
+- 敏感检查未发现疑似真实 API Key，也未发现记录 `api_key` 的日志或打印语句。
+- `backend/llm` 和 `backend/application` 中没有 `tools` 或 `tool_choice` 字段；适配器测试另有明确断言，保证请求不发送这两个字段。
+- `git diff --check` 通过，renderer 构建未产生额外差异。
+
+### 实际增强
+
+- 默认使用 Demo 网关固定回复。只有显式启用并配置 OpenAI 兼容服务后，才会发起真实模型请求。
+- SQLite 强制使用 `DELETE` rollback journal，启用外键和 3000 ms busy timeout。进程内只维护单个连接，并以锁和异步线程边界保护访问。
+- 会话、消息、长期记忆和模型调用元数据持久化到用户数据目录。删除会话时，关联消息和模型调用记录通过外键级联删除。
+- 会话绑定 `source/owner_id` 后不能被其他来源或用户重新占用。长期记忆也按来源和用户隔离；管理 API 进一步限定为本机 `desktop/local-user` 作用域。
+- 消息 ID 通过原子占用实现幂等。跨会话复用或改变消息内容会返回安全冲突响应，不会泄漏其他会话的回复。
+- `记住：内容` 和 `忘记：内容` 完全由本地确定性逻辑处理，不调用模型。记忆作为有明确边界的不可信 JSON 参考数据注入上下文。
+- 模型请求不启用 Tool Calling，不发送 `tools` 或 `tool_choice`。模型错误只映射为有限的应用提示。
+- 导入 FastAPI 应用工厂不会创建数据库、TTS 或完整运行时。资源只在生命周期内构造和关闭，导入无副作用。
+
+### 已知限制
+
+- 真实模型需要用户自行准备 OpenAI 兼容服务、服务地址、模型名称和 API Key。API Key 只应通过环境变量提供，不能写入仓库或日志。
+- QQ 接入、主动电脑控制和正式安装包尚未实现。
+- 仓库不提供受授权限制的 Live2D 模型和 Cubism Core SDK；用户必须自行取得合法资源。
+- 首版不支持 Tool Calling、模型请求自动重试、多用户登录或远程管理。记忆和会话管理 API 目前只服务本机 `local-user`。

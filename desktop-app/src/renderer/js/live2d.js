@@ -1,5 +1,5 @@
 const PIXI = require('pixi.js');
-const { Live2DModel } = require('pixi-live2d-display/cubism4');
+const { install: installUnsafeEval } = require('@pixi/unsafe-eval');
 const {
     MODEL_PATH,
     SCALE_DEFAULT,
@@ -10,6 +10,7 @@ const {
 } = require('./live2d-config');
 
 window.PIXI = PIXI;
+installUnsafeEval(PIXI);
 
 const SCALE_STORAGE_KEY = 'assistant_scale';
 const SCALE_STEP = 0.05;
@@ -87,6 +88,7 @@ function bindInteractionControls(canvas) {
 }
 
 async function loadModel(container, canvas) {
+    const { Live2DModel } = require('pixi-live2d-display/cubism4');
     model = await Live2DModel.from(MODEL_PATH, { autoInteract: true });
     modelNaturalHeight = model.height;
     model.anchor.set(0.5, 0.5);
@@ -126,7 +128,7 @@ async function initLive2D() {
         container.replaceChildren(canvas);
         app = new PIXI.Application({
             view: canvas,
-            transparent: true,
+            backgroundAlpha: 0,
             antialias: true,
             autoStart: true,
             autoDensity: true,

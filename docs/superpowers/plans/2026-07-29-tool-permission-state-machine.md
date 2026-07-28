@@ -58,7 +58,7 @@
 - 创建：`backend/tools/policy.py`
 - 测试：`backend/tests/test_tool_domain_policy.py`
 
-- [ ] **步骤 1：编写失败的领域和策略测试**
+- [x] **步骤 1：编写失败的领域和策略测试**
 
 ```python
 class SecretArguments(BaseModel):
@@ -112,7 +112,7 @@ def test_argument_summary_redacts_and_limits_untrusted_values():
     assert summary["target"].endswith("…")
 ```
 
-- [ ] **步骤 2：运行测试并确认缺少模块**
+- [x] **步骤 2：运行测试并确认缺少模块**
 
 运行：
 
@@ -122,7 +122,7 @@ python3 -m unittest backend.tests.test_tool_domain_policy -v
 
 预期：失败并报告 `domain.tools` 或 `tools.registry` 不存在。
 
-- [ ] **步骤 3：实现最小领域模型**
+- [x] **步骤 3：实现最小领域模型**
 
 `backend/domain/tools.py` 至少包含：
 
@@ -175,7 +175,7 @@ class ToolRequest(BaseModel):
 
 同时定义 `ToolRequestRecord`、`ToolConfirmationRecord`、`ToolExecutionResult`、`ToolAuditEvent` 和对外 `ToolRequestView`，所有时间必须带时区。
 
-- [ ] **步骤 4：实现注册表和脱敏策略**
+- [x] **步骤 4：实现注册表和脱敏策略**
 
 `backend/tools/registry.py`：
 
@@ -248,7 +248,7 @@ def summarize_arguments(
 
 摘要递归最多 4 层，每层最多 20 项，字符串最多 200 个字符，敏感键不区分大小写。
 
-- [ ] **步骤 5：运行测试并确认通过**
+- [x] **步骤 5：运行测试并确认通过**
 
 运行：
 
@@ -258,7 +258,7 @@ python3 -m unittest backend.tests.test_tool_domain_policy -v
 
 预期：所有领域、注册和脱敏测试通过。
 
-- [ ] **步骤 6：提交领域边界**
+- [x] **步骤 6：提交领域边界**
 
 ```bash
 git add backend/domain/tools.py backend/tools backend/tests/test_tool_domain_policy.py

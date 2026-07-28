@@ -107,6 +107,12 @@ class ToolConfirmationRecord(StrictToolModel):
     decided_at: datetime | None = None
 
 
+class ToolDecisionClaim(StrictToolModel):
+    request: ToolRequestRecord
+    confirmation: ToolConfirmationRecord
+    claimed: bool
+
+
 class ToolAuditEvent(StrictToolModel):
     event_id: str = Field(
         default_factory=lambda: uuid4().hex,

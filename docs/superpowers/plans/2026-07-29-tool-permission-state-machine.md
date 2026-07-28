@@ -273,7 +273,7 @@ git commit -m "feat: 建立工具领域模型与风险策略"
 - 创建：`backend/tools/service.py`
 - 测试：`backend/tests/test_tool_service.py`
 
-- [ ] **步骤 1：编写失败的状态机测试**
+- [x] **步骤 1：编写失败的状态机测试**
 
 使用测试内 `InMemoryToolRepository` 和可计数处理函数覆盖：
 
@@ -331,7 +331,7 @@ async def test_reject_expire_cancel_timeout_and_failure_never_leak_errors():
 
 测试必须明确断言拒绝、过期和待确认取消时处理函数调用次数为 0；不可取消的运行请求返回 `ToolStateConflictError`；异常结果不包含原始异常文本。
 
-- [ ] **步骤 2：运行测试并确认服务缺失**
+- [x] **步骤 2：运行测试并确认服务缺失**
 
 运行：
 
@@ -341,7 +341,7 @@ python3 -m unittest backend.tests.test_tool_service -v
 
 预期：失败并报告 `tools.service` 不存在。
 
-- [ ] **步骤 3：定义仓储协议和稳定错误**
+- [x] **步骤 3：定义仓储协议和稳定错误**
 
 `backend/tools/repositories.py`：
 
@@ -399,7 +399,7 @@ class ToolRepository(Protocol):
 
 `backend/tools/service.py` 从注册表导入 `ToolNotFoundError`，并定义 `ToolArgumentsError`、`ToolStateConflictError` 和 `ToolExecutionService`。
 
-- [ ] **步骤 4：实现请求、决定与执行**
+- [x] **步骤 4：实现请求、决定与执行**
 
 服务构造函数：
 
@@ -435,7 +435,7 @@ class ToolExecutionService:
 - `cancel()` 对待确认请求转换终态，对运行任务执行取消。
 - 所有状态变化附带 `ToolAuditEvent`。
 
-- [ ] **步骤 5：运行状态机测试并确认通过**
+- [x] **步骤 5：运行状态机测试并确认通过**
 
 运行：
 
@@ -445,7 +445,7 @@ python3 -m unittest backend.tests.test_tool_service -v
 
 预期：低风险、高风险、并发批准、拒绝、过期、取消、超时和异常测试全部通过。
 
-- [ ] **步骤 6：提交应用状态机**
+- [x] **步骤 6：提交应用状态机**
 
 ```bash
 git add backend/tools/repositories.py backend/tools/service.py backend/tests/test_tool_service.py

@@ -126,7 +126,12 @@ class ToolExecutionService:
             created_at=request.created_at,
             updated_at=now,
         )
-        requested_event = self._audit(record.request_id, "requested", now)
+        requested_event = self._audit(
+            record.request_id,
+            "requested",
+            now,
+            details={"arguments": summary},
+        )
 
         if risk is ToolRisk.LOW:
             await self.repository.create_request(
@@ -420,10 +425,13 @@ class ToolExecutionService:
         request_id: str,
         event_type: str,
         created_at: datetime,
+        *,
+        details: dict[str, Any] | None = None,
     ) -> ToolAuditEvent:
         return ToolAuditEvent(
             request_id=request_id,
             event_type=event_type,
+            details=details or {},
             created_at=created_at,
         )
 

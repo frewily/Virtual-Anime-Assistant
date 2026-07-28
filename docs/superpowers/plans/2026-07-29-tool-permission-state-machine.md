@@ -459,7 +459,7 @@ git commit -m "feat: 实现工具确认与执行状态机"
 - 修改：`backend/infrastructure/sqlite_store.py`
 - 修改：`backend/tests/test_sqlite_store.py`
 
-- [ ] **步骤 1：扩展失败的迁移和仓储测试**
+- [x] **步骤 1：扩展失败的迁移和仓储测试**
 
 将期望表增加：
 
@@ -513,7 +513,7 @@ def test_concurrent_confirmation_claim_has_one_winner():
 
 其余测试使用同一组 `high_risk_records()`，分别断言高风险请求与确认记录同时存在、审计 JSON 中敏感字段等于 `"[REDACTED]"`，以及过期确认在列表查询后转换为 `expired`。
 
-- [ ] **步骤 2：运行 SQLite 测试并确认版本仍为 1**
+- [x] **步骤 2：运行 SQLite 测试并确认版本仍为 1**
 
 运行：
 
@@ -523,7 +523,7 @@ python3 -m unittest backend.tests.test_sqlite_store -v
 
 预期：新表、版本 2 和工具仓储方法相关测试失败。
 
-- [ ] **步骤 3：增加第 2 版迁移**
+- [x] **步骤 3：增加第 2 版迁移**
 
 在 `sqlite_store.py` 增加 `_MIGRATION_2_STATEMENTS`，创建 3 张表和以下索引：
 
@@ -548,7 +548,7 @@ ON tool_audit_events(request_id, created_at);
 2 tool_permissions
 ```
 
-- [ ] **步骤 4：实现异步仓储方法**
+- [x] **步骤 4：实现异步仓储方法**
 
 公开异步方法通过 `asyncio.to_thread()` 调用同步实现。以下操作必须使用单个事务：
 
@@ -558,7 +558,7 @@ ON tool_audit_events(request_id, created_at);
 
 JSON 使用 `json.dumps(payload, ensure_ascii=False, sort_keys=True)`，读取时只接受 JSON 对象。
 
-- [ ] **步骤 5：运行 SQLite 与全量后端测试**
+- [x] **步骤 5：运行 SQLite 与全量后端测试**
 
 运行：
 
@@ -569,7 +569,7 @@ python3 -m unittest discover -s backend/tests -v
 
 预期：SQLite 测试和原有后端测试全部通过。
 
-- [ ] **步骤 6：提交持久化迁移**
+- [x] **步骤 6：提交持久化迁移**
 
 ```bash
 git add backend/infrastructure/sqlite_store.py backend/tests/test_sqlite_store.py

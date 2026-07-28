@@ -1,9 +1,22 @@
 import asyncio
+import json
 import sqlite3
 import threading
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from domain.tools import (
+    ConfirmationState,
+    ToolAuditEvent,
+    ToolConfirmationRecord,
+    ToolDecision,
+    ToolDecisionClaim,
+    ToolRequestRecord,
+    ToolRequestState,
+    ToolRisk,
+    ToolSource,
+)
 from memory.models import MemoryItem, MessageStatus, ModelCallRecord, StoredMessage
 
 
@@ -73,6 +86,77 @@ _MIGRATION_1_STATEMENTS = (
     """,
 )
 
+_MIGRATION_2_STATEMENTS = (
+    """
+    CREATE TABLE tool_requests (
+        id TEXT PRIMARY KEY,
+        correlation_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        title TEXT NOT NULL,
+        risk TEXT NOT NULL CHECK (risk IN ('low', 'high')),
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'created',
+                'pending_confirmation',
+                'running',
+                'succeeded',
+                'failed',
+                'rejected',
+                'expired',
+                'cancelled'
+            )
+        ),
+        arguments_json TEXT NOT NULL,
+        impact TEXT NOT NULL,
+        cancellable INTEGER NOT NULL CHECK (cancellable IN (0, 1)),
+        timeout_seconds REAL NOT NULL CHECK (timeout_seconds > 0),
+        result_json TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX idx_tool_requests_correlation
+    ON tool_requests(correlation_id)
+    """,
+    """
+    CREATE INDEX idx_tool_requests_state_created
+    ON tool_requests(state, created_at)
+    """,
+    """
+    CREATE TABLE tool_confirmations (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE
+            REFERENCES tool_requests(id) ON DELETE CASCADE,
+        state TEXT NOT NULL CHECK (
+            state IN ('pending', 'approved', 'rejected', 'expired', 'cancelled')
+        ),
+        requested_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        decided_at TEXT
+    )
+    """,
+    """
+    CREATE INDEX idx_tool_confirmations_state_expires
+    ON tool_confirmations(state, expires_at)
+    """,
+    """
+    CREATE TABLE tool_audit_events (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL
+            REFERENCES tool_requests(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        details_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX idx_tool_audit_request_created
+    ON tool_audit_events(request_id, created_at)
+    """,
+)
 
 class SqliteStore:
     def __init__(self, database_path: Path) -> None:
@@ -240,6 +324,110 @@ class SqliteStore:
             self._save_model_result_sync,
             record,
             assistant_message,
+        )
+
+    async def create_request(
+        self,
+        record: ToolRequestRecord,
+        events: Sequence[ToolAuditEvent],
+    ) -> None:
+        await asyncio.to_thread(
+            self._create_tool_request_sync,
+            record,
+            events,
+        )
+
+    async def create_confirmation(
+        self,
+        request: ToolRequestRecord,
+        confirmation: ToolConfirmationRecord,
+        events: Sequence[ToolAuditEvent],
+    ) -> None:
+        await asyncio.to_thread(
+            self._create_tool_confirmation_sync,
+            request,
+            confirmation,
+            events,
+        )
+
+    async def claim_decision(
+        self,
+        confirmation_id: str,
+        decision: ToolDecision,
+        now: datetime,
+    ) -> ToolDecisionClaim | None:
+        return await asyncio.to_thread(
+            self._claim_tool_decision_sync,
+            confirmation_id,
+            decision,
+            now,
+        )
+
+    async def transition_request(
+        self,
+        request_id: str,
+        expected: set[ToolRequestState],
+        state: ToolRequestState,
+        *,
+        result: dict | None = None,
+        error_code: str | None = None,
+        event: ToolAuditEvent,
+    ) -> ToolRequestRecord | None:
+        return await asyncio.to_thread(
+            self._transition_tool_request_sync,
+            request_id,
+            expected,
+            state,
+            result,
+            error_code,
+            event,
+        )
+
+    async def cancel_request(
+        self,
+        request_id: str,
+        now: datetime,
+    ) -> ToolRequestRecord | None:
+        return await asyncio.to_thread(
+            self._cancel_tool_request_sync,
+            request_id,
+            now,
+        )
+
+    async def get_request(
+        self,
+        request_id: str,
+    ) -> ToolRequestRecord | None:
+        return await asyncio.to_thread(
+            self._get_tool_request_sync,
+            request_id,
+        )
+
+    async def get_confirmation(
+        self,
+        confirmation_id: str,
+    ) -> ToolConfirmationRecord | None:
+        return await asyncio.to_thread(
+            self._get_tool_confirmation_sync,
+            confirmation_id,
+        )
+
+    async def get_confirmation_for_request(
+        self,
+        request_id: str,
+    ) -> ToolConfirmationRecord | None:
+        return await asyncio.to_thread(
+            self._get_tool_confirmation_for_request_sync,
+            request_id,
+        )
+
+    async def list_pending_confirmations(
+        self,
+        now: datetime,
+    ) -> list[ToolConfirmationRecord]:
+        return await asyncio.to_thread(
+            self._list_pending_tool_confirmations_sync,
+            now,
         )
 
     async def close(self) -> None:
@@ -535,6 +723,443 @@ class SqliteStore:
                 self._connection.rollback()
                 raise
 
+    def _create_tool_request_sync(
+        self,
+        record: ToolRequestRecord,
+        events: Sequence[ToolAuditEvent],
+    ) -> None:
+        self._validate_tool_events(record.request_id, events)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._insert_tool_request(record)
+                for event in events:
+                    self._insert_tool_audit_event(event)
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def _create_tool_confirmation_sync(
+        self,
+        request: ToolRequestRecord,
+        confirmation: ToolConfirmationRecord,
+        events: Sequence[ToolAuditEvent],
+    ) -> None:
+        if confirmation.request_id != request.request_id:
+            raise ValueError("confirmation request does not match request")
+        self._validate_tool_events(request.request_id, events)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._insert_tool_request(request)
+                self._insert_tool_confirmation(confirmation)
+                for event in events:
+                    self._insert_tool_audit_event(event)
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def _claim_tool_decision_sync(
+        self,
+        confirmation_id: str,
+        decision: ToolDecision,
+        now: datetime,
+    ) -> ToolDecisionClaim | None:
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                confirmation_row = self._connection.execute(
+                    "SELECT * FROM tool_confirmations WHERE id = ?",
+                    (confirmation_id,),
+                ).fetchone()
+                if confirmation_row is None:
+                    self._connection.commit()
+                    return None
+
+                confirmation = self._tool_confirmation_from_row(
+                    confirmation_row
+                )
+                request_row = self._connection.execute(
+                    "SELECT * FROM tool_requests WHERE id = ?",
+                    (confirmation.request_id,),
+                ).fetchone()
+                if request_row is None:
+                    raise RuntimeError(
+                        "tool confirmation has no request"
+                    )
+                request = self._tool_request_from_row(request_row)
+                if confirmation.state is not ConfirmationState.PENDING:
+                    self._connection.commit()
+                    return ToolDecisionClaim(
+                        request=request,
+                        confirmation=confirmation,
+                        claimed=False,
+                    )
+
+                if now >= confirmation.expires_at:
+                    confirmation_state = ConfirmationState.EXPIRED
+                    request_state = ToolRequestState.EXPIRED
+                    event_type = "expired"
+                elif decision is ToolDecision.REJECT:
+                    confirmation_state = ConfirmationState.REJECTED
+                    request_state = ToolRequestState.REJECTED
+                    event_type = "rejected"
+                else:
+                    confirmation_state = ConfirmationState.APPROVED
+                    request_state = ToolRequestState.RUNNING
+                    event_type = "approved"
+
+                cursor = self._connection.execute(
+                    """
+                    UPDATE tool_confirmations
+                    SET state = ?, decided_at = ?
+                    WHERE id = ? AND state = 'pending'
+                    """,
+                    (
+                        confirmation_state.value,
+                        now.isoformat(),
+                        confirmation_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    self._connection.rollback()
+                    return self._claim_tool_decision_sync(
+                        confirmation_id,
+                        decision,
+                        now,
+                    )
+                self._connection.execute(
+                    """
+                    UPDATE tool_requests
+                    SET state = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        request_state.value,
+                        now.isoformat(),
+                        request.request_id,
+                    ),
+                )
+                self._insert_tool_audit_event(
+                    ToolAuditEvent(
+                        request_id=request.request_id,
+                        event_type=event_type,
+                        created_at=now,
+                    )
+                )
+                updated_request = request.model_copy(
+                    update={
+                        "state": request_state,
+                        "updated_at": now,
+                    }
+                )
+                updated_confirmation = confirmation.model_copy(
+                    update={
+                        "state": confirmation_state,
+                        "decided_at": now,
+                    }
+                )
+                self._connection.commit()
+                return ToolDecisionClaim(
+                    request=updated_request,
+                    confirmation=updated_confirmation,
+                    claimed=True,
+                )
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def _transition_tool_request_sync(
+        self,
+        request_id: str,
+        expected: set[ToolRequestState],
+        state: ToolRequestState,
+        result: dict | None,
+        error_code: str | None,
+        event: ToolAuditEvent,
+    ) -> ToolRequestRecord | None:
+        if not expected:
+            raise ValueError("expected states cannot be empty")
+        if event.request_id != request_id:
+            raise ValueError("audit event request does not match request")
+        expected_values = sorted(item.value for item in expected)
+        placeholders = ", ".join("?" for _ in expected_values)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                cursor = self._connection.execute(
+                    f"""
+                    UPDATE tool_requests
+                    SET state = ?, result_json = ?, error_code = ?,
+                        updated_at = ?
+                    WHERE id = ? AND state IN ({placeholders})
+                    """,
+                    (
+                        state.value,
+                        self._dump_json(result) if result is not None else None,
+                        error_code,
+                        event.created_at.isoformat(),
+                        request_id,
+                        *expected_values,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    self._connection.commit()
+                    return None
+                self._insert_tool_audit_event(event)
+                row = self._connection.execute(
+                    "SELECT * FROM tool_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                self._connection.commit()
+                return self._tool_request_from_row(row)
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def _cancel_tool_request_sync(
+        self,
+        request_id: str,
+        now: datetime,
+    ) -> ToolRequestRecord | None:
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT * FROM tool_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                if row is None:
+                    self._connection.commit()
+                    return None
+                request = self._tool_request_from_row(row)
+                if request.state not in {
+                    ToolRequestState.PENDING_CONFIRMATION,
+                    ToolRequestState.RUNNING,
+                }:
+                    self._connection.commit()
+                    return request
+
+                self._connection.execute(
+                    """
+                    UPDATE tool_requests
+                    SET state = 'cancelled', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now.isoformat(), request_id),
+                )
+                self._connection.execute(
+                    """
+                    UPDATE tool_confirmations
+                    SET state = 'cancelled', decided_at = ?
+                    WHERE request_id = ? AND state = 'pending'
+                    """,
+                    (now.isoformat(), request_id),
+                )
+                self._insert_tool_audit_event(
+                    ToolAuditEvent(
+                        request_id=request_id,
+                        event_type="cancelled",
+                        created_at=now,
+                    )
+                )
+                self._connection.commit()
+                return request.model_copy(
+                    update={
+                        "state": ToolRequestState.CANCELLED,
+                        "updated_at": now,
+                    }
+                )
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def _get_tool_request_sync(
+        self,
+        request_id: str,
+    ) -> ToolRequestRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tool_requests WHERE id = ?",
+                (request_id,),
+            ).fetchone()
+            return (
+                self._tool_request_from_row(row)
+                if row is not None
+                else None
+            )
+
+    def _get_tool_confirmation_sync(
+        self,
+        confirmation_id: str,
+    ) -> ToolConfirmationRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tool_confirmations WHERE id = ?",
+                (confirmation_id,),
+            ).fetchone()
+            return (
+                self._tool_confirmation_from_row(row)
+                if row is not None
+                else None
+            )
+
+    def _get_tool_confirmation_for_request_sync(
+        self,
+        request_id: str,
+    ) -> ToolConfirmationRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tool_confirmations WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            return (
+                self._tool_confirmation_from_row(row)
+                if row is not None
+                else None
+            )
+
+    def _list_pending_tool_confirmations_sync(
+        self,
+        now: datetime,
+    ) -> list[ToolConfirmationRecord]:
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                expired_rows = self._connection.execute(
+                    """
+                    SELECT id, request_id
+                    FROM tool_confirmations
+                    WHERE state = 'pending' AND expires_at <= ?
+                    """,
+                    (now.isoformat(),),
+                ).fetchall()
+                for row in expired_rows:
+                    self._connection.execute(
+                        """
+                        UPDATE tool_confirmations
+                        SET state = 'expired', decided_at = ?
+                        WHERE id = ? AND state = 'pending'
+                        """,
+                        (now.isoformat(), str(row["id"])),
+                    )
+                    self._connection.execute(
+                        """
+                        UPDATE tool_requests
+                        SET state = 'expired', updated_at = ?
+                        WHERE id = ? AND state = 'pending_confirmation'
+                        """,
+                        (now.isoformat(), str(row["request_id"])),
+                    )
+                    self._insert_tool_audit_event(
+                        ToolAuditEvent(
+                            request_id=str(row["request_id"]),
+                            event_type="expired",
+                            created_at=now,
+                        )
+                    )
+                pending_rows = self._connection.execute(
+                    """
+                    SELECT *
+                    FROM tool_confirmations
+                    WHERE state = 'pending'
+                    ORDER BY requested_at ASC, rowid ASC
+                    """
+                ).fetchall()
+                self._connection.commit()
+                return [
+                    self._tool_confirmation_from_row(row)
+                    for row in pending_rows
+                ]
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def _insert_tool_request(self, record: ToolRequestRecord) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO tool_requests (
+                id, correlation_id, source, tool_name, title, risk, state,
+                arguments_json, impact, cancellable, timeout_seconds,
+                result_json, error_code, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.request_id,
+                record.correlation_id,
+                record.source.value,
+                record.tool_name,
+                record.title,
+                record.risk.value,
+                record.state.value,
+                self._dump_json(record.arguments_summary),
+                record.impact,
+                int(record.cancellable),
+                record.timeout_seconds,
+                (
+                    self._dump_json(record.result)
+                    if record.result is not None
+                    else None
+                ),
+                record.error_code,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat(),
+            ),
+        )
+
+    def _insert_tool_confirmation(
+        self,
+        confirmation: ToolConfirmationRecord,
+    ) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO tool_confirmations (
+                id, request_id, state, requested_at, expires_at, decided_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                confirmation.confirmation_id,
+                confirmation.request_id,
+                confirmation.state.value,
+                confirmation.requested_at.isoformat(),
+                confirmation.expires_at.isoformat(),
+                (
+                    confirmation.decided_at.isoformat()
+                    if confirmation.decided_at is not None
+                    else None
+                ),
+            ),
+        )
+
+    def _insert_tool_audit_event(self, event: ToolAuditEvent) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO tool_audit_events (
+                id, request_id, event_type, details_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.request_id,
+                event.event_type,
+                self._dump_json(event.details),
+                event.created_at.isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _validate_tool_events(
+        request_id: str,
+        events: Sequence[ToolAuditEvent],
+    ) -> None:
+        if any(event.request_id != request_id for event in events):
+            raise ValueError("audit event request does not match request")
+
     def _insert_message(
         self,
         message: StoredMessage,
@@ -628,6 +1253,67 @@ class SqliteStore:
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
         )
 
+    @classmethod
+    def _tool_request_from_row(
+        cls,
+        row: sqlite3.Row,
+    ) -> ToolRequestRecord:
+        return ToolRequestRecord(
+            request_id=str(row["id"]),
+            correlation_id=str(row["correlation_id"]),
+            source=ToolSource(str(row["source"])),
+            tool_name=str(row["tool_name"]),
+            title=str(row["title"]),
+            risk=ToolRisk(str(row["risk"])),
+            state=ToolRequestState(str(row["state"])),
+            arguments_summary=cls._load_json_object(
+                row["arguments_json"]
+            ),
+            impact=str(row["impact"]),
+            cancellable=bool(row["cancellable"]),
+            timeout_seconds=float(row["timeout_seconds"]),
+            result=(
+                cls._load_json_object(row["result_json"])
+                if row["result_json"] is not None
+                else None
+            ),
+            error_code=row["error_code"],
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
+
+    @staticmethod
+    def _tool_confirmation_from_row(
+        row: sqlite3.Row,
+    ) -> ToolConfirmationRecord:
+        return ToolConfirmationRecord(
+            confirmation_id=str(row["id"]),
+            request_id=str(row["request_id"]),
+            state=ConfirmationState(str(row["state"])),
+            requested_at=datetime.fromisoformat(str(row["requested_at"])),
+            expires_at=datetime.fromisoformat(str(row["expires_at"])),
+            decided_at=(
+                datetime.fromisoformat(str(row["decided_at"]))
+                if row["decided_at"] is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _dump_json(payload: dict) -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    @staticmethod
+    def _load_json_object(raw: str) -> dict:
+        value = json.loads(str(raw))
+        if not isinstance(value, dict):
+            raise ValueError("stored JSON must be an object")
+        return value
+
     def _close_sync(self) -> None:
         with self._lock:
             if self._closed:
@@ -677,23 +1363,27 @@ class SqliteStore:
                     "SELECT version FROM schema_migrations"
                 ).fetchall()
             }
-            if 1 in applied_versions:
-                return
-
-            try:
-                self._connection.execute("BEGIN IMMEDIATE")
-                for statement in _MIGRATION_1_STATEMENTS:
-                    self._connection.execute(statement)
-                self._connection.execute(
-                    "INSERT INTO schema_migrations (version, name, applied_at) "
-                    "VALUES (?, ?, ?)",
-                    (
-                        1,
-                        "initial_schema",
-                        datetime.now(timezone.utc).isoformat(),
-                    ),
-                )
-                self._connection.commit()
-            except BaseException:
-                self._connection.rollback()
-                raise
+            migrations = (
+                (1, "initial_schema", _MIGRATION_1_STATEMENTS),
+                (2, "tool_permissions", _MIGRATION_2_STATEMENTS),
+            )
+            for version, name, statements in migrations:
+                if version in applied_versions:
+                    continue
+                try:
+                    self._connection.execute("BEGIN IMMEDIATE")
+                    for statement in statements:
+                        self._connection.execute(statement)
+                    self._connection.execute(
+                        "INSERT INTO schema_migrations "
+                        "(version, name, applied_at) VALUES (?, ?, ?)",
+                        (
+                            version,
+                            name,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    self._connection.commit()
+                except BaseException:
+                    self._connection.rollback()
+                    raise

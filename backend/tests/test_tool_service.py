@@ -295,6 +295,10 @@ class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
             "[REDACTED]",
         )
         self.assertEqual(
+            repository.events[0].details["arguments"]["token"],
+            "[REDACTED]",
+        )
+        self.assertEqual(
             [event.event_type for event in repository.events],
             ["requested", "execution_started", "succeeded"],
         )

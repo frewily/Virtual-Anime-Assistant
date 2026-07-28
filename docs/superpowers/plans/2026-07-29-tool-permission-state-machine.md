@@ -888,7 +888,7 @@ git commit -m "feat: 增加桌面工具确认界面"
 - 修改：`README.md`
 - 修改：`docs/superpowers/plans/2026-07-29-tool-permission-state-machine.md`
 
-- [ ] **步骤 1：更新 README**
+- [x] **步骤 1：更新 README**
 
 说明：
 
@@ -898,7 +898,7 @@ git commit -m "feat: 增加桌面工具确认界面"
 - 工具请求、确认和审计保存在 SQLite，敏感参数不会写入审计。
 - API 只作为本机开发接缝，后续模型和 QQ 通过应用服务接入。
 
-- [ ] **步骤 2：运行完成前验证**
+- [x] **步骤 2：运行完成前验证**
 
 ```bash
 python3 -m compileall -q backend
@@ -930,7 +930,9 @@ npm start
 4. 点击允许一次后只执行 1 次。
 5. Electron 重连后能恢复未过期确认。
 
-- [ ] **步骤 4：提交文档**
+后台验证已确认后端与 Electron 可真实启动、低风险时间工具返回 `succeeded`、WebSocket 成功连接且 Electron 会请求恢复待确认列表。高风险批准、拒绝、仅执行一次和恢复逻辑已由集成测试覆盖；因 macOS 在后台验证期间处于锁屏状态，确认卡片的最终视觉检查留待解锁后完成。
+
+- [x] **步骤 4：提交文档**
 
 ```bash
 git add README.md docs/superpowers/plans/2026-07-29-tool-permission-state-machine.md

@@ -14,6 +14,9 @@ from infrastructure.sqlite_store import SqliteStore
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
+from tools.builtin import build_builtin_registry
+from tools.registry import ToolRegistry
+from tools.service import ToolExecutionService
 
 
 class AssistantRuntime:
@@ -25,6 +28,8 @@ class AssistantRuntime:
         store=None,
         llm_settings: LLMSettings | None = None,
         database_settings: DatabaseSettings | None = None,
+        tool_registry: ToolRegistry | None = None,
+        tool_service: ToolExecutionService | None = None,
     ):
         self.monitor = monitor if monitor is not None else SystemMonitor()
         self.scenario_engine = (
@@ -65,6 +70,17 @@ class AssistantRuntime:
             if store is not None
             else getattr(application, "store", None)
         )
+        self.tool_registry = (
+            tool_registry
+            or getattr(tool_service, "registry", None)
+            or build_builtin_registry()
+        )
+        self.tool_service = tool_service
+        if self.tool_service is None and self.store is not None:
+            self.tool_service = ToolExecutionService(
+                registry=self.tool_registry,
+                repository=self.store,
+            )
         if llm_settings is not None:
             self.llm_mode = (
                 "configured" if llm_settings.enabled else "demo"

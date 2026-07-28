@@ -38,6 +38,14 @@ class ToolStateConflictError(RuntimeError):
     pass
 
 
+class ToolExecutionError(RuntimeError):
+    def __init__(self, error_code: str) -> None:
+        if not error_code or len(error_code) > 100:
+            raise ValueError("tool error code is invalid")
+        super().__init__("tool execution failed")
+        self.error_code = error_code
+
+
 class ToolEventPublisher:
     def __init__(self) -> None:
         self._subscribers: list[ToolEventSubscriber] = []
@@ -357,6 +365,12 @@ class ToolExecutionService:
             final = await self.repository.get_request(record.request_id)
             if record.request_id not in self._cancel_requested:
                 raise
+        except ToolExecutionError as error:
+            final = await self._transition(
+                record,
+                ToolRequestState.FAILED,
+                error.error_code,
+            )
         except Exception as error:
             logger.warning(
                 "Tool execution failed: tool=%s error=%s",

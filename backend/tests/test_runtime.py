@@ -17,6 +17,8 @@ from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
+from tools.registry import ToolRegistry
+from tools.service import ToolExecutionService
 
 
 def llm_settings(*, enabled: bool) -> LLMSettings:
@@ -32,6 +34,46 @@ def llm_settings(*, enabled: bool) -> LLMSettings:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_runtime_registers_only_approved_builtin_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assistant.db"
+            runtime = AssistantRuntime(
+                llm_settings=llm_settings(enabled=False),
+                database_settings=DatabaseSettings(
+                    data_dir=path.parent,
+                    database_path=path,
+                ),
+            )
+
+            self.assertEqual(
+                [
+                    definition.name
+                    for definition in runtime.tool_registry.list()
+                ],
+                ["system.current_time"],
+            )
+            self.assertIsInstance(
+                runtime.tool_service,
+                ToolExecutionService,
+            )
+            asyncio.run(runtime.aclose())
+
+    def test_explicit_tool_dependencies_are_preserved_without_database(self):
+        registry = ToolRegistry()
+        service = Mock()
+        application = Mock(spec=AssistantApplication)
+
+        with patch("core.runtime.SqliteStore") as store_type:
+            runtime = AssistantRuntime(
+                application=application,
+                tool_registry=registry,
+                tool_service=service,
+            )
+
+        store_type.assert_not_called()
+        self.assertIs(runtime.tool_registry, registry)
+        self.assertIs(runtime.tool_service, service)
+
     def test_window_state_is_copied_at_the_runtime_boundary(self):
         runtime = AssistantRuntime(monitor=Mock(), application=Mock())
         report = {"appName": "Code", "appId": "code"}

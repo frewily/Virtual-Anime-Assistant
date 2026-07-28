@@ -585,7 +585,7 @@ git commit -m "feat: 持久化工具确认与审计记录"
 - 修改：`backend/tests/test_runtime.py`
 - 创建：`backend/tests/test_builtin_tools.py`
 
-- [ ] **步骤 1：编写失败的时间工具和运行时测试**
+- [x] **步骤 1：编写失败的时间工具和运行时测试**
 
 ```python
 def test_current_time_defaults_to_local_timezone_and_accepts_iana_zone():
@@ -603,7 +603,7 @@ def test_runtime_registers_only_approved_builtin_tools():
 
 同时测试无效时区返回 `invalid_timezone`，生产注册表没有高风险示例工具。
 
-- [ ] **步骤 2：运行测试并确认内置工具缺失**
+- [x] **步骤 2：运行测试并确认内置工具缺失**
 
 运行：
 
@@ -613,7 +613,7 @@ python3 -m unittest backend.tests.test_builtin_tools backend.tests.test_runtime 
 
 预期：失败并报告 `tools.builtin` 或 `runtime.tool_service` 缺失。
 
-- [ ] **步骤 3：实现并注册时间工具**
+- [x] **步骤 3：实现并注册时间工具**
 
 ```python
 class CurrentTimeArguments(BaseModel):
@@ -632,11 +632,11 @@ async def current_time(arguments: CurrentTimeArguments) -> dict[str, str]:
 
 `build_builtin_registry()` 只注册 `system.current_time`，风险为 `LOW`，超时为 2 秒。
 
-- [ ] **步骤 4：装配运行时**
+- [x] **步骤 4：装配运行时**
 
 `AssistantRuntime` 接受可选 `tool_registry` 和 `tool_service`。默认使用当前 `SqliteStore`、`ToolPolicy`、生产注册表和 `ToolExecutionService`。显式注入 `application` 的现有测试不得因此构造新数据库。
 
-- [ ] **步骤 5：运行相关测试并提交**
+- [x] **步骤 5：运行相关测试并提交**
 
 ```bash
 python3 -m unittest backend.tests.test_builtin_tools backend.tests.test_runtime -v

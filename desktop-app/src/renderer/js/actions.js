@@ -1,46 +1,55 @@
-let live2dModule = null;
-
-function getLive2d() {
-    if (!live2dModule) {
-        live2dModule = require('./live2d');
+const scenarioActions = {
+    'high_cpu': {
+        expression: 'f04',
+        motion: 'tap_body',
+        text: '主人，电脑好热啊...'
+    },
+    'gaming': {
+        expression: 'f06',
+        motion: 'shake',
+        text: '又在玩游戏！'
+    },
+    'late_night': {
+        expression: 'f03',
+        motion: 'pinch_in',
+        text: '好困...主人早点休息吧'
+    },
+    'idle': {
+        expression: 'f01',
+        motion: 'idle',
+        text: null
+    },
+    'happy': {
+        expression: 'f01',
+        motion: 'wave',
+        text: '好开心~'
+    },
+    'curious': {
+        expression: 'f02',
+        motion: 'tilt',
+        text: '嗯？'
     }
-    return live2dModule;
-}
-
-const expressionMap = {
-    'idle': 'f01',
-    'happy': 'f01',
-    'curious': 'f02',
-    'sleepy': 'f03',
-    'worried': 'f04',
-    'surprised': 'f05',
-    'angry': 'f06'
 };
 
-const motionMap = {
-    'idle': 'idle',
-    'wave': 'tap_body',
-    'shake': 'shake',
-    'point': 'tap_head',
-    'yawn': 'pinch_in',
-    'tap_body': 'tap_body',
-    'tap_head': 'tap_head',
-    'tilt': 'tilt'
+function triggerAction(scenarioType) {
+    const action = scenarioActions[scenarioType];
+    if (action) {
+        if (action.expression) {
+            window.setExpression && window.setExpression(action.expression);
+        }
+        if (action.motion) {
+            window.playMotion && window.playMotion(action.motion);
+        }
+        return action.text;
+    }
+    return null;
+}
+
+function getScenarioActions() {
+    return scenarioActions;
+}
+
+module.exports = {
+    triggerAction,
+    getScenarioActions
 };
-
-function applyExpression(name) {
-    const mapped = expressionMap[name] || name;
-    getLive2d().setExpression(mapped);
-}
-
-function applyMotion(name) {
-    const mapped = motionMap[name] || name;
-    getLive2d().playMotion(mapped);
-}
-
-function applyAction(expression, motion) {
-    if (expression) applyExpression(expression);
-    if (motion) applyMotion(motion);
-}
-
-module.exports = { applyExpression, applyMotion, applyAction };

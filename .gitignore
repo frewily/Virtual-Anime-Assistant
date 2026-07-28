@@ -1,15 +1,8 @@
-# Java
-*.class
-*.jar
-*.war
-*.ear
-*.log
-backend/target/
-
 # Node.js
 node_modules/
 desktop-app/dist/
 desktop-app/node_modules/
+desktop-app/src/renderer/dist/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -18,9 +11,9 @@ yarn-error.log*
 __pycache__/
 *.py[cod]
 *$py.class
-agent/.venv/
-agent/venv/
 *.egg-info/
+backend/audio/
+.venv/
 
 # IDE
 .idea/
@@ -36,6 +29,7 @@ Thumbs.db
 # Build
 dist/
 build/
+target/
 *.exe
 
 # Config (sensitive)
@@ -47,6 +41,11 @@ config/local/
 logs/
 *.log
 
+# Local assistant data
+*.db
+*.db-wal
+*.db-shm
+
 # Live2D models (large files)
 desktop-app/src/renderer/assets/models/*.moc3
 desktop-app/src/renderer/assets/models/**/*.moc3
@@ -55,9 +54,6 @@ desktop-app/src/renderer/assets/models/**/*.moc3
 *.wav
 *.mp3
 *.silk
-
-# QQ Bot Docker data
-qq-bot/data/
 
 # Temp
 tmp/

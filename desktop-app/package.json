@@ -1,69 +1,27 @@
 {
   "name": "desktop-assistant",
   "version": "1.0.0",
-  "description": "Live2D 虚拟助手 - 桌面端",
+  "description": "二次元桌面助手 - Live2D 虚拟形象",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron . --no-sandbox --disable-gpu-sandbox",
-    "build": "electron-builder",
-    "pack": "electron-builder --dir"
+    "build:renderer": "esbuild src/renderer/js/renderer.js --bundle --platform=browser --format=iife --outfile=src/renderer/dist/renderer.js",
+    "start": "npm run build:renderer && electron .",
+    "test": "npm run build:renderer && node --check src/main.js && node --check src/preload.js",
+    "build": "npm run build:renderer && electron-builder"
   },
-  "build": {
-    "appId": "com.assistant.desktop",
-    "productName": "小安桌面助手",
-    "copyright": "Copyright © 2025",
-    "files": [
-      "src/**/*",
-      "assets/**/*",
-      "node_modules/**/*",
-      "package.json"
-    ],
-    "mac": {
-      "category": "public.app-category.utilities",
-      "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
-        }
-      ],
-      "icon": "build/icon.icns",
-      "extendInfo": {
-        "LSUIElement": 1
-      }
-    },
-    "dmg": {
-      "title": "小安桌面助手",
-      "contents": [
-        {
-          "x": 130,
-          "y": 220
-        },
-        {
-          "x": 410,
-          "y": 220,
-          "type": "link",
-          "path": "/Applications"
-        }
-      ]
-    },
-    "asar": false
-  },
-  "keywords": [
-    "electron",
-    "live2d",
-    "assistant"
-  ],
+  "keywords": ["electron", "live2d", "assistant"],
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1"
   },
   "dependencies": {
-    "pixi-live2d-display": "^0.4.0",
-    "pixi.js": "^6.5.10"
+    "pixi.js": "^7.3.2",
+    "pixi-live2d-display": "^0.4.0"
+  },
+  "overrides": {
+    "gh-pages": "^6.3.0"
   }
 }

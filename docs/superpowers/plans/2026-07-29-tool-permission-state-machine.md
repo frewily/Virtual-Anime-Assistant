@@ -654,7 +654,7 @@ git commit -m "feat: 注册只读系统时间工具"
 - 修改：`backend/tests/test_integration.py`
 - 修改：`backend/tests/test_api.py`
 
-- [ ] **步骤 1：编写失败的 HTTP 和 WebSocket 集成测试**
+- [x] **步骤 1：编写失败的 HTTP 和 WebSocket 集成测试**
 
 ```python
 def test_low_risk_tool_completes_without_confirmation():
@@ -681,7 +681,7 @@ def test_high_risk_tool_broadcasts_and_waits_for_approval():
 
 继续覆盖批准、拒绝、待确认列表、取消、未知工具和非法参数的安全响应。
 
-- [ ] **步骤 2：运行集成测试并确认路由不存在**
+- [x] **步骤 2：运行集成测试并确认路由不存在**
 
 运行：
 
@@ -691,7 +691,7 @@ python3 -m unittest backend.tests.test_integration backend.tests.test_api -v
 
 预期：工具接口返回 404 或缺少广播函数。
 
-- [ ] **步骤 3：实现安全请求与响应模型**
+- [x] **步骤 3：实现安全请求与响应模型**
 
 `backend/api/tools.py`：
 
@@ -714,7 +714,7 @@ class ToolDecisionBody(BaseModel):
 
 路由将领域错误映射为 404、422 和 409，不返回异常文本。
 
-- [ ] **步骤 4：增加通用 WebSocket JSON 广播**
+- [x] **步骤 4：增加通用 WebSocket JSON 广播**
 
 `backend/api/ws.py`：
 
@@ -732,7 +732,7 @@ async def broadcast_json(payload: dict) -> None:
 
 `broadcast_to_desktop()` 复用该函数。`api.app.lifespan()` 订阅工具事件并转换为 `tool_confirmation_required` JSON。
 
-- [ ] **步骤 5：运行 API、集成和全量测试**
+- [x] **步骤 5：运行 API、集成和全量测试**
 
 ```bash
 python3 -m unittest backend.tests.test_integration backend.tests.test_api -v
@@ -741,7 +741,7 @@ python3 -m unittest discover -s backend/tests -v
 
 预期：新增接口与所有原有测试通过。
 
-- [ ] **步骤 6：提交 API 接缝**
+- [x] **步骤 6：提交 API 接缝**
 
 ```bash
 git add backend/api/tools.py backend/api/app.py backend/api/ws.py backend/tests/test_integration.py backend/tests/test_api.py

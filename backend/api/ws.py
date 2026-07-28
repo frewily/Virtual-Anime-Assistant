@@ -25,8 +25,8 @@ def parse_client_message(raw_message: str) -> dict:
     return message
 
 
-async def broadcast_to_desktop(response: AssistantResponse) -> None:
-    message = json.dumps(response_to_desktop_payload(response), ensure_ascii=False)
+async def broadcast_json(payload: dict) -> None:
+    message = json.dumps(payload, ensure_ascii=False)
     disconnected: list[WebSocket] = []
     for ws in tuple(_sessions):
         try:
@@ -35,6 +35,10 @@ async def broadcast_to_desktop(response: AssistantResponse) -> None:
             disconnected.append(ws)
     for ws in disconnected:
         _sessions.discard(ws)
+
+
+async def broadcast_to_desktop(response: AssistantResponse) -> None:
+    await broadcast_json(response_to_desktop_payload(response))
 
 
 def connected_count() -> int:

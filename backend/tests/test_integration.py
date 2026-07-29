@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, ConfigDict, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -19,6 +20,14 @@ from infrastructure.sqlite_store import SqliteStore
 from llm.errors import ModelServiceError
 from llm.models import ModelReply
 from memory.models import MemoryItem, StoredMessage
+from domain.tools import ToolRisk
+from tools.registry import ToolDefinition
+
+
+class HighRiskArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: str = Field(min_length=1, max_length=100)
 
 
 class ApiIntegrationTests(unittest.TestCase):
@@ -55,6 +64,148 @@ class ApiIntegrationTests(unittest.TestCase):
             scenario_engine=scenario_engine,
         )
         self.app = create_app(runtime_instance=self.runtime)
+
+    def register_high_risk_tool(self):
+        calls: list[str] = []
+
+        async def handler(arguments: HighRiskArguments) -> dict:
+            calls.append(arguments.target)
+            return {"target": arguments.target}
+
+        self.runtime.tool_registry.register(
+            ToolDefinition(
+                name="computer.example",
+                title="示例电脑操作",
+                arguments_model=HighRiskArguments,
+                risk=ToolRisk.HIGH,
+                impact="将修改本机示例目标",
+                timeout_seconds=2,
+                cancellable=True,
+                handler=handler,
+            )
+        )
+        return calls
+
+    def test_low_risk_tool_completes_without_confirmation(self):
+        with TestClient(self.app) as client:
+            response = client.post(
+                "/api/tools/requests",
+                json={
+                    "tool": "system.current_time",
+                    "arguments": {"timezone": "UTC"},
+                    "correlationId": "manual-1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], "succeeded")
+        self.assertEqual(response.json()["result"]["timezone"], "UTC")
+        self.assertIsNone(response.json()["confirmation"])
+
+    def test_high_risk_tool_broadcasts_lists_and_rejects_without_execution(self):
+        calls = self.register_high_risk_tool()
+        payload = {
+            "tool": "computer.example",
+            "arguments": {"target": "example"},
+            "correlationId": "manual-high-1",
+        }
+
+        with TestClient(self.app) as client:
+            with client.websocket_connect("/ws/avatar") as websocket:
+                response = client.post("/api/tools/requests", json=payload)
+                event = websocket.receive_json()
+            listed = client.get("/api/tools/confirmations")
+            confirmation_id = response.json()["confirmation"]["id"]
+            rejected = client.post(
+                f"/api/tools/confirmations/{confirmation_id}/decision",
+                json={"decision": "reject"},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            event["type"],
+            "tool_confirmation_required",
+        )
+        self.assertEqual(
+            event["confirmation"]["requestId"],
+            response.json()["requestId"],
+        )
+        self.assertEqual(len(listed.json()), 1)
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(rejected.json()["state"], "rejected")
+        self.assertEqual(calls, [])
+
+    def test_high_risk_approval_executes_once_and_can_be_queried(self):
+        calls = self.register_high_risk_tool()
+
+        with TestClient(self.app) as client:
+            pending = client.post(
+                "/api/tools/requests",
+                json={
+                    "tool": "computer.example",
+                    "arguments": {"target": "example"},
+                    "correlationId": "manual-high-2",
+                },
+            )
+            confirmation_id = pending.json()["confirmation"]["id"]
+            approved = client.post(
+                f"/api/tools/confirmations/{confirmation_id}/decision",
+                json={"decision": "approve"},
+            )
+            replay = client.post(
+                f"/api/tools/confirmations/{confirmation_id}/decision",
+                json={"decision": "approve"},
+            )
+            queried = client.get(
+                f"/api/tools/requests/{pending.json()['requestId']}"
+            )
+
+        self.assertEqual(approved.json()["state"], "succeeded")
+        self.assertEqual(replay.json()["state"], "succeeded")
+        self.assertEqual(queried.json()["state"], "succeeded")
+        self.assertEqual(calls, ["example"])
+
+    def test_tool_errors_and_cancel_are_safe(self):
+        calls = self.register_high_risk_tool()
+
+        with TestClient(self.app) as client:
+            unknown = client.post(
+                "/api/tools/requests",
+                json={
+                    "tool": "private.unknown",
+                    "arguments": {"api_key": "secret"},
+                },
+            )
+            invalid = client.post(
+                "/api/tools/requests",
+                json={
+                    "tool": "computer.example",
+                    "arguments": {"target": ""},
+                },
+            )
+            pending = client.post(
+                "/api/tools/requests",
+                json={
+                    "tool": "computer.example",
+                    "arguments": {"target": "cancel-me"},
+                },
+            )
+            cancelled = client.post(
+                f"/api/tools/requests/{pending.json()['requestId']}/cancel"
+            )
+            missing = client.get("/api/tools/requests/missing")
+
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(unknown.json(), {"detail": "tool not found"})
+        self.assertNotIn("secret", unknown.text)
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(
+            invalid.json(),
+            {"detail": "tool arguments are invalid"},
+        )
+        self.assertEqual(cancelled.json()["state"], "cancelled")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(calls, [])
 
     def tearDown(self):
         asyncio.run(self.runtime.aclose())

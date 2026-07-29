@@ -13,7 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.chat import ChatMessage, handle_message
 from api.status import get_status
-from api.ws import broadcast_to_desktop, is_allowed_origin, parse_client_message
+from api.ws import (
+    broadcast_json,
+    broadcast_to_desktop,
+    is_allowed_origin,
+    parse_client_message,
+)
 from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
@@ -187,6 +192,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(payload["type"], "action")
         self.assertEqual(payload["correlationId"], "message-1")
         self.assertEqual(payload["motion"], "tap_body")
+
+    def test_broadcast_json_removes_disconnected_sessions(self):
+        class Socket:
+            send_text = AsyncMock(side_effect=RuntimeError("closed"))
+
+        from api import ws
+
+        socket = Socket()
+        ws._sessions.add(socket)
+
+        asyncio.run(broadcast_json({"type": "example"}))
+
+        self.assertNotIn(socket, ws._sessions)
 
     def test_app_duration_scenario_triggers_after_the_configured_minutes(self):
         engine = ScenarioEngine()

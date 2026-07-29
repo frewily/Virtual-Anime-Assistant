@@ -10,16 +10,34 @@ from api.chat import router as chat_router
 from api.conversations import router as conversations_router
 from api.memories import router as memories_router
 from api.status import router as status_router
+from api.tools import (
+    confirmation_payload,
+    request_payload,
+    router as tools_router,
+)
 from api.tts import router as tts_router
 from api.window import router as window_router
 from api.ws import router as ws_router
-from api.ws import broadcast_to_desktop
+from api.ws import broadcast_json, broadcast_to_desktop
 from agent.monitor import run as run_window_monitor
 from core.runtime import AssistantRuntime
 from core.tts import AUDIO_DIR
+from domain.tools import ToolEvent
 
 
 logger = logging.getLogger(__name__)
+
+
+async def broadcast_tool_event(event: ToolEvent) -> None:
+    payload = {
+        "type": event.type.value,
+        "request": request_payload(event.request),
+    }
+    if event.request.confirmation is not None:
+        payload["confirmation"] = confirmation_payload(
+            event.request.confirmation
+        )
+    await broadcast_json(payload)
 
 
 async def scenario_loop(runtime: AssistantRuntime) -> None:
@@ -55,11 +73,16 @@ async def lifespan(app: FastAPI):
         runtime = AssistantRuntime()
         app.state.runtime = runtime
     unsubscribe = None
+    unsubscribe_tools = None
     tasks: list[asyncio.Task] = []
     try:
         unsubscribe = runtime.application.publisher.subscribe(
             broadcast_to_desktop
         )
+        if runtime.tool_service is not None:
+            unsubscribe_tools = runtime.tool_service.publisher.subscribe(
+                broadcast_tool_event
+            )
         _start_background_task(
             supervise("scenario-loop", lambda: scenario_loop(runtime)),
             tasks,
@@ -85,7 +108,11 @@ async def lifespan(app: FastAPI):
             if unsubscribe is not None:
                 unsubscribe()
         finally:
-            await runtime.aclose()
+            try:
+                if unsubscribe_tools is not None:
+                    unsubscribe_tools()
+            finally:
+                await runtime.aclose()
 
 
 def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
@@ -106,6 +133,7 @@ def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
     app.include_router(avatar_router, prefix="/api")
     app.include_router(memories_router, prefix="/api")
     app.include_router(conversations_router, prefix="/api")
+    app.include_router(tools_router, prefix="/api")
     app.include_router(ws_router)
     app.mount(
         "/api/tts/audio",

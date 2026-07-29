@@ -11,6 +11,8 @@ Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron
 - 通过 WebSocket 驱动角色表情、动作和语音播放。
 - 使用统一消息模型和会话编排处理桌面交互与场景事件。默认未启用真实模型时，Demo 网关返回固定演示回复；配置 OpenAI 兼容服务后，聊天改用真实模型。
 - 使用 SQLite 持久化会话、消息、长期记忆和模型调用元数据。
+- 提供可扩展的工具注册表与权限状态机：低风险工具自动执行，高风险工具必须逐次确认，Electron 会展示待确认队列。
+- 使用 SQLite 持久化工具请求、确认状态和脱敏审计事件，并以原子事务处理确认竞争、过期与取消。
 - 通过明确的记忆命令或管理 API 维护长期记忆，并按来源和用户隔离数据。
 - 支持客户端提供 `messageId` 作为幂等键；重复消息不会再次调用模型，冲突或模型故障只返回安全错误。
 - 默认监听 `127.0.0.1` 回环地址，Electron renderer 不具备 Node.js 权限。
@@ -147,6 +149,18 @@ API Key 只从环境变量读取。不要把真实 Key 写入仓库、配置文�
 
 当前模型请求只发送消息和基础生成参数，不启用 Tool Calling，也不控制电脑。模型鉴权、限流、超时、协议和服务错误会转换为有限的安全提示，不返回服务响应体、地址或密钥。
 
+### 工具权限与安全边界
+
+当前生产注册表只包含只读工具 `system.current_time`，用于读取本地或指定 IANA 时区的当前时间。工具风险由后端根据本地注册信息计算，客户端、模型和 QQ 适配器不能自行把高风险操作降级为低风险：
+
+- 低风险工具自动执行，并记录请求、执行与结果状态。
+- 高风险工具创建一次性确认；拒绝、过期或待确认时取消都不会调用处理函数。
+- Electron 通过 WebSocket 接收确认通知，断线重连后从本机 API 恢复未过期确认。
+- 注册为敏感字段的参数会在持久化和界面展示前替换为 `[REDACTED]`，原始参数不会写入审计记录。
+- 超时和内部异常只对外返回稳定错误码，不返回异常正文。
+
+当前没有注册任意 Shell、文件删除、键盘输入、应用启动、QQ 消息发送或其他真实电脑控制工具。后续大模型和 QQ 适配器应直接调用同一应用服务，并使用各自受信任的来源身份；本机 HTTP API 仅作为 Electron 和开发调试接缝，不能用于伪装 QQ 或模型来源。
+
 ### 本地记忆与会话
 
 聊天输入以下命令可以管理当前用户的长期记忆：
@@ -185,6 +199,11 @@ HTTP 和 WebSocket 聊天请求可以提供长度为 1～200 的 `messageId`。�
 | DELETE | `/api/conversations/desktop:local-user` | 永久删除本机会话及关联消息和模型调用记录 |
 | GET | `/api/avatar/status` | 获取桌面端连接状态 |
 | POST | `/api/avatar/action` | 触发角色动作 |
+| POST | `/api/tools/requests` | 提交已注册工具请求；低风险直接执行，高风险返回待确认状态 |
+| GET | `/api/tools/confirmations` | 查询仍待决定且未过期的本机确认 |
+| POST | `/api/tools/confirmations/{confirmation_id}/decision` | 对高风险操作执行一次性批准或拒绝 |
+| GET | `/api/tools/requests/{request_id}` | 查询工具请求的安全状态与结果 |
+| POST | `/api/tools/requests/{request_id}/cancel` | 取消待确认或支持安全取消的运行请求 |
 | WS | `/ws/avatar` | 双向角色消息通道 |
 
 记忆与会话管理 API 当前仅支持本机 `local-user`：来源固定为 `desktop`，可管理的会话固定为 `desktop:local-user`。其他用户或来源的数据不会由这些端点返回或删除。
@@ -199,12 +218,12 @@ npm --prefix desktop-app test
 npm --prefix desktop-app run build:renderer
 ```
 
-完整优化清单与实施状态见 [项目优化实施计划](docs/superpowers/plans/2026-07-22-project-hardening.md)。
+完整优化清单与实施状态见 [项目优化实施计划](docs/superpowers/plans/2026-07-22-project-hardening.md) 和 [工具权限状态机实施计划](docs/superpowers/plans/2026-07-29-tool-permission-state-machine.md)。
 
 ## 项目结构
 
 ```text
-backend/       FastAPI API、统一消息、会话编排、模型网关、SQLite、场景、TTS 和平台监控
+backend/       FastAPI API、统一消息、工具权限、会话编排、模型网关、SQLite、场景、TTS 和平台监控
 config/        声线、回复和场景 YAML 配置
 desktop-app/   Electron 主进程、preload 和 renderer
 docs/          架构规格与分阶段实施计划

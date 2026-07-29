@@ -14,13 +14,27 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from infrastructure.database_config import DatabaseSettings
-from infrastructure.sqlite_store import SqliteStore
+from domain.tools import (
+    ConfirmationState,
+    ToolAuditEvent,
+    ToolConfirmationRecord,
+    ToolDecision,
+    ToolRequestRecord,
+    ToolRequestState,
+    ToolRisk,
+    ToolSource,
+)
+from infrastructure.sqlite_store import (
+    _MIGRATION_1_STATEMENTS,
+    SqliteStore,
+)
 from memory.models import MemoryItem, MessageStatus, ModelCallRecord, StoredMessage
 from memory.repositories import (
     ConversationRepository,
     MemoryRepository,
     ModelCallRepository,
 )
+from tools.repositories import ToolRepository
 
 
 EXPECTED_TABLES = {
@@ -29,11 +43,18 @@ EXPECTED_TABLES = {
     "messages",
     "model_calls",
     "schema_migrations",
+    "tool_audit_events",
+    "tool_confirmations",
+    "tool_requests",
 }
 EXPECTED_INDEXES = {
     "idx_memories_owner",
     "idx_messages_conversation_created",
     "idx_messages_correlation",
+    "idx_tool_audit_request_created",
+    "idx_tool_confirmations_state_expires",
+    "idx_tool_requests_correlation",
+    "idx_tool_requests_state_created",
 }
 EXPECTED_COLUMNS = {
     "schema_migrations": [
@@ -80,12 +101,133 @@ EXPECTED_COLUMNS = {
         ("provider_request_id", "TEXT", 0, 0),
         ("created_at", "TEXT", 1, 0),
     ],
+    "tool_requests": [
+        ("id", "TEXT", 0, 1),
+        ("correlation_id", "TEXT", 1, 0),
+        ("source", "TEXT", 1, 0),
+        ("tool_name", "TEXT", 1, 0),
+        ("title", "TEXT", 1, 0),
+        ("risk", "TEXT", 1, 0),
+        ("state", "TEXT", 1, 0),
+        ("arguments_json", "TEXT", 1, 0),
+        ("impact", "TEXT", 1, 0),
+        ("cancellable", "INTEGER", 1, 0),
+        ("timeout_seconds", "REAL", 1, 0),
+        ("result_json", "TEXT", 0, 0),
+        ("error_code", "TEXT", 0, 0),
+        ("created_at", "TEXT", 1, 0),
+        ("updated_at", "TEXT", 1, 0),
+    ],
+    "tool_confirmations": [
+        ("id", "TEXT", 0, 1),
+        ("request_id", "TEXT", 1, 0),
+        ("state", "TEXT", 1, 0),
+        ("requested_at", "TEXT", 1, 0),
+        ("expires_at", "TEXT", 1, 0),
+        ("decided_at", "TEXT", 0, 0),
+    ],
+    "tool_audit_events": [
+        ("id", "TEXT", 0, 1),
+        ("request_id", "TEXT", 1, 0),
+        ("event_type", "TEXT", 1, 0),
+        ("details_json", "TEXT", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+    ],
 }
 EXPECTED_INDEX_COLUMNS = {
     "idx_messages_conversation_created": ["conversation_id", "created_at"],
     "idx_messages_correlation": ["correlation_id"],
     "idx_memories_owner": ["source", "owner_id", "updated_at"],
+    "idx_tool_requests_correlation": ["correlation_id"],
+    "idx_tool_requests_state_created": ["state", "created_at"],
+    "idx_tool_confirmations_state_expires": ["state", "expires_at"],
+    "idx_tool_audit_request_created": ["request_id", "created_at"],
 }
+
+
+def create_version_one_database(database_path: Path) -> None:
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        for statement in _MIGRATION_1_STATEMENTS:
+            connection.execute(statement)
+        timestamp = "2026-07-29T00:00:00+00:00"
+        connection.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) "
+            "VALUES (1, 'initial_schema', ?)",
+            (timestamp,),
+        )
+        connection.execute(
+            """
+            INSERT INTO conversations (
+                id, source, owner_id, title, created_at, updated_at
+            )
+            VALUES (?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                "conversation-before-upgrade",
+                "desktop",
+                "local-user",
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+def high_risk_records(
+    *,
+    now: datetime | None = None,
+    expires_at: datetime | None = None,
+):
+    created_at = now or datetime(2026, 7, 29, tzinfo=timezone.utc)
+    request = ToolRequestRecord(
+        request_id="tool-request-1",
+        correlation_id="message-1",
+        source=ToolSource.DESKTOP,
+        tool_name="computer.open_app",
+        title="打开应用",
+        risk=ToolRisk.HIGH,
+        state=ToolRequestState.PENDING_CONFIRMATION,
+        arguments_summary={
+            "application": "TextEdit",
+            "token": "[REDACTED]",
+        },
+        impact="将在电脑上打开指定应用",
+        cancellable=True,
+        timeout_seconds=10,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    confirmation = ToolConfirmationRecord(
+        confirmation_id="confirmation-1",
+        request_id=request.request_id,
+        requested_at=created_at,
+        expires_at=expires_at or created_at + timedelta(seconds=60),
+    )
+    events = [
+        ToolAuditEvent(
+            event_id="audit-1",
+            request_id=request.request_id,
+            event_type="requested",
+            details={"arguments": request.arguments_summary},
+            created_at=created_at,
+        ),
+        ToolAuditEvent(
+            event_id="audit-2",
+            request_id=request.request_id,
+            event_type="confirmation_required",
+            created_at=created_at,
+        ),
+    ]
+    return request, confirmation, events
 
 
 class DatabaseSettingsTests(unittest.TestCase):
@@ -245,11 +387,11 @@ class SqliteStoreTests(unittest.TestCase):
         self.store = SqliteStore(self.database_path)
         return self.store
 
-    def test_new_database_has_version_one_and_exact_schema(self):
+    def test_new_database_has_version_two_and_exact_schema(self):
         store = self.open_store()
 
         self.assertTrue(self.database_path.exists())
-        self.assertEqual(store.schema_version, 1)
+        self.assertEqual(store.schema_version, 2)
         self.assertEqual(store.table_names(), EXPECTED_TABLES)
 
         with sqlite3.connect(self.database_path) as connection:
@@ -291,7 +433,7 @@ class SqliteStoreTests(unittest.TestCase):
                     ]
                     self.assertEqual(actual_columns, expected_columns)
 
-    def test_repeated_initialization_does_not_reapply_version_one(self):
+    def test_repeated_initialization_does_not_reapply_migrations(self):
         first = self.open_store()
         asyncio.run(first.close())
         self.store = SqliteStore(self.database_path)
@@ -301,8 +443,24 @@ class SqliteStoreTests(unittest.TestCase):
                 "SELECT version, name FROM schema_migrations"
             ).fetchall()
 
-        self.assertEqual(self.store.schema_version, 1)
-        self.assertEqual(migration_rows, [(1, "initial_schema")])
+        self.assertEqual(self.store.schema_version, 2)
+        self.assertEqual(
+            migration_rows,
+            [(1, "initial_schema"), (2, "tool_permissions")],
+        )
+
+    def test_version_one_database_upgrades_without_data_loss(self):
+        create_version_one_database(self.database_path)
+
+        store = self.open_store()
+
+        self.assertEqual(store.schema_version, 2)
+        with sqlite3.connect(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT source, owner_id FROM conversations WHERE id = ?",
+                ("conversation-before-upgrade",),
+            ).fetchone()
+        self.assertEqual(row, ("desktop", "local-user"))
 
     def test_connection_pragmas_are_configured_without_wal(self):
         store = self.open_store()
@@ -325,7 +483,152 @@ class SqliteStoreTests(unittest.TestCase):
         active_mode = store._connection.execute("PRAGMA journal_mode").fetchone()[0]
 
         self.assertEqual(active_mode.lower(), "delete")
-        self.assertEqual(store.schema_version, 1)
+        self.assertEqual(store.schema_version, 2)
+
+    def test_tool_confirmation_and_redacted_audit_round_trip_atomically(self):
+        store = self.open_store()
+        request, confirmation, events = high_risk_records()
+
+        asyncio.run(
+            store.create_confirmation(request, confirmation, events)
+        )
+
+        stored_request = asyncio.run(store.get_request(request.request_id))
+        stored_confirmation = asyncio.run(
+            store.get_confirmation(confirmation.confirmation_id)
+        )
+        with sqlite3.connect(self.database_path) as connection:
+            details_json = connection.execute(
+                "SELECT details_json FROM tool_audit_events "
+                "WHERE id = 'audit-1'"
+            ).fetchone()[0]
+
+        self.assertEqual(stored_request, request)
+        self.assertEqual(stored_confirmation, confirmation)
+        self.assertIn('"token": "[REDACTED]"', details_json)
+        self.assertNotIn("private-token", details_json)
+
+    def test_concurrent_confirmation_claim_has_one_winner(self):
+        store = self.open_store()
+        request, confirmation, events = high_risk_records()
+        asyncio.run(
+            store.create_confirmation(request, confirmation, events)
+        )
+
+        async def claim_twice():
+            return await asyncio.gather(
+                store.claim_decision(
+                    confirmation.confirmation_id,
+                    ToolDecision.APPROVE,
+                    datetime(2026, 7, 29, 0, 0, 1, tzinfo=timezone.utc),
+                ),
+                store.claim_decision(
+                    confirmation.confirmation_id,
+                    ToolDecision.APPROVE,
+                    datetime(2026, 7, 29, 0, 0, 1, tzinfo=timezone.utc),
+                ),
+            )
+
+        claims = asyncio.run(claim_twice())
+        winners = [claim for claim in claims if claim and claim.claimed]
+
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(
+            winners[0].request.state,
+            ToolRequestState.RUNNING,
+        )
+
+    def test_pending_query_expires_confirmation_and_request(self):
+        store = self.open_store()
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        request, confirmation, events = high_risk_records(
+            now=now,
+            expires_at=now + timedelta(seconds=1),
+        )
+        asyncio.run(
+            store.create_confirmation(request, confirmation, events)
+        )
+
+        pending = asyncio.run(
+            store.list_pending_confirmations(now + timedelta(seconds=2))
+        )
+        expired_request = asyncio.run(
+            store.get_request(request.request_id)
+        )
+        expired_confirmation = asyncio.run(
+            store.get_confirmation(confirmation.confirmation_id)
+        )
+
+        self.assertEqual(pending, [])
+        self.assertEqual(
+            expired_request.state,
+            ToolRequestState.EXPIRED,
+        )
+        self.assertEqual(
+            expired_confirmation.state,
+            ConfirmationState.EXPIRED,
+        )
+
+    def test_low_risk_transition_and_pending_cancel_are_persisted(self):
+        store = self.open_store()
+        request, confirmation, events = high_risk_records()
+        low_risk = request.model_copy(
+            update={
+                "request_id": "low-risk-request",
+                "tool_name": "system.current_time",
+                "title": "读取当前时间",
+                "risk": ToolRisk.LOW,
+                "state": ToolRequestState.RUNNING,
+                "impact": "只读取系统时间",
+            }
+        )
+        low_events = [
+            event.model_copy(
+                update={
+                    "event_id": f"low-{event.event_id}",
+                    "request_id": low_risk.request_id,
+                }
+            )
+            for event in events
+        ]
+        asyncio.run(store.create_request(low_risk, low_events))
+        succeeded = asyncio.run(
+            store.transition_request(
+                low_risk.request_id,
+                {ToolRequestState.RUNNING},
+                ToolRequestState.SUCCEEDED,
+                result={"iso": "2026-07-29T00:00:00+00:00"},
+                event=ToolAuditEvent(
+                    request_id=low_risk.request_id,
+                    event_type="succeeded",
+                ),
+            )
+        )
+
+        self.assertEqual(succeeded.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(
+            succeeded.result,
+            {"iso": "2026-07-29T00:00:00+00:00"},
+        )
+
+        asyncio.run(
+            store.create_confirmation(request, confirmation, events)
+        )
+        cancelled = asyncio.run(
+            store.cancel_request(
+                request.request_id,
+                datetime(2026, 7, 29, 0, 0, 1, tzinfo=timezone.utc),
+            )
+        )
+        cancelled_confirmation = asyncio.run(
+            store.get_confirmation(confirmation.confirmation_id)
+        )
+
+        self.assertEqual(cancelled.state, ToolRequestState.CANCELLED)
+        self.assertEqual(
+            cancelled_confirmation.state,
+            ConfirmationState.CANCELLED,
+        )
 
     def test_schema_enforces_checks_uniqueness_and_foreign_keys(self):
         store = self.open_store()
@@ -924,6 +1227,7 @@ class SqliteStoreTests(unittest.TestCase):
         self.assertIsInstance(store, ConversationRepository)
         self.assertIsInstance(store, MemoryRepository)
         self.assertIsInstance(store, ModelCallRepository)
+        self.assertIsInstance(store, ToolRepository)
 
 
 if __name__ == "__main__":

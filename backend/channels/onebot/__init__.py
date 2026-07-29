@@ -1,6 +1,8 @@
 """OneBot 11 QQ channel adapter."""
 
+from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
+from channels.onebot.connection import OneBotConnectionManager
 from channels.onebot.models import (
     OneBotAction,
     OneBotChannelError,
@@ -10,7 +12,9 @@ from channels.onebot.models import (
 
 __all__ = [
     "OneBotAction",
+    "OneBotChannel",
     "OneBotChannelError",
+    "OneBotConnectionManager",
     "OneBotSettings",
     "ParsedOneBotMessage",
     "QQState",

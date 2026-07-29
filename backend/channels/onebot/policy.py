@@ -91,6 +91,15 @@ class OneBotAdmissionPolicy:
         self,
         message: ParsedOneBotMessage,
     ) -> AdmissionOutcome:
+        authorization = self.authorize(message)
+        if authorization is not AdmissionOutcome.ALLOW:
+            return authorization
+        return self.rate_limit(message)
+
+    def authorize(
+        self,
+        message: ParsedOneBotMessage,
+    ) -> AdmissionOutcome:
         if message.message_type == "private":
             if message.user_id not in self._settings.allowed_user_ids:
                 return AdmissionOutcome.IGNORE
@@ -99,7 +108,12 @@ class OneBotAdmissionPolicy:
             or not message.mentioned_bot
         ):
             return AdmissionOutcome.IGNORE
+        return AdmissionOutcome.ALLOW
 
+    def rate_limit(
+        self,
+        message: ParsedOneBotMessage,
+    ) -> AdmissionOutcome:
         if not self._limiter.allow(message.self_id, message.user_id):
             return AdmissionOutcome.RATE_LIMITED
         return AdmissionOutcome.ALLOW

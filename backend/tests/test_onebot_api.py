@@ -225,10 +225,9 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
 
     @staticmethod
     def _build_tool_runtime(
-        database_path: Path,
+        store: SqliteStore,
         replies: list[ModelReply],
     ):
-        store = SqliteStore(database_path)
         gateway = QueuedFakeGateway(replies)
         registry = build_builtin_registry()
         tool_service = ToolExecutionService(
@@ -268,7 +267,6 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
         runtime.model_tool_orchestrator = orchestrator
         return (
             runtime,
-            store,
             gateway,
             application,
             connection,
@@ -377,33 +375,24 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as directory:
+            store = SqliteStore(Path(directory) / "assistant.db")
             (
                 runtime,
-                store,
                 gateway,
                 application,
                 connection,
                 desktop_subscriber,
             ) = self._build_tool_runtime(
-                Path(directory) / "assistant.db",
-                replies,
+                store=store,
+                replies=replies,
             )
 
             asyncio.run(
                 runtime.qq_channel.handle_event(private_event, self_id=123)
             )
             asyncio.run(
-                runtime.qq_channel.handle_event(private_event, self_id=123)
-            )
-            asyncio.run(
                 runtime.qq_channel.handle_event(
                     unmentioned_group_event,
-                    self_id=123,
-                )
-            )
-            asyncio.run(
-                runtime.qq_channel.handle_event(
-                    mentioned_group_event,
                     self_id=123,
                 )
             )
@@ -461,14 +450,100 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
                 confirmation_count = connection_db.execute(
                     "SELECT COUNT(*) FROM tool_confirmations"
                 ).fetchone()[0]
+                audit_count = connection_db.execute(
+                    "SELECT COUNT(*) FROM tool_audit_events"
+                ).fetchone()[0]
+                persisted_ids = connection_db.execute(
+                    "SELECT id, correlation_id, role FROM messages "
+                    "ORDER BY role, id"
+                ).fetchall()
             self.assertEqual(
                 tool_rows,
                 [("model", "succeeded"), ("model", "succeeded")],
             )
             self.assertEqual(model_call_count, 4)
             self.assertEqual(confirmation_count, 0)
+            self.assertEqual(audit_count, 6)
+            self.assertEqual(len(persisted_ids), 4)
+            self.assertEqual(
+                {
+                    (message_id, correlation_id, role)
+                    for message_id, correlation_id, role in persisted_ids
+                    if role == "user"
+                },
+                {
+                    ("qq:123:901", None, "user"),
+                    ("qq:123:903", None, "user"),
+                },
+            )
+            self.assertEqual(
+                {
+                    correlation_id
+                    for _, correlation_id, role in persisted_ids
+                    if role == "assistant"
+                },
+                {"qq:123:901", "qq:123:903"},
+            )
 
             asyncio.run(runtime.aclose())
+            (
+                replay_runtime,
+                replay_gateway,
+                replay_application,
+                replay_connection,
+                replay_desktop_subscriber,
+            ) = self._build_tool_runtime(
+                store=store,
+                replies=[],
+            )
+            self.assertIsNot(application, replay_application)
+            self.assertIsNot(
+                runtime.qq_channel,
+                replay_runtime.qq_channel,
+            )
+            self.assertIsNot(
+                runtime.qq_channel._recent_messages,
+                replay_runtime.qq_channel._recent_messages,
+            )
+
+            asyncio.run(
+                replay_runtime.qq_channel.handle_event(
+                    private_event,
+                    self_id=123,
+                )
+            )
+            asyncio.run(
+                replay_runtime.qq_channel.handle_event(
+                    mentioned_group_event,
+                    self_id=123,
+                )
+            )
+
+            self.assertEqual(replay_gateway.complete.await_count, 0)
+            self.assertEqual(replay_gateway.requests, [])
+            self.assertEqual(replay_connection.actions, [])
+            replay_desktop_subscriber.assert_not_awaited()
+            with closing(
+                sqlite3.connect(store.database_path)
+            ) as connection_db:
+                replay_counts = connection_db.execute(
+                    "SELECT "
+                    "(SELECT COUNT(*) FROM model_calls), "
+                    "(SELECT COUNT(*) FROM tool_requests), "
+                    "(SELECT COUNT(*) FROM tool_audit_events), "
+                    "(SELECT COUNT(*) FROM messages)"
+                ).fetchone()
+            self.assertEqual(
+                replay_counts,
+                (
+                    model_call_count,
+                    len(tool_rows),
+                    audit_count,
+                    len(persisted_ids),
+                ),
+            )
+
+            asyncio.run(replay_runtime.aclose())
             asyncio.run(store.close())
 
 

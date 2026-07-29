@@ -6,13 +6,14 @@ import unittest
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from application.assistant import AssistantApplication, AssistantStore
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
+from application.model_tools import ModelToolOrchestrationError
 from application.sessions import SessionRegistry
 from domain.messages import (
     ChatContent,
@@ -30,7 +31,12 @@ from llm.errors import (
     ModelRateLimitError,
     ModelTimeoutError,
 )
-from llm.models import ModelReply, ModelRequest
+from llm.models import (
+    ModelAttempt,
+    ModelOrchestrationResult,
+    ModelReply,
+    ModelRequest,
+)
 from infrastructure.sqlite_store import SqliteStore
 from memory.models import (
     MemoryItem,
@@ -623,6 +629,103 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertEqual(second.response_id, first.response_id)
         self.assertEqual(second.text, first.text)
         self.assertEqual(second.kind, ResponseKind.SPEAK)
+
+    def test_chat_uses_orchestrator_and_saves_all_model_attempts(self):
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(
+            return_value=ModelOrchestrationResult(
+                reply=ModelReply(text="现在是 12:00", model="fake"),
+                attempts=[
+                    ModelAttempt(
+                        model="fake",
+                        status="succeeded",
+                        latency_ms=5,
+                        prompt_tokens=10,
+                    ),
+                    ModelAttempt(
+                        model="fake",
+                        status="succeeded",
+                        latency_ms=4,
+                        completion_tokens=3,
+                    ),
+                ],
+            )
+        )
+        store = FakeStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools")
+
+        first = asyncio.run(application.process(item))
+        second = asyncio.run(application.process(item))
+
+        self.assertEqual(first.text, "现在是 12:00")
+        self.assertEqual(second.response_id, first.response_id)
+        self.assertEqual(second.text, first.text)
+        orchestrator.run.assert_awaited_once()
+        self.assertEqual(len(store.model_calls), 2)
+        self.assertEqual(
+            [record.prompt_tokens for record in store.model_calls],
+            [10, None],
+        )
+        self.assertEqual(
+            [record.completion_tokens for record in store.model_calls],
+            [None, 3],
+        )
+        self.assertEqual(len(store.saved_model_results), 1)
+        self.assertEqual(self.llm.requests, [])
+
+    def test_orchestration_failure_saves_attempts_and_hides_internal_error(self):
+        secret = "secret-api-key-and-provider-body"
+        public_error = ModelProtocolError(secret)
+        error = ModelToolOrchestrationError(
+            error=public_error,
+            attempts=[
+                ModelAttempt(
+                    model="fake",
+                    status="succeeded",
+                    latency_ms=5,
+                    prompt_tokens=10,
+                ),
+                ModelAttempt(
+                    model="fake",
+                    status=public_error.code,
+                    latency_ms=4,
+                ),
+            ],
+        )
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(side_effect=error)
+        store = FakeStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools-error")
+
+        result = asyncio.run(application.process(item))
+
+        self.assertEqual(result.kind, ResponseKind.ERROR)
+        self.assertEqual(result.text, "模型服务返回了无法处理的响应。")
+        self.assertNotIn(secret, result.text)
+        self.assertEqual(
+            [record.status for record in store.model_calls],
+            ["succeeded", ModelProtocolError.code],
+        )
+        self.assertEqual(
+            [record.message_id for record in store.model_calls],
+            [item.message_id, item.message_id],
+        )
+        self.assertEqual(list(store.messages), [item.message_id])
+        self.assertEqual(store.saved_model_results, [])
 
     def test_duplicate_user_without_assistant_returns_generic_error(self):
         item = message(message_id="orphan-user")

@@ -20,6 +20,7 @@ from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
+from tools.catalog import ModelToolCatalog
 from tools.registry import ToolRegistry
 from tools.service import ToolExecutionService
 
@@ -152,6 +153,63 @@ class RuntimeTests(unittest.TestCase):
                 ToolExecutionService,
             )
             asyncio.run(runtime.aclose())
+
+    def test_runtime_enables_model_tools_only_when_configured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assistant.db"
+            runtime = AssistantRuntime(
+                llm_settings=llm_settings(
+                    enabled=True,
+                    tool_calling_enabled=True,
+                ),
+                database_settings=DatabaseSettings(
+                    data_dir=path.parent,
+                    database_path=path,
+                ),
+            )
+
+            self.assertIsInstance(
+                runtime.model_tool_catalog,
+                ModelToolCatalog,
+            )
+            self.assertTrue(runtime.model_tool_orchestrator.enabled)
+            self.assertIs(
+                runtime.application.model_orchestrator,
+                runtime.model_tool_orchestrator,
+            )
+            self.assertEqual(
+                [
+                    tool.name
+                    for tool in runtime.model_tool_catalog.list()
+                ],
+                ["system.current_time"],
+            )
+            asyncio.run(runtime.aclose())
+
+    def test_runtime_keeps_tool_calling_disabled_if_either_switch_is_off(self):
+        for enabled, tool_calling_enabled in (
+            (True, False),
+            (False, True),
+            (False, False),
+        ):
+            with self.subTest(
+                enabled=enabled,
+                tool_calling_enabled=tool_calling_enabled,
+            ), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "assistant.db"
+                runtime = AssistantRuntime(
+                    llm_settings=llm_settings(
+                        enabled=enabled,
+                        tool_calling_enabled=tool_calling_enabled,
+                    ),
+                    database_settings=DatabaseSettings(
+                        data_dir=path.parent,
+                        database_path=path,
+                    ),
+                )
+
+                self.assertFalse(runtime.model_tool_orchestrator.enabled)
+                asyncio.run(runtime.aclose())
 
     def test_explicit_tool_dependencies_are_preserved_without_database(self):
         registry = ToolRegistry()

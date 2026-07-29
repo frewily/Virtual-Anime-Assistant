@@ -1,9 +1,13 @@
 from collections.abc import Sequence
-from time import perf_counter
 from typing import Protocol, runtime_checkable
 
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
+from application.model_tools import (
+    ModelToolLimitError,
+    ModelToolOrchestrationError,
+    ModelToolOrchestrator,
+)
 from application.sessions import SessionRegistry, SessionState
 from domain.messages import (
     ChatContent,
@@ -20,9 +24,11 @@ from llm.errors import (
     ModelTimeoutError,
 )
 from llm.gateway import LanguageModelGateway
-from llm.models import ModelRequest
+from llm.models import ModelAttempt, ModelRequest
 from memory.commands import MemoryCommandType, parse_memory_command
 from memory.models import MemoryItem, MessageStatus, ModelCallRecord, StoredMessage
+from tools.catalog import ModelToolCatalog
+from tools.registry import ToolRegistry
 
 
 @runtime_checkable
@@ -104,6 +110,7 @@ class AssistantApplication:
         context_builder: ConversationContextBuilder,
         publisher: ResponsePublisher | None = None,
         sessions: SessionRegistry | None = None,
+        model_orchestrator: ModelToolOrchestrator | None = None,
     ):
         self.tts = tts
         self.llm = llm
@@ -111,6 +118,12 @@ class AssistantApplication:
         self.context_builder = context_builder
         self.publisher = publisher or ResponsePublisher()
         self.sessions = sessions or SessionRegistry()
+        self.model_orchestrator = model_orchestrator or ModelToolOrchestrator(
+            gateway=llm,
+            catalog=ModelToolCatalog(ToolRegistry()),
+            tool_service=None,
+            enabled=False,
+        )
 
     async def process(self, message: IncomingMessage) -> AssistantResponse:
         return await self.sessions.run(message, self._handle_in_session)
@@ -241,26 +254,22 @@ class AssistantApplication:
             correlation_id=message.message_id,
             messages=self.context_builder.build(history, memories),
         )
-        started_at = perf_counter()
         try:
-            reply = await self.llm.complete(request)
-        except ModelGatewayError as exc:
-            latency_ms = self._elapsed_ms(started_at)
-            await self.store.record_model_call(
-                ModelCallRecord(
-                    message_id=user_message.id,
-                    model=self.llm.model_name,
-                    status=exc.code,
-                    latency_ms=latency_ms,
+            orchestration = await self.model_orchestrator.run(request)
+        except (ModelToolOrchestrationError, ModelToolLimitError) as exc:
+            for attempt in exc.attempts:
+                await self.store.record_model_call(
+                    self._model_call_record(user_message.id, attempt)
                 )
-            )
+            public_error = exc.public_error or exc
             return AssistantResponse(
                 correlation_id=message.message_id,
                 conversation_id=message.conversation_id,
                 kind=ResponseKind.ERROR,
-                text=self._safe_model_error(exc),
+                text=self._safe_model_error(public_error),
             )
 
+        reply = orchestration.reply
         response = AssistantResponse(
             correlation_id=message.message_id,
             conversation_id=message.conversation_id,
@@ -275,16 +284,11 @@ class AssistantApplication:
             content=reply.text,
             model=reply.model,
         )
-        record = ModelCallRecord(
-            message_id=user_message.id,
-            model=reply.model,
-            status="succeeded",
-            latency_ms=self._elapsed_ms(started_at),
-            prompt_tokens=reply.prompt_tokens,
-            completion_tokens=reply.completion_tokens,
-            provider_request_id=reply.provider_request_id,
-        )
-        await self.store.save_model_result(record, assistant_message)
+        records = [
+            self._model_call_record(user_message.id, attempt)
+            for attempt in orchestration.attempts
+        ]
+        await self.store.save_model_results(records, assistant_message)
         return response
 
     async def _replay_response(
@@ -355,8 +359,19 @@ class AssistantApplication:
         return response
 
     @staticmethod
-    def _elapsed_ms(started_at: float) -> int:
-        return max(0, int((perf_counter() - started_at) * 1000))
+    def _model_call_record(
+        message_id: str,
+        attempt: ModelAttempt,
+    ) -> ModelCallRecord:
+        return ModelCallRecord(
+            message_id=message_id,
+            model=attempt.model,
+            status=attempt.status,
+            latency_ms=attempt.latency_ms,
+            prompt_tokens=attempt.prompt_tokens,
+            completion_tokens=attempt.completion_tokens,
+            provider_request_id=attempt.provider_request_id,
+        )
 
     @staticmethod
     def _safe_model_error(error: ModelGatewayError) -> str:

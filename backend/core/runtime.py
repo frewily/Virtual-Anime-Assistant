@@ -5,6 +5,7 @@ import inspect
 from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
+from application.model_tools import ModelToolOrchestrator
 from channels.desktop import scenario_result_to_message
 from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
@@ -18,6 +19,7 @@ from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
 from tools.builtin import build_builtin_registry
+from tools.catalog import ModelToolCatalog
 from tools.registry import ToolRegistry
 from tools.service import ToolExecutionService
 
@@ -43,8 +45,9 @@ class AssistantRuntime:
             if scenario_engine is not None
             else ScenarioEngine()
         )
+        settings = llm_settings
         if application is None:
-            settings = llm_settings or LLMSettings.from_env()
+            settings = settings or LLMSettings.from_env()
             database = (
                 database_settings or DatabaseSettings.from_env()
                 if store is None
@@ -63,14 +66,6 @@ class AssistantRuntime:
             publisher = ResponsePublisher()
             if store is None:
                 store = SqliteStore(database.database_path)
-            application = AssistantApplication(
-                tts=tts,
-                llm=llm,
-                store=store,
-                context_builder=context_builder,
-                publisher=publisher,
-            )
-        self.application = application
         self.store = (
             store
             if store is not None
@@ -87,6 +82,30 @@ class AssistantRuntime:
                 registry=self.tool_registry,
                 repository=self.store,
             )
+        self.model_tool_catalog = ModelToolCatalog(self.tool_registry)
+        self.model_tool_orchestrator = (
+            getattr(application, "model_orchestrator", None)
+            if application is not None
+            else ModelToolOrchestrator(
+                gateway=llm,
+                catalog=self.model_tool_catalog,
+                tool_service=self.tool_service,
+                enabled=(
+                    settings.enabled
+                    and settings.tool_calling_enabled
+                ),
+            )
+        )
+        if application is None:
+            application = AssistantApplication(
+                tts=tts,
+                llm=llm,
+                store=store,
+                context_builder=context_builder,
+                publisher=publisher,
+                model_orchestrator=self.model_tool_orchestrator,
+            )
+        self.application = application
         self.qq_settings = qq_settings or OneBotSettings.from_env()
         self.qq_connection = (
             qq_connection

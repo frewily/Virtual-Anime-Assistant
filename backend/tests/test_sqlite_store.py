@@ -1173,6 +1173,169 @@ class SqliteStoreTests(unittest.TestCase):
         self.assertEqual(assistant_count, 0)
         self.assertEqual(stored_record, original_record)
 
+    def test_save_model_results_persists_all_calls_and_assistant_atomically(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+            )
+        )
+        asyncio.run(
+            store.save_message(
+                StoredMessage(
+                    id="user-1",
+                    conversation_id="conversation-1",
+                    role="user",
+                    content="request",
+                )
+            )
+        )
+        assistant = StoredMessage(
+            id="assistant-batch",
+            conversation_id="conversation-1",
+            correlation_id="user-1",
+            role="assistant",
+            content="final response",
+        )
+        records = [
+            ModelCallRecord(
+                id="call-1",
+                message_id="user-1",
+                model="demo-model",
+                status="succeeded",
+                latency_ms=10,
+                prompt_tokens=10,
+            ),
+            ModelCallRecord(
+                id="call-2",
+                message_id="user-1",
+                model="demo-model",
+                status="succeeded",
+                latency_ms=20,
+                completion_tokens=5,
+            ),
+        ]
+
+        asyncio.run(store.save_model_results(records, assistant))
+
+        with sqlite3.connect(self.database_path) as connection:
+            stored_ids = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT id FROM model_calls WHERE message_id = ? "
+                    "ORDER BY created_at, rowid",
+                    ("user-1",),
+                )
+            ]
+            assistant_count = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE id = ?",
+                (assistant.id,),
+            ).fetchone()[0]
+
+        self.assertEqual(stored_ids, ["call-1", "call-2"])
+        self.assertEqual(assistant_count, 1)
+
+    def test_save_model_results_rolls_back_everything_on_duplicate_call(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+            )
+        )
+        asyncio.run(
+            store.save_message(
+                StoredMessage(
+                    id="user-1",
+                    conversation_id="conversation-1",
+                    role="user",
+                    content="request",
+                )
+            )
+        )
+        existing = ModelCallRecord(
+            id="duplicate-call",
+            message_id="user-1",
+            model="demo-model",
+            status="succeeded",
+            latency_ms=10,
+        )
+        asyncio.run(store.record_model_call(existing))
+        assistant = StoredMessage(
+            id="assistant-batch",
+            conversation_id="conversation-1",
+            correlation_id="user-1",
+            role="assistant",
+            content="final response",
+        )
+        records = [
+            ModelCallRecord(
+                id="new-call",
+                message_id="user-1",
+                model="demo-model",
+                status="succeeded",
+                latency_ms=10,
+            ),
+            ModelCallRecord(
+                id="duplicate-call",
+                message_id="user-1",
+                model="demo-model",
+                status="succeeded",
+                latency_ms=20,
+            ),
+        ]
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            asyncio.run(store.save_model_results(records, assistant))
+
+        with sqlite3.connect(self.database_path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?",
+                    (assistant.id,),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM model_calls WHERE id = 'new-call'"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_save_model_results_rejects_empty_batch_before_saving_assistant(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+            )
+        )
+        assistant = StoredMessage(
+            id="assistant-empty",
+            conversation_id="conversation-1",
+            role="assistant",
+            content="must not be saved",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "at least one model call is required",
+        ):
+            asyncio.run(store.save_model_results([], assistant))
+
+        with sqlite3.connect(self.database_path) as connection:
+            assistant_count = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE id = ?",
+                (assistant.id,),
+            ).fetchone()[0]
+
+        self.assertEqual(assistant_count, 0)
+
     def test_delete_conversation_cascades_messages_and_model_calls(self):
         store = self.open_store()
         asyncio.run(

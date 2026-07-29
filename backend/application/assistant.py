@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from time import perf_counter
 from typing import Protocol, runtime_checkable
 
@@ -73,6 +74,12 @@ class AssistantStore(Protocol):
     async def save_model_result(
         self,
         record: ModelCallRecord,
+        assistant_message: StoredMessage,
+    ) -> None: ...
+
+    async def save_model_results(
+        self,
+        records: Sequence[ModelCallRecord],
         assistant_message: StoredMessage,
     ) -> None: ...
 

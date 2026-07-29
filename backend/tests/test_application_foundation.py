@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -147,7 +148,9 @@ class FakeStore:
         self.memories: dict[tuple[str, str, str], MemoryItem] = {}
         self.model_calls: list[ModelCallRecord] = []
         self.recent_limits: list[int] = []
-        self.saved_model_results: list[tuple[ModelCallRecord, StoredMessage]] = []
+        self.saved_model_results: list[
+            tuple[list[ModelCallRecord], StoredMessage]
+        ] = []
 
     async def claim_conversation(
         self,
@@ -242,9 +245,29 @@ class FakeStore:
         record: ModelCallRecord,
         assistant_message: StoredMessage,
     ) -> None:
-        self.model_calls.append(record)
+        await self.save_model_results((record,), assistant_message)
+
+    async def save_model_results(
+        self,
+        records: Sequence[ModelCallRecord],
+        assistant_message: StoredMessage,
+    ) -> None:
+        batch = list(records)
+        if not batch:
+            raise ValueError("at least one model call is required")
+
+        existing_ids = {record.id for record in self.model_calls}
+        batch_ids = [record.id for record in batch]
+        if (
+            assistant_message.id in self.messages
+            or existing_ids.intersection(batch_ids)
+            or len(set(batch_ids)) != len(batch_ids)
+        ):
+            raise ValueError("duplicate model result")
+
+        self.model_calls.extend(batch)
         self.messages[assistant_message.id] = assistant_message
-        self.saved_model_results.append((record, assistant_message))
+        self.saved_model_results.append((batch, assistant_message))
 
 
 class AssistantApplicationTests(unittest.TestCase):
@@ -307,6 +330,74 @@ class AssistantApplicationTests(unittest.TestCase):
     def test_fake_store_satisfies_minimal_application_protocol(self):
         self.assertIsInstance(self.store, AssistantStore)
 
+    def test_fake_store_saves_model_results_in_stable_batch_order(self):
+        assistant = StoredMessage(
+            id="assistant-batch",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="final response",
+        )
+        records = [
+            ModelCallRecord(
+                id="call-1",
+                message_id="message-1",
+                model="fake-model",
+                status="succeeded",
+                latency_ms=10,
+            ),
+            ModelCallRecord(
+                id="call-2",
+                message_id="message-1",
+                model="fake-model",
+                status="succeeded",
+                latency_ms=20,
+            ),
+        ]
+
+        asyncio.run(self.store.save_model_results(records, assistant))
+
+        self.assertEqual(self.store.model_calls, records)
+        self.assertEqual(
+            self.store.saved_model_results,
+            [(records, assistant)],
+        )
+        self.assertIs(self.store.messages[assistant.id], assistant)
+
+    def test_fake_store_rejects_invalid_batch_without_partial_state(self):
+        existing = ModelCallRecord(
+            id="duplicate-call",
+            message_id="message-1",
+            model="fake-model",
+            status="succeeded",
+            latency_ms=5,
+        )
+        self.store.model_calls.append(existing)
+        assistant = StoredMessage(
+            id="assistant-batch",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="must not be saved",
+        )
+        records = [
+            ModelCallRecord(
+                id="new-call",
+                message_id="message-1",
+                model="fake-model",
+                status="succeeded",
+                latency_ms=10,
+            ),
+            existing,
+        ]
+
+        with self.assertRaisesRegex(ValueError, "duplicate model result"):
+            asyncio.run(self.store.save_model_results(records, assistant))
+
+        self.assertEqual(self.store.model_calls, [existing])
+        self.assertNotIn(assistant.id, self.store.messages)
+        self.assertEqual(self.store.saved_model_results, [])
+
     def test_chat_persists_messages_model_metadata_context_and_publishes(self):
         previous_user = StoredMessage(
             id="previous-user",
@@ -354,7 +445,9 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertIn("上一句", request_text)
         self.assertIn("喜欢红茶", request_text)
         self.assertNotIn("不应出现", request_text)
-        record, assistant = self.store.saved_model_results[0]
+        records, assistant = self.store.saved_model_results[0]
+        self.assertEqual(len(records), 1)
+        record = records[0]
         self.assertEqual(record.message_id, item.message_id)
         self.assertEqual(record.status, "succeeded")
         self.assertEqual(record.model, "fake-model-v2")

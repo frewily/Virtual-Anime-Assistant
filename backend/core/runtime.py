@@ -6,6 +6,9 @@ from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
 from channels.desktop import scenario_result_to_message
+from channels.onebot.channel import OneBotChannel
+from channels.onebot.config import OneBotSettings
+from channels.onebot.connection import OneBotConnectionManager
 from core.monitor import SystemMonitor
 from core.scenario import ScenarioEngine
 from core.tts import TTSService
@@ -30,6 +33,9 @@ class AssistantRuntime:
         database_settings: DatabaseSettings | None = None,
         tool_registry: ToolRegistry | None = None,
         tool_service: ToolExecutionService | None = None,
+        qq_settings: OneBotSettings | None = None,
+        qq_connection: OneBotConnectionManager | None = None,
+        qq_channel: OneBotChannel | None = None,
     ):
         self.monitor = monitor if monitor is not None else SystemMonitor()
         self.scenario_engine = (
@@ -81,6 +87,25 @@ class AssistantRuntime:
                 registry=self.tool_registry,
                 repository=self.store,
             )
+        self.qq_settings = qq_settings or OneBotSettings.from_env()
+        self.qq_connection = (
+            qq_connection
+            if qq_connection is not None
+            else OneBotConnectionManager(
+                action_timeout_seconds=(
+                    self.qq_settings.action_timeout_seconds
+                ),
+            )
+        )
+        self.qq_channel = (
+            qq_channel
+            if qq_channel is not None
+            else OneBotChannel(
+                application=self.application,
+                settings=self.qq_settings,
+                connection=self.qq_connection,
+            )
+        )
         if llm_settings is not None:
             self.llm_mode = (
                 "configured" if llm_settings.enabled else "demo"
@@ -96,6 +121,8 @@ class AssistantRuntime:
             )
         self._current_window: dict | None = None
         self._closed = False
+        self._qq_closed = False
+        self._store_closed = self.store is None
 
     def report_window(self, window: dict) -> None:
         self._current_window = dict(window)
@@ -133,9 +160,28 @@ class AssistantRuntime:
     async def aclose(self) -> None:
         if self._closed:
             return
-        close = getattr(self.store, "close", None)
-        if close is not None:
-            result = close()
-            if inspect.isawaitable(result):
-                await result
-        self._closed = True
+        first_error: BaseException | None = None
+        if not self._qq_closed:
+            try:
+                await self.qq_connection.aclose()
+            except BaseException as exc:
+                first_error = exc
+            else:
+                self._qq_closed = True
+
+        if not self._store_closed:
+            close = getattr(self.store, "close", None)
+            try:
+                if close is not None:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            else:
+                self._store_closed = True
+
+        self._closed = self._qq_closed and self._store_closed
+        if first_error is not None:
+            raise first_error

@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.monitor import ForegroundWindowMonitor
 from api.app import create_app, lifespan
 from application.assistant import AssistantApplication
+from channels.onebot.channel import OneBotChannel
+from channels.onebot.config import OneBotSettings
+from channels.onebot.connection import OneBotConnectionManager
 from core.runtime import AssistantRuntime
 from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
@@ -34,6 +37,93 @@ def llm_settings(*, enabled: bool) -> LLMSettings:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_runtime_builds_side_effect_free_disabled_qq_components(self):
+        application = Mock(spec=AssistantApplication)
+
+        runtime = AssistantRuntime(
+            application=application,
+            qq_settings=OneBotSettings(),
+        )
+
+        self.assertFalse(runtime.qq_settings.enabled)
+        self.assertIsInstance(
+            runtime.qq_connection,
+            OneBotConnectionManager,
+        )
+        self.assertIsInstance(runtime.qq_channel, OneBotChannel)
+        self.assertFalse(runtime.qq_connection.connected)
+        asyncio.run(runtime.aclose())
+
+    def test_explicit_qq_dependencies_are_preserved(self):
+        settings = OneBotSettings(
+            enabled=True,
+            access_token="0123456789abcdef",
+            allowed_group_ids=frozenset({789}),
+        )
+        connection = Mock()
+        connection.aclose = AsyncMock()
+        channel = Mock()
+
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            qq_settings=settings,
+            qq_connection=connection,
+            qq_channel=channel,
+        )
+
+        self.assertIs(runtime.qq_settings, settings)
+        self.assertIs(runtime.qq_connection, connection)
+        self.assertIs(runtime.qq_channel, channel)
+        asyncio.run(runtime.aclose())
+        connection.aclose.assert_awaited_once()
+
+    def test_misconfigured_qq_does_not_block_core_runtime(self):
+        settings = OneBotSettings(
+            enabled=True,
+            configuration_error="qq_misconfigured",
+        )
+        application = Mock(spec=AssistantApplication)
+
+        runtime = AssistantRuntime(
+            application=application,
+            qq_settings=settings,
+        )
+
+        self.assertIs(runtime.application, application)
+        self.assertEqual(
+            runtime.qq_settings.configuration_error,
+            "qq_misconfigured",
+        )
+        asyncio.run(runtime.aclose())
+
+    def test_close_attempts_qq_before_store_and_is_idempotent(self):
+        events: list[str] = []
+        connection = Mock()
+        store = Mock()
+
+        async def close_qq():
+            events.append("qq")
+
+        async def close_store():
+            events.append("store")
+
+        connection.aclose = AsyncMock(side_effect=close_qq)
+        store.close = AsyncMock(side_effect=close_store)
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            store=store,
+            qq_settings=OneBotSettings(),
+            qq_connection=connection,
+            qq_channel=Mock(),
+        )
+
+        asyncio.run(runtime.aclose())
+        asyncio.run(runtime.aclose())
+
+        self.assertEqual(events, ["qq", "store"])
+        connection.aclose.assert_awaited_once()
+        store.close.assert_awaited_once()
+
     def test_runtime_registers_only_approved_builtin_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "assistant.db"

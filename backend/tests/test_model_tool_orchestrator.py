@@ -25,6 +25,7 @@ from llm.models import (
     ModelRole,
     ModelToolCall,
     ModelToolDefinition,
+    ModelToolResult,
 )
 from tools.registry import ToolNotFoundError
 from tools.service import ToolArgumentsError
@@ -292,7 +293,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, ["example.first", "example.second"])
 
-    async def test_duplicate_call_id_across_rounds_is_protocol_error(self):
+    async def test_duplicate_call_id_across_rounds_preserves_attempts(self):
         repeated = tool_call("duplicate-id")
         gateway = FakeGateway(
             [
@@ -303,18 +304,24 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         service = AsyncMock()
         service.request.side_effect = lambda request: succeeded_view(request)
 
-        with self.assertRaisesRegex(
-            ModelProtocolError,
-            "duplicate tool call id",
-        ):
+        with self.assertRaises(ModelToolOrchestrationError) as raised:
             await configured_orchestrator(
                 gateway,
                 service,
             ).run(base_request())
 
+        error = raised.exception
+        self.assertEqual(error.code, "protocol_error")
+        self.assertIsInstance(error.public_error, ModelProtocolError)
+        self.assertEqual(str(error.public_error), "duplicate tool call id")
+        self.assertEqual(len(error.attempts), 2)
+        self.assertEqual(
+            [attempt.status for attempt in error.attempts],
+            ["succeeded", "succeeded"],
+        )
         self.assertEqual(service.request.await_count, 1)
 
-    async def test_duplicate_call_id_in_same_reply_is_protocol_error(self):
+    async def test_duplicate_call_id_in_same_reply_preserves_attempt(self):
         gateway = FakeGateway(
             [
                 ModelReply(
@@ -328,16 +335,44 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
         service = AsyncMock()
 
-        with self.assertRaisesRegex(
-            ModelProtocolError,
-            "duplicate tool call id",
-        ):
+        with self.assertRaises(ModelToolOrchestrationError) as raised:
             await configured_orchestrator(
                 gateway,
                 service,
             ).run(base_request())
 
+        error = raised.exception
+        self.assertEqual(error.code, "protocol_error")
+        self.assertIsInstance(error.public_error, ModelProtocolError)
+        self.assertEqual(str(error.public_error), "duplicate tool call id")
+        self.assertEqual(len(error.attempts), 1)
+        self.assertEqual(error.attempts[0].status, "succeeded")
         service.request.assert_not_awaited()
+
+    async def test_duplicate_on_round_limit_returns_limit_with_all_attempts(self):
+        repeated = tool_call("duplicate-id")
+        gateway = FakeGateway(
+            [
+                ModelReply(tool_calls=[repeated], model="fake"),
+                ModelReply(
+                    tool_calls=[tool_call("second-id")],
+                    model="fake",
+                ),
+                ModelReply(tool_calls=[repeated], model="fake"),
+            ]
+        )
+        service = AsyncMock()
+        service.request.side_effect = lambda request: succeeded_view(request)
+
+        with self.assertRaises(ModelToolLimitError) as raised:
+            await configured_orchestrator(
+                gateway,
+                service,
+            ).run(base_request())
+
+        self.assertEqual(raised.exception.code, "model_tool_round_limit")
+        self.assertEqual(len(raised.exception.attempts), 3)
+        self.assertEqual(service.request.await_count, 2)
 
     async def test_model_round_limit_stops_before_last_reply_tools_execute(self):
         gateway = FakeGateway(
@@ -392,6 +427,116 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "model_tool_call_limit")
         self.assertEqual(len(raised.exception.attempts), 2)
         self.assertEqual(service.request.await_count, 3)
+
+    async def test_model_request_messages_are_independent_round_snapshots(self):
+        gateway = FakeGateway(
+            [
+                ModelReply(
+                    tool_calls=[tool_call("snapshot-call")],
+                    model="fake",
+                ),
+                ModelReply(text="完成", model="fake"),
+            ]
+        )
+        service = AsyncMock()
+        service.request.side_effect = lambda request: succeeded_view(request)
+
+        await configured_orchestrator(
+            gateway,
+            service,
+        ).run(base_request())
+
+        first_messages = gateway.requests[0].messages
+        second_messages = gateway.requests[1].messages
+        self.assertIsNot(first_messages, second_messages)
+        self.assertEqual(len(first_messages), 1)
+        self.assertEqual(len(second_messages), 3)
+        self.assertEqual(first_messages[0].role, ModelRole.USER)
+        self.assertEqual(second_messages[-1].role, ModelRole.TOOL)
+
+    async def test_exact_limit_tool_json_is_preserved(self):
+        call = tool_call("near-limit")
+        empty_payload = ModelToolResult(
+            call_id=call.id,
+            name=call.name,
+            state=ToolRequestState.SUCCEEDED.value,
+            result={"payload": ""},
+        ).model_dump(mode="json")
+        envelope_size = len(
+            json.dumps(
+                empty_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        result_payload = "猫" * (12_000 - envelope_size)
+        gateway = FakeGateway(
+            [
+                ModelReply(tool_calls=[call], model="fake"),
+                ModelReply(text="完成", model="fake"),
+            ]
+        )
+        service = AsyncMock()
+        service.request.return_value = ToolRequestView(
+            request_id="near-limit-request",
+            correlation_id="near-limit-correlation",
+            tool=call.name,
+            state=ToolRequestState.SUCCEEDED,
+            result={"payload": result_payload},
+        )
+
+        result = await configured_orchestrator(
+            gateway,
+            service,
+        ).run(base_request())
+
+        content = gateway.requests[1].messages[-1].content
+        payload = json.loads(content)
+        self.assertEqual(len(content), 12_000)
+        self.assertEqual(payload["result"]["payload"], result_payload)
+        self.assertEqual(len(result.attempts), 2)
+
+    async def test_oversized_tool_json_uses_deterministic_result_marker(self):
+        call = tool_call("over-limit")
+        gateway = FakeGateway(
+            [
+                ModelReply(tool_calls=[call], model="fake"),
+                ModelReply(text="完成", model="fake"),
+            ]
+        )
+        service = AsyncMock()
+        service.request.return_value = ToolRequestView(
+            request_id="over-limit-request",
+            correlation_id="over-limit-correlation",
+            tool=call.name,
+            state=ToolRequestState.FAILED,
+            result={"payload": "猫" * 12_000},
+            error_code="result_too_large_for_provider",
+        )
+
+        result = await configured_orchestrator(
+            gateway,
+            service,
+        ).run(base_request())
+
+        content = gateway.requests[1].messages[-1].content
+        payload = json.loads(content)
+        self.assertLessEqual(len(content), 12_000)
+        self.assertEqual(
+            payload,
+            {
+                "call_id": "over-limit",
+                "name": "system.current_time",
+                "state": "failed",
+                "result": {"truncated": True},
+                "error_code": "result_too_large_for_provider",
+            },
+        )
+        self.assertEqual(len(result.attempts), 2)
+        self.assertEqual(
+            [attempt.status for attempt in result.attempts],
+            ["succeeded", "succeeded"],
+        )
 
     async def test_unadvertised_tool_is_stable_error_without_service_call(self):
         guessed_name = "private.hidden"

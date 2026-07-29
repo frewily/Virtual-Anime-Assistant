@@ -30,6 +30,8 @@ from tools.service import ToolArgumentsError, ToolExecutionService
 
 _MAX_MODEL_REQUESTS_PER_TURN = 3
 _MAX_TOOL_CALLS_PER_TURN = 4
+_MAX_TOOL_MESSAGE_CONTENT_CHARS = 12_000
+_TRUNCATED_TOOL_RESULT = {"truncated": True}
 
 
 class ModelToolLimitError(ModelGatewayError):
@@ -84,7 +86,7 @@ class ModelToolOrchestrator:
 
         for model_round in range(_MAX_MODEL_REQUESTS_PER_TURN):
             current = request.model_copy(
-                update={"messages": messages, "tools": tools}
+                update={"messages": list(messages), "tools": tools}
             )
             reply, attempt = await self._complete(
                 current,
@@ -113,7 +115,11 @@ class ModelToolOrchestrator:
                 len(set(call_ids)) != len(call_ids)
                 or any(call_id in seen_call_ids for call_id in call_ids)
             ):
-                raise ModelProtocolError("duplicate tool call id")
+                error = ModelProtocolError("duplicate tool call id")
+                raise ModelToolOrchestrationError(
+                    error=error,
+                    attempts=attempts,
+                ) from error
 
             messages.append(
                 ModelMessage(
@@ -237,16 +243,24 @@ class ModelToolOrchestrator:
 
     @staticmethod
     def _tool_message(result: ModelToolResult) -> ModelMessage:
-        content = json.dumps(
-            result.model_dump(mode="json"),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        payload = result.model_dump(mode="json")
+        content = ModelToolOrchestrator._compact_json(payload)
+        if len(content) > _MAX_TOOL_MESSAGE_CONTENT_CHARS:
+            payload["result"] = _TRUNCATED_TOOL_RESULT
+            content = ModelToolOrchestrator._compact_json(payload)
         return ModelMessage(
             role=ModelRole.TOOL,
             content=content,
             tool_call_id=result.call_id,
             name=result.name,
+        )
+
+    @staticmethod
+    def _compact_json(payload: dict) -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
 
     @staticmethod

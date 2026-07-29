@@ -21,8 +21,9 @@ from domain.tools import (
     ToolRisk,
     ToolSource,
 )
-from tools.registry import ToolDefinition, ToolRegistry
+from tools.registry import ToolDefinition, ToolNotFoundError, ToolRegistry
 from tools.service import (
+    ToolArgumentsError,
     ToolExecutionService,
     ToolStateConflictError,
 )
@@ -31,6 +32,7 @@ from tools.service import (
 class Arguments(BaseModel):
     value: str = "ok"
     token: str = "private"
+    count: int = 1
 
 
 class InMemoryToolRepository:
@@ -237,22 +239,24 @@ def build_service(
     timeout_seconds: float = 1,
     cancellable: bool = True,
     clock=None,
+    allowed_sources: frozenset[ToolSource] | None = None,
 ):
     repository = InMemoryToolRepository()
     registry = ToolRegistry()
-    registry.register(
-        ToolDefinition(
-            name="example.tool",
-            title="示例工具",
-            arguments_model=Arguments,
-            risk=risk,
-            impact="修改示例目标" if risk is ToolRisk.HIGH else "只读取示例",
-            timeout_seconds=timeout_seconds,
-            cancellable=cancellable,
-            sensitive_fields=frozenset({"token"}),
-            handler=handler,
-        )
+    definition_values = dict(
+        name="example.tool",
+        title="示例工具",
+        arguments_model=Arguments,
+        risk=risk,
+        impact="修改示例目标" if risk is ToolRisk.HIGH else "只读取示例",
+        timeout_seconds=timeout_seconds,
+        cancellable=cancellable,
+        sensitive_fields=frozenset({"token"}),
+        handler=handler,
     )
+    if allowed_sources is not None:
+        definition_values["allowed_sources"] = allowed_sources
+    registry.register(ToolDefinition(**definition_values))
     service = ToolExecutionService(
         registry=registry,
         repository=repository,
@@ -272,6 +276,88 @@ def request() -> ToolRequest:
 
 
 class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_cannot_execute_low_risk_tool_without_authorization(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+        )
+        model_request = request().model_copy(
+            update={
+                "source": ToolSource.MODEL,
+                "arguments": {"value": 123},
+            }
+        )
+
+        with self.assertRaises(ToolNotFoundError):
+            await service.request(model_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+        self.assertEqual(repository.confirmations, {})
+
+    async def test_model_cannot_execute_high_risk_tool_when_authorized(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+        )
+        model_request = request().model_copy(
+            update={"source": ToolSource.MODEL}
+        )
+
+        with self.assertRaises(ToolNotFoundError):
+            await service.request(model_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+        self.assertEqual(repository.confirmations, {})
+
+    async def test_argument_validation_is_strict(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+        )
+        invalid_request = request().model_copy(
+            update={
+                "arguments": {
+                    "value": "hello",
+                    "token": "private-token",
+                    "count": "2",
+                }
+            }
+        )
+
+        self.assertEqual(
+            Arguments.model_validate(invalid_request.arguments).count,
+            2,
+        )
+        with self.assertRaises(ToolArgumentsError):
+            await service.request(invalid_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+
     async def test_low_risk_executes_automatically_and_redacts_audit(self):
         calls = 0
 

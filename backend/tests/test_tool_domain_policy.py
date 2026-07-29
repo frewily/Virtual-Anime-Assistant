@@ -24,8 +24,9 @@ def definition(
     *,
     name: str = "example.read",
     risk: ToolRisk = ToolRisk.LOW,
+    allowed_sources: frozenset[ToolSource] | None = None,
 ) -> ToolDefinition:
-    return ToolDefinition(
+    values = dict(
         name=name,
         title="读取示例",
         arguments_model=SecretArguments,
@@ -36,9 +37,24 @@ def definition(
         sensitive_fields=frozenset({"token"}),
         handler=read_example,
     )
+    if allowed_sources is not None:
+        values["allowed_sources"] = allowed_sources
+    return ToolDefinition(**values)
 
 
 class ToolDomainPolicyTests(unittest.TestCase):
+    def test_definition_defaults_to_desktop_and_system_sources(self):
+        self.assertEqual(
+            definition().allowed_sources,
+            frozenset({ToolSource.DESKTOP, ToolSource.SYSTEM}),
+        )
+
+    def test_definition_rejects_empty_or_invalid_allowed_sources(self):
+        with self.assertRaises(ValueError):
+            definition(allowed_sources=frozenset())
+        with self.assertRaises(TypeError):
+            definition(allowed_sources=frozenset({ToolSource.DESKTOP, "model"}))
+
     def test_registry_rejects_duplicates_and_resolves_stably(self):
         registry = ToolRegistry()
         registered = definition()

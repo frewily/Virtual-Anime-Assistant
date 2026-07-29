@@ -56,6 +56,16 @@ class BuiltinToolTests(unittest.TestCase):
         )
         self.assertEqual(definitions[0].risk, ToolRisk.LOW)
         self.assertEqual(definitions[0].timeout_seconds, 2)
+        self.assertEqual(
+            definitions[0].allowed_sources,
+            frozenset(
+                {
+                    ToolSource.DESKTOP,
+                    ToolSource.MODEL,
+                    ToolSource.SYSTEM,
+                }
+            ),
+        )
 
     def test_time_tool_executes_without_confirmation_and_is_audited(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,6 +112,32 @@ class BuiltinToolTests(unittest.TestCase):
 
             self.assertEqual(result.state, ToolRequestState.FAILED)
             self.assertEqual(result.error_code, "invalid_timezone")
+            asyncio.run(store.close())
+
+    def test_time_tool_accepts_model_source_without_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SqliteStore(Path(directory) / "assistant.db")
+            service = ToolExecutionService(
+                registry=build_builtin_registry(),
+                repository=store,
+            )
+
+            result = asyncio.run(
+                service.request(
+                    ToolRequest(
+                        correlation_id="model-message-1",
+                        source=ToolSource.MODEL,
+                        tool_name="system.current_time",
+                        arguments={"timezone": " UTC "},
+                    )
+                )
+            )
+            stored = asyncio.run(store.get_request(result.request_id))
+
+            self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+            self.assertIsNone(result.confirmation)
+            self.assertEqual(result.result["timezone"], "UTC")
+            self.assertEqual(stored.source, ToolSource.MODEL)
             asyncio.run(store.close())
 
 

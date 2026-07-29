@@ -19,6 +19,7 @@ from domain.tools import (
     ToolRequestState,
     ToolRequestView,
     ToolRisk,
+    ToolSource,
     utc_now,
 )
 from tools.policy import ToolPolicy, summarize_arguments
@@ -104,12 +105,16 @@ class ToolExecutionService:
 
     async def request(self, request: ToolRequest) -> ToolRequestView:
         definition = self.registry.require(request.tool_name)
+        if request.source not in definition.allowed_sources:
+            raise ToolNotFoundError(request.tool_name)
+        risk = self.policy.risk_for(definition, request.arguments)
+        if request.source is ToolSource.MODEL and risk is not ToolRisk.LOW:
+            raise ToolNotFoundError(request.tool_name)
         validated_arguments = self._validate_arguments(
             definition,
             request.arguments,
         )
         now = self.clock()
-        risk = self.policy.risk_for(definition, request.arguments)
         summary = summarize_arguments(
             validated_arguments.model_dump(mode="json"),
             definition.sensitive_fields,
@@ -439,7 +444,10 @@ class ToolExecutionService:
         arguments: dict[str, Any],
     ) -> BaseModel:
         try:
-            return definition.arguments_model.model_validate(arguments)
+            return definition.arguments_model.model_validate(
+                arguments,
+                strict=True,
+            )
         except ValidationError as exc:
             raise ToolArgumentsError("tool arguments are invalid") from exc
 

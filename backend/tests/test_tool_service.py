@@ -6,7 +6,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, RootModel
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -94,6 +100,35 @@ class UnionArguments(BaseModel):
         Field(discriminator="kind"),
     ]
     items: list[IntegerValue | StringValue]
+
+
+class ExtraAllowedNestedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    label: str
+
+
+class ExtraAllowedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    nested: ExtraAllowedNestedArguments
+
+
+class NestedAliasArguments(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    nested_value: str = Field(alias="nestedValue")
+
+
+class AliasArguments(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    regular_value: str = Field(alias="regularValue")
+    validation_value: str = Field(validation_alias="validationValue")
+    choice_value: str = Field(
+        validation_alias=AliasChoices("choiceValue", "legacyChoice")
+    )
+    nested: NestedAliasArguments
 
 
 class InMemoryToolRepository:
@@ -761,6 +796,130 @@ class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(received.overlap, StringValue)
         self.assertIsInstance(received.pet, CatValue)
         self.assertIsInstance(received.items[0], IntegerValue)
+
+    async def test_runtime_rejects_extra_allow_model_fields_consistently(self):
+        calls = 0
+
+        async def handler(_: ExtraAllowedArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        for arguments in (
+            {
+                "nested": {"label": "demo"},
+                "unexpected": True,
+            },
+            {
+                "nested": {
+                    "label": "demo",
+                    "unexpected": True,
+                },
+            },
+        ):
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=ExtraAllowedArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_rejects_duplicate_alias_inputs(self):
+        calls = 0
+
+        async def handler(_: AliasArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "regularValue": "regular",
+            "validationValue": "validation",
+            "choiceValue": "choice",
+            "nested": {"nestedValue": "nested"},
+        }
+        invalid_arguments = (
+            {
+                **valid_arguments,
+                "regular_value": "duplicate",
+            },
+            {
+                **valid_arguments,
+                "validation_value": "duplicate",
+            },
+            {
+                **valid_arguments,
+                "legacyChoice": "duplicate",
+            },
+            {
+                **valid_arguments,
+                "nested": {
+                    "nestedValue": "nested",
+                    "nested_value": "duplicate",
+                },
+            },
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=AliasArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_accepts_one_legal_alias_per_field(self):
+        received = None
+
+        async def handler(arguments: AliasArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=AliasArguments,
+        )
+        alias_request = request().model_copy(
+            update={
+                "arguments": {
+                    "regularValue": "regular",
+                    "validationValue": "validation",
+                    "legacyChoice": "choice",
+                    "nested": {"nestedValue": "nested"},
+                }
+            }
+        )
+
+        result = await service.request(alias_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(received.regular_value, "regular")
+        self.assertEqual(received.validation_value, "validation")
+        self.assertEqual(received.choice_value, "choice")
+        self.assertEqual(received.nested.nested_value, "nested")
 
     async def test_low_risk_executes_automatically_and_redacts_audit(self):
         calls = 0

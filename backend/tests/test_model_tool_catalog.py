@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, ConfigDict, RootModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,6 +31,18 @@ class MappingArguments(BaseModel):
     direct: dict[str, NestedArguments]
     arrays: list[dict[str, NestedArguments]]
     referenced: NamedMapping
+
+
+class ExtraAllowedNestedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    label: str
+
+
+class ExtraAllowedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    nested: ExtraAllowedNestedArguments
 
 
 class ScalarArguments(RootModel[str]):
@@ -211,6 +223,26 @@ class ModelToolCatalogTests(unittest.TestCase):
         )
         self.assertIs(
             parameters["$defs"]["NestedArguments"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    def test_catalog_closes_top_level_and_nested_extra_allow_models(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.extra-allow",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=ExtraAllowedArguments,
+            )
+        )
+
+        parameters = ModelToolCatalog(registry).list()[0].parameters
+
+        self.assertIs(parameters["additionalProperties"], False)
+        self.assertIs(
+            parameters["$defs"]["ExtraAllowedNestedArguments"][
                 "additionalProperties"
             ],
             False,

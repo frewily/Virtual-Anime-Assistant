@@ -3,16 +3,33 @@ from copy import deepcopy
 from typing import Any
 
 from pydantic import BaseModel
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
+from pydantic_core import core_schema
 
 from domain.tools import ToolRisk, ToolSource
 from llm.models import ModelToolDefinition
 from tools.registry import ToolDefinition, ToolRegistry
 
 
+class _ClosedModelJsonSchema(GenerateJsonSchema):
+    def model_schema(
+        self,
+        schema: core_schema.ModelSchema,
+    ) -> JsonSchemaValue:
+        generated = super().model_schema(schema)
+        if not schema.get("root_model"):
+            generated["additionalProperties"] = False
+        return generated
+
+
 def build_closed_arguments_schema(
     definition: ToolDefinition,
 ) -> dict[str, Any]:
-    schema = deepcopy(definition.arguments_model.model_json_schema())
+    schema = deepcopy(
+        definition.arguments_model.model_json_schema(
+            schema_generator=_ClosedModelJsonSchema,
+        )
+    )
     if schema.get("type") != "object":
         raise ValueError(
             "tool parameters must be a top-level object schema"
@@ -55,15 +72,18 @@ def _reject_additional_properties(
             return
         if not isinstance(value, dict):
             return
+        consumed_fields: set[str] = set()
         for key, child in value.items():
             field_name = _field_name_for_input(validated_value, key)
             if (
                 field_name is None
                 or field_name not in validated_value.model_fields_set
+                or field_name in consumed_fields
             ):
                 raise ValueError(
                     "tool arguments contain additional properties"
                 )
+            consumed_fields.add(field_name)
             _reject_additional_properties(
                 child,
                 getattr(validated_value, field_name),

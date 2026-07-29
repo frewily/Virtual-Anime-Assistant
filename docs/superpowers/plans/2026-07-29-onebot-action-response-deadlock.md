@@ -34,7 +34,7 @@
 - 修改：`backend/tests/test_onebot_api.py`
 - 测试：`backend/tests/test_onebot_api.py`
 
-- [ ] **步骤 1：导入真实连接管理器和动作模型**
+- [x] **步骤 1：导入真实连接管理器和动作模型**
 
 在测试文件中增加：
 
@@ -54,7 +54,7 @@ from channels.onebot.models import (
 
 `replace()` 用于把测试动作超时缩短到 `0.05` 秒，不修改生产默认值。
 
-- [ ] **步骤 2：增加可协调收发的 WebSocket 测试替身**
+- [x] **步骤 2：增加可协调收发的 WebSocket 测试替身**
 
 在 `FakeWebSocket` 后增加：
 
@@ -94,7 +94,7 @@ class QueuedWebSocket:
 
 该替身让测试可以在后端发出动作后，再精确回送同一 `echo` 的响应。
 
-- [ ] **步骤 3：编写自阻塞回归测试**
+- [x] **步骤 3：编写自阻塞回归测试**
 
 在 `OneBotWebSocketApiTests` 中增加：
 
@@ -143,7 +143,7 @@ async def test_action_response_resolves_while_event_is_running(self):
     self.assertEqual(connection.pending_action_count, 0)
 ```
 
-- [ ] **步骤 4：运行测试确认先失败**
+- [x] **步骤 4：运行测试确认先失败**
 
 运行：
 
@@ -163,7 +163,7 @@ WebSocket，但接收循环仍被 `handle_event()` 阻塞。
 - 修改：`backend/api/qq.py`
 - 测试：`backend/tests/test_onebot_api.py`
 
-- [ ] **步骤 1：增加事件任务完成回调**
+- [x] **步骤 1：增加事件任务完成回调**
 
 在 `backend/api/qq.py` 中增加：
 
@@ -207,7 +207,7 @@ def _start_event_task(
 该辅助函数与 `backend/api/app.py` 的后台任务创建模式保持一致。创建失败时主动
 关闭协程，完成时消费异常。
 
-- [ ] **步骤 2：把普通事件移入受管理任务**
+- [x] **步骤 2：把普通事件移入受管理任务**
 
 在 `qq_websocket()` 完成连接后创建局部集合：
 
@@ -244,7 +244,7 @@ _start_event_task(
 
 `resolve_action_response()` 必须继续位于任务创建之前。
 
-- [ ] **步骤 3：在断线时回收事件任务**
+- [x] **步骤 3：在断线时回收事件任务**
 
 把路由的 `finally` 更新为：
 
@@ -264,7 +264,7 @@ finally:
 先 `detach()`，让动作等待者收到 `onebot_disconnected`。随后取消模型调用、会话锁
 或并发许可中仍未完成的事件任务。
 
-- [ ] **步骤 4：运行自阻塞回归测试确认通过**
+- [x] **步骤 4：运行自阻塞回归测试确认通过**
 
 运行：
 
@@ -276,7 +276,7 @@ python3 -m unittest \
 
 预期：`ok`，动作响应在事件任务运行期间被消费，待处理动作数量回到 `0`。
 
-- [ ] **步骤 5：运行 OneBot API 现有测试**
+- [x] **步骤 5：运行 OneBot API 现有测试**
 
 运行：
 
@@ -294,7 +294,7 @@ python3 -m unittest backend.tests.test_onebot_api -v
 - 修改：`backend/tests/test_onebot_api.py`
 - 测试：`backend/tests/test_onebot_api.py`
 
-- [ ] **步骤 1：编写断线取消测试**
+- [x] **步骤 1：编写断线取消测试**
 
 增加：
 
@@ -326,7 +326,7 @@ async def test_disconnect_cancels_and_reaps_running_event_tasks(self):
     runtime.qq_connection.detach.assert_awaited_once_with(websocket)
 ```
 
-- [ ] **步骤 2：强化异常隔离测试**
+- [x] **步骤 2：强化异常隔离测试**
 
 把现有 `test_channel_failure_isolated_from_following_event` 改为使用两个显式完成信号：
 
@@ -361,7 +361,7 @@ async def test_channel_failure_isolated_from_following_event(self):
 
 该测试证明第一个任务失败不会停止接收循环或阻止第二个事件。
 
-- [ ] **步骤 3：运行生命周期测试**
+- [x] **步骤 3：运行生命周期测试**
 
 运行：
 
@@ -375,7 +375,7 @@ python3 -m unittest \
 预期：2 个测试均显示 `ok`，且输出中没有
 `Task exception was never retrieved`。
 
-- [ ] **步骤 4：运行完整 OneBot 测试**
+- [x] **步骤 4：运行完整 OneBot 测试**
 
 运行：
 
@@ -389,7 +389,7 @@ python3 -m unittest \
 
 预期：全部显示 `ok`。
 
-- [ ] **步骤 5：提交代码和测试**
+- [x] **步骤 5：提交代码和测试**
 
 ```bash
 git add backend/api/qq.py backend/tests/test_onebot_api.py
@@ -403,7 +403,7 @@ git commit -m "fix: 避免 OneBot 动作响应接收自阻塞"
 - 验证：`backend/`
 - 验证：`desktop-app/`
 
-- [ ] **步骤 1：检查 Python 语法**
+- [x] **步骤 1：检查 Python 语法**
 
 运行：
 
@@ -413,7 +413,7 @@ python3 -m compileall -q backend
 
 预期：退出码为 `0`，无输出。
 
-- [ ] **步骤 2：运行全部后端测试**
+- [x] **步骤 2：运行全部后端测试**
 
 运行：
 
@@ -423,7 +423,7 @@ python3 -m unittest discover -s backend/tests -p 'test_*.py' -v
 
 预期：全部测试通过，末尾显示 `OK`。
 
-- [ ] **步骤 3：运行桌面端测试**
+- [x] **步骤 3：运行桌面端测试**
 
 运行：
 
@@ -433,7 +433,7 @@ npm test --prefix desktop-app
 
 预期：全部测试通过，退出码为 `0`。
 
-- [ ] **步骤 4：构建 Renderer**
+- [x] **步骤 4：构建 Renderer**
 
 运行：
 
@@ -443,7 +443,7 @@ npm run build:renderer --prefix desktop-app
 
 预期：构建完成，退出码为 `0`。
 
-- [ ] **步骤 5：执行差异检查**
+- [x] **步骤 5：执行差异检查**
 
 运行：
 
@@ -461,7 +461,7 @@ git status --short
 - 本地配置：`config/local/qq.env`（已被 Git 忽略）
 - 本地配置：`qq-bot/data/`（已被 Git 忽略）
 
-- [ ] **步骤 1：使用本地配置重启后端**
+- [x] **步骤 1：使用本地配置重启后端**
 
 运行：
 
@@ -475,7 +475,7 @@ python3 main.py
 
 预期：后端监听 `127.0.0.1:8080`，NapCat 自动重新连接。
 
-- [ ] **步骤 2：确认安全状态**
+- [x] **步骤 2：确认安全状态**
 
 运行：
 
@@ -495,7 +495,7 @@ curl --silent --show-error --fail \
 }
 ```
 
-- [ ] **步骤 3：验收私聊**
+- [x] **步骤 3：验收私聊**
 
 由 `config/local/qq.env` 中已配置的允许用户私聊机器人，发送
 `私聊回归测试`。
@@ -503,7 +503,7 @@ curl --silent --show-error --fail \
 预期：收到且只收到 1 次回复；后端没有记录
 `onebot_action_timeout`。
 
-- [ ] **步骤 4：验收带 `@` 的群聊**
+- [x] **步骤 4：验收带 `@` 的群聊**
 
 在 `config/local/qq.env` 中已配置的允许群中结构化 `@` 机器人并发送
 `群聊回归测试`。
@@ -511,7 +511,7 @@ curl --silent --show-error --fail \
 预期：收到且只收到 1 次回复；第一段引用原消息并 `@发送者`；后端没有记录
 `onebot_action_timeout`。
 
-- [ ] **步骤 5：验收未 `@` 的群聊**
+- [x] **步骤 5：验收未 `@` 的群聊**
 
 在允许群中不 `@` 机器人，发送 `未艾特静默测试`。
 
@@ -526,7 +526,7 @@ curl --silent --show-error --fail \
 - 修改：`docs/superpowers/specs/2026-07-29-onebot-action-response-deadlock-design.md`
 - 修改：`docs/superpowers/plans/2026-07-29-onebot-action-response-deadlock.md`
 
-- [ ] **步骤 1：更新阶段状态**
+- [x] **步骤 1：更新阶段状态**
 
 把 OneBot QQ 渠道状态更新为：
 
@@ -536,7 +536,7 @@ curl --silent --show-error --fail \
 
 README 项目状态改为“QQ 私聊与群聊文字接入已通过真实 NapCat 联调，默认关闭”。
 
-- [ ] **步骤 2：记录验证证据**
+- [x] **步骤 2：记录验证证据**
 
 在本计划末尾增加：
 
@@ -554,22 +554,28 @@ README 项目状态改为“QQ 私聊与群聊文字接入已通过真实 NapCat
 
 只记录通过数量和行为结论，不记录 Token、Cookie、QQ 消息正文或 NapCat 响应正文。
 
-- [ ] **步骤 3：执行文档安全扫描**
+- [x] **步骤 3：执行文档安全扫描**
 
 运行：
 
 ```bash
 rg -n \
-  "T[O]DO|T[B]D|F[I]XME|g[h]o_|q[q]_password|ASSISTANT_QQ_ACCESS_TOKEN=[^<[:space:]]" \
+  "T[O]DO|T[B]D|F[I]XME|g[h]o_|q[q]_password" \
   README.md \
   docs/superpowers/specs/2026-07-29-onebot-qq-channel-design.md \
   docs/superpowers/specs/2026-07-29-onebot-action-response-deadlock-design.md \
   docs/superpowers/plans/2026-07-29-onebot-action-response-deadlock.md
+rg -n "ASSISTANT_QQ_ACCESS_TOKEN=" \
+  README.md \
+  docs/superpowers/specs/2026-07-29-onebot-qq-channel-design.md \
+  docs/superpowers/specs/2026-07-29-onebot-action-response-deadlock-design.md \
+  docs/superpowers/plans/2026-07-29-onebot-action-response-deadlock.md \
+  | rg -v "rg -n|<至少 16 个字符的随机 Token>"
 ```
 
 预期：没有占位符、GitHub Token、QQ 密码或真实 OneBot Token。
 
-- [ ] **步骤 4：验证并提交文档**
+- [x] **步骤 4：验证并提交文档**
 
 运行：
 
@@ -586,7 +592,7 @@ git commit -m "docs: 记录 OneBot 真实联调结果"
 
 预期：提交成功，忽略的本地 Token、QQ 登录数据和 SQLite 数据库不进入提交。
 
-- [ ] **步骤 5：最终检查分支**
+- [x] **步骤 5：最终检查分支**
 
 运行：
 
@@ -596,3 +602,14 @@ git log -3 --oneline
 ```
 
 预期：工作树干净；最近提交包含代码修复、验收文档和本实现计划。
+
+## 执行结果
+
+- TDD 红灯：旧实现稳定触发 `TimeoutError`，并把延迟到达的动作响应误当作普通事件。
+- OneBot API 与连接回归测试：42 项通过。
+- 后端完整测试：266 项通过。
+- 桌面端测试：14 项通过。
+- Renderer 构建：通过。
+- 真实私聊：单次回复，无动作超时。
+- 真实群聊 `@`：引用并 `@发送者`，单次回复，无动作超时。
+- 真实群聊未 `@`：NapCat 收到消息，机器人保持静默，SQLite 未持久化该消息。

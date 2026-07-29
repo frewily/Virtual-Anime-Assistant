@@ -48,6 +48,7 @@ def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
 @dataclass(frozen=True)
 class LLMSettings:
     enabled: bool
+    tool_calling_enabled: bool
     base_url: str | None
     api_key: str | None
     model: str | None
@@ -76,6 +77,10 @@ class LLMSettings:
 
         return cls(
             enabled=enabled,
+            tool_calling_enabled=_parse_bool(
+                "ASSISTANT_LLM_TOOL_CALLING_ENABLED",
+                default=False,
+            ),
             base_url=base_url,
             api_key=api_key,
             model=model,

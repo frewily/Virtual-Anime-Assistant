@@ -11,10 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llm import (
     LanguageModelGateway,
+    ModelAttempt,
     ModelMessage,
+    ModelOrchestrationResult,
     ModelReply,
     ModelRequest,
     ModelRole,
+    ModelToolCall,
+    ModelToolDefinition,
+    ModelToolResult,
 )
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
@@ -26,6 +31,7 @@ class LLMSettingsTests(unittest.TestCase):
             settings = LLMSettings.from_env()
 
         self.assertFalse(settings.enabled)
+        self.assertFalse(settings.tool_calling_enabled)
         self.assertIsNone(settings.base_url)
         self.assertIsNone(settings.api_key)
         self.assertIsNone(settings.model)
@@ -123,6 +129,29 @@ class LLMSettingsTests(unittest.TestCase):
                 ):
                     self.assertFalse(LLMSettings.from_env().enabled)
 
+    def test_tool_calling_boolean_defaults_to_false_and_accepts_yes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(LLMSettings.from_env().tool_calling_enabled)
+
+        with patch.dict(
+            os.environ,
+            {"ASSISTANT_LLM_TOOL_CALLING_ENABLED": " yes "},
+            clear=True,
+        ):
+            self.assertTrue(LLMSettings.from_env().tool_calling_enabled)
+
+    def test_tool_calling_boolean_rejects_unknown_values(self):
+        with patch.dict(
+            os.environ,
+            {"ASSISTANT_LLM_TOOL_CALLING_ENABLED": "sometimes"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "ASSISTANT_LLM_TOOL_CALLING_ENABLED",
+            ):
+                LLMSettings.from_env()
+
     def test_numeric_values_must_be_in_range(self):
         cases = (
             ("ASSISTANT_LLM_TIMEOUT_SECONDS", "0"),
@@ -174,6 +203,140 @@ class ModelContractTests(unittest.TestCase):
         self.assertEqual(ModelRole.SYSTEM.value, "system")
         self.assertEqual(ModelRole.USER.value, "user")
         self.assertEqual(ModelRole.ASSISTANT.value, "assistant")
+        self.assertEqual(ModelRole.TOOL.value, "tool")
+
+    def test_provider_neutral_tool_contracts_are_valid_and_frozen(self):
+        definition = ModelToolDefinition(
+            name="memory.search",
+            description="Search memories",
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        )
+        call = ModelToolCall(
+            id="call-1",
+            name="memory.search",
+            arguments={"query": "hello"},
+        )
+        result = ModelToolResult(
+            call_id="call-1",
+            name="memory.search",
+            state="success",
+            result={"items": []},
+            error_code=None,
+        )
+        reply = ModelReply(text="done", model="model")
+        attempt = ModelAttempt(
+            model="model",
+            status="success",
+            latency_ms=12,
+            prompt_tokens=3,
+            completion_tokens=2,
+            provider_request_id="request-1",
+        )
+        orchestration = ModelOrchestrationResult(
+            reply=reply,
+            attempts=[attempt],
+        )
+
+        self.assertEqual(definition.parameters["type"], "object")
+        self.assertEqual(call.arguments["query"], "hello")
+        self.assertEqual(result.call_id, "call-1")
+        self.assertEqual(orchestration.attempts[0].latency_ms, 12)
+
+        for model in (definition, call, result, attempt, orchestration):
+            with self.subTest(model=type(model).__name__):
+                with self.assertRaises(ValidationError):
+                    type(model)(**{**model.model_dump(), "unexpected": True})
+                with self.assertRaises(ValidationError):
+                    model.__setattr__(next(iter(type(model).model_fields)), "changed")
+
+    def test_tool_schema_requires_top_level_object(self):
+        with self.assertRaises(ValidationError):
+            ModelToolDefinition(
+                name="memory.search",
+                description="Search memories",
+                parameters={"type": "array", "items": {"type": "string"}},
+            )
+
+    def test_message_role_shapes_are_enforced(self):
+        call = ModelToolCall(
+            id="call-1",
+            name="memory.search",
+            arguments={"query": "hello"},
+        )
+        valid_messages = (
+            ModelMessage(role=ModelRole.SYSTEM, content="system"),
+            ModelMessage(role=ModelRole.USER, content="user"),
+            ModelMessage(role=ModelRole.ASSISTANT, content="answer"),
+            ModelMessage(role=ModelRole.ASSISTANT, tool_calls=[call]),
+            ModelMessage(
+                role=ModelRole.TOOL,
+                content='{"items":[]}',
+                tool_call_id="call-1",
+                name="memory.search",
+            ),
+        )
+        self.assertEqual(len(valid_messages), 5)
+
+        invalid_messages = (
+            {"role": ModelRole.SYSTEM, "content": None},
+            {"role": ModelRole.USER, "content": "user", "tool_calls": [call]},
+            {"role": ModelRole.ASSISTANT, "content": None},
+            {
+                "role": ModelRole.ASSISTANT,
+                "content": "answer",
+                "tool_call_id": "call-1",
+            },
+            {"role": ModelRole.TOOL, "content": "result", "name": "memory.search"},
+            {
+                "role": ModelRole.TOOL,
+                "content": "result",
+                "tool_call_id": "call-1",
+                "name": "memory.search",
+                "tool_calls": [call],
+            },
+        )
+        for values in invalid_messages:
+            with self.subTest(values=values):
+                with self.assertRaises(ValidationError):
+                    ModelMessage(**values)
+
+    def test_message_tool_field_boundaries_are_enforced(self):
+        call = ModelToolCall(
+            id="c",
+            name="abc",
+            arguments={},
+        )
+        ModelMessage(role=ModelRole.ASSISTANT, tool_calls=[call] * 4)
+        ModelMessage(
+            role=ModelRole.TOOL,
+            content="result",
+            tool_call_id="c" * 200,
+            name="abc",
+        )
+
+        invalid_messages = (
+            {"role": ModelRole.ASSISTANT, "tool_calls": [call] * 5},
+            {
+                "role": ModelRole.TOOL,
+                "content": "result",
+                "tool_call_id": "c" * 201,
+                "name": "abc",
+            },
+            {
+                "role": ModelRole.TOOL,
+                "content": "result",
+                "tool_call_id": "c",
+                "name": "Invalid Name",
+            },
+        )
+        for values in invalid_messages:
+            with self.subTest(values=values):
+                with self.assertRaises(ValidationError):
+                    ModelMessage(**values)
 
     def test_request_accepts_inclusive_boundaries(self):
         request = ModelRequest(
@@ -199,6 +362,27 @@ class ModelContractTests(unittest.TestCase):
         self.assertEqual(request.messages[0].content, "x")
         self.assertEqual(request.temperature, 0)
         self.assertEqual(request.max_output_tokens, 1)
+        self.assertEqual(request.tools, [])
+
+    def test_request_accepts_up_to_32_tools(self):
+        tool = ModelToolDefinition(
+            name="abc",
+            description="A tool",
+            parameters={"type": "object"},
+        )
+        request = ModelRequest(
+            correlation_id="c",
+            messages=[ModelMessage(role=ModelRole.USER, content="x")],
+            tools=[tool] * 32,
+        )
+        self.assertEqual(len(request.tools), 32)
+
+        with self.assertRaises(ValidationError):
+            ModelRequest(
+                correlation_id="c",
+                messages=[ModelMessage(role=ModelRole.USER, content="x")],
+                tools=[tool] * 33,
+            )
 
     def test_request_rejects_invalid_boundaries(self):
         valid_message = ModelMessage(role=ModelRole.USER, content="hello")
@@ -262,6 +446,26 @@ class ModelContractTests(unittest.TestCase):
         self.assertIsNone(reply.prompt_tokens)
         self.assertIsNone(reply.completion_tokens)
         self.assertIsNone(reply.provider_request_id)
+        self.assertEqual(reply.tool_calls, [])
+
+    def test_reply_requires_text_or_tool_calls_and_allows_both(self):
+        call = ModelToolCall(
+            id="call-1",
+            name="memory.search",
+            arguments={"query": "hello"},
+        )
+
+        with self.assertRaises(ValidationError):
+            ModelReply(model="model")
+
+        text_only = ModelReply(text="answer", model="model")
+        tool_only = ModelReply(tool_calls=[call], model="model")
+        both = ModelReply(text="checking", tool_calls=[call], model="model")
+
+        self.assertEqual(text_only.text, "answer")
+        self.assertIsNone(tool_only.text)
+        self.assertEqual(len(tool_only.tool_calls), 1)
+        self.assertEqual(both.text, "checking")
 
     def test_reply_rejects_invalid_boundaries(self):
         invalid_replies = (

@@ -24,12 +24,17 @@ from tools.registry import ToolRegistry
 from tools.service import ToolExecutionService
 
 
-def llm_settings(*, enabled: bool) -> LLMSettings:
+def llm_settings(
+    *,
+    enabled: bool,
+    tool_calling_enabled: bool = False,
+) -> LLMSettings:
     return LLMSettings(
         enabled=enabled,
         base_url="https://llm.example/v1" if enabled else None,
         api_key="private-api-key" if enabled else None,
         model="configured-model" if enabled else None,
+        tool_calling_enabled=tool_calling_enabled,
         timeout_seconds=10,
         max_context_messages=8,
         max_context_chars=5000,

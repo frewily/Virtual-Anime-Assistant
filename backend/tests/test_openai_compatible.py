@@ -28,12 +28,14 @@ def _settings(
     api_key="test-api-key",
     model="chat-model",
     timeout_seconds=17,
+    tool_calling_enabled=False,
 ):
     return LLMSettings(
         enabled=enabled,
         base_url=base_url,
         api_key=api_key,
         model=model,
+        tool_calling_enabled=tool_calling_enabled,
         timeout_seconds=timeout_seconds,
         max_context_messages=20,
         max_context_chars=12000,

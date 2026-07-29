@@ -105,10 +105,16 @@ class AssistantApplication:
         self.publisher = publisher or ResponsePublisher()
         self.sessions = sessions or SessionRegistry()
 
+    async def process(self, message: IncomingMessage) -> AssistantResponse:
+        return await self.sessions.run(message, self._handle_in_session)
+
     async def handle(self, message: IncomingMessage) -> AssistantResponse:
-        response = await self.sessions.run(message, self._handle_in_session)
+        response = await self.process(message)
         await self.publisher.publish(response)
         return response
+
+    async def has_seen_message(self, message_id: str) -> bool:
+        return await self.store.find_message(message_id) is not None
 
     async def _handle_in_session(
         self,

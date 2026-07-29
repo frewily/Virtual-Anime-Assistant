@@ -20,7 +20,7 @@ class ModelRole(str, Enum):
 
 class ModelToolDefinition(_FrozenModel):
     name: str = Field(pattern=_SAFE_NAME_PATTERN)
-    description: str = Field(min_length=1, max_length=2000)
+    description: str = Field(min_length=1, max_length=1000)
     parameters: dict[str, Any]
 
     @model_validator(mode="after")
@@ -40,11 +40,11 @@ class ModelToolResult(_FrozenModel):
     call_id: str = Field(min_length=1, max_length=200)
     name: str = Field(pattern=_SAFE_NAME_PATTERN)
     state: str = Field(min_length=1, max_length=100)
-    result: Any | None = None
+    result: dict[str, Any] | None = None
     error_code: str | None = Field(default=None, min_length=1, max_length=100)
 
 
-class ModelMessage(_FrozenModel):
+class ModelMessage(BaseModel):
     role: ModelRole
     content: str | None = Field(default=None, min_length=1, max_length=12000)
     tool_calls: list[ModelToolCall] = Field(default_factory=list, max_length=4)
@@ -76,7 +76,7 @@ class ModelMessage(_FrozenModel):
         return self
 
 
-class ModelRequest(_FrozenModel):
+class ModelRequest(BaseModel):
     correlation_id: str = Field(min_length=1, max_length=200)
     messages: list[ModelMessage] = Field(min_length=1)
     tools: list[ModelToolDefinition] = Field(default_factory=list, max_length=32)
@@ -84,7 +84,7 @@ class ModelRequest(_FrozenModel):
     max_output_tokens: int | None = Field(default=None, ge=1, le=8192)
 
 
-class ModelReply(_FrozenModel):
+class ModelReply(BaseModel):
     text: str | None = Field(default=None, min_length=1, max_length=4000)
     tool_calls: list[ModelToolCall] = Field(default_factory=list, max_length=4)
     model: str = Field(min_length=1, max_length=200)
@@ -111,4 +111,4 @@ class ModelAttempt(_FrozenModel):
 
 class ModelOrchestrationResult(_FrozenModel):
     reply: ModelReply
-    attempts: list[ModelAttempt] = Field(min_length=1)
+    attempts: list[ModelAttempt] = Field(min_length=1, max_length=3)

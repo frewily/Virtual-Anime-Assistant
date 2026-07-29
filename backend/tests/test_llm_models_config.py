@@ -253,6 +253,82 @@ class ModelContractTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     model.__setattr__(next(iter(type(model).model_fields)), "changed")
 
+    def test_existing_public_models_remain_mutable_and_ignore_extra_fields(self):
+        message = ModelMessage(
+            role=ModelRole.USER,
+            content="hello",
+            provider_extension=True,
+        )
+        request = ModelRequest(
+            correlation_id="c",
+            messages=[message],
+            provider_extension=True,
+        )
+        reply = ModelReply(
+            text="answer",
+            model="model",
+            provider_extension=True,
+        )
+
+        message.content = "updated"
+        request.temperature = 0.5
+        reply.text = "updated"
+
+        self.assertEqual(message.content, "updated")
+        self.assertEqual(request.temperature, 0.5)
+        self.assertEqual(reply.text, "updated")
+
+    def test_tool_definition_description_accepts_1000_and_rejects_1001(self):
+        definition = ModelToolDefinition(
+            name="memory.search",
+            description="d" * 1000,
+            parameters={"type": "object"},
+        )
+        self.assertEqual(len(definition.description), 1000)
+
+        with self.assertRaises(ValidationError):
+            ModelToolDefinition(
+                name="memory.search",
+                description="d" * 1001,
+                parameters={"type": "object"},
+            )
+
+    def test_tool_result_requires_object_result_when_present(self):
+        result = ModelToolResult(
+            call_id="call-1",
+            name="memory.search",
+            state="success",
+            result={"items": []},
+        )
+        self.assertEqual(result.result, {"items": []})
+
+        with self.assertRaises(ValidationError):
+            ModelToolResult(
+                call_id="call-1",
+                name="memory.search",
+                state="success",
+                result="not-an-object",
+            )
+
+    def test_orchestration_result_accepts_three_attempts_and_rejects_four(self):
+        attempt = ModelAttempt(
+            model="model",
+            status="success",
+            latency_ms=12,
+        )
+        reply = ModelReply(text="done", model="model")
+        result = ModelOrchestrationResult(
+            reply=reply,
+            attempts=[attempt] * 3,
+        )
+        self.assertEqual(len(result.attempts), 3)
+
+        with self.assertRaises(ValidationError):
+            ModelOrchestrationResult(
+                reply=reply,
+                attempts=[attempt] * 4,
+            )
+
     def test_tool_schema_requires_top_level_object(self):
         with self.assertRaises(ValidationError):
             ModelToolDefinition(

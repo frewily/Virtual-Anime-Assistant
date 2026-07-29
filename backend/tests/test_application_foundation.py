@@ -39,6 +39,7 @@ from llm.models import (
     ModelOrchestrationResult,
     ModelReply,
     ModelRequest,
+    ModelToolCall,
 )
 from infrastructure.sqlite_store import SqliteStore
 from memory.models import (
@@ -425,7 +426,13 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertEqual(result.text, "模型响应超时，请稍后再试。")
         self.assertEqual(len(store.model_calls), 1)
         self.assertEqual(store.model_calls[0].status, error.code)
-        self.assertEqual(list(store.messages), ["legacy-error"])
+        self.assertEqual(len(store.messages), 2)
+        assistant = next(
+            stored
+            for stored in store.messages.values()
+            if stored.role == "assistant"
+        )
+        self.assertEqual(assistant.status, MessageStatus.FAILED)
 
     def test_handle_processes_then_publishes_once(self):
         result = asyncio.run(self.application.handle(message()))
@@ -1000,7 +1007,7 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertEqual(result.kind, ResponseKind.ERROR)
         self.assertEqual(result.text, "记忆内容不能为空。")
 
-    def test_model_errors_are_safely_mapped_and_only_user_is_saved(self):
+    def test_model_errors_are_safely_mapped_persisted_and_replayed(self):
         cases = (
             (ModelAuthenticationError, "认证"),
             (ModelRateLimitError, "频繁"),
@@ -1023,15 +1030,83 @@ class AssistantApplicationTests(unittest.TestCase):
                 item = message(message_id=f"error-{index}")
 
                 result = asyncio.run(application.handle(item))
+                replay = asyncio.run(application.handle(item))
 
                 self.assertEqual(result.kind, ResponseKind.ERROR)
                 self.assertIn(expected_text, result.text)
                 self.assertNotIn(secret, result.text)
-                self.assertEqual(list(store.messages), [item.message_id])
+                self.assertEqual(replay.response_id, result.response_id)
+                self.assertEqual(replay.kind, ResponseKind.ERROR)
+                self.assertEqual(replay.text, result.text)
+                self.assertEqual(len(store.messages), 2)
                 self.assertEqual(len(store.model_calls), 1)
                 self.assertEqual(store.model_calls[0].status, error_type.code)
                 self.assertEqual(store.model_calls[0].model, llm.model_name)
                 self.assertEqual(store.model_calls[0].message_id, item.message_id)
+                assistant = next(
+                    stored
+                    for stored in store.messages.values()
+                    if stored.role == "assistant"
+                )
+                self.assertEqual(assistant.status, MessageStatus.FAILED)
+
+    def test_legacy_path_rejects_tool_calls_and_replays_safe_error(self):
+        llm = FakeLanguageModel(
+            reply=ModelReply(
+                text="不应展示的附带文本",
+                tool_calls=[
+                    ModelToolCall(
+                        id="unexpected-call",
+                        name="system.current_time",
+                        arguments={},
+                    )
+                ],
+                model="fake-model",
+            )
+        )
+        store = FakeStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+        item = message(message_id="legacy-unexpected-tool-call")
+
+        first = asyncio.run(application.handle(item))
+        replay = asyncio.run(application.handle(item))
+
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务返回了无法处理的响应。")
+        self.assertEqual(replay.response_id, first.response_id)
+        self.assertEqual(replay.text, first.text)
+        self.assertEqual(len(llm.requests), 1)
+        self.assertEqual(len(store.model_calls), 1)
+        self.assertEqual(
+            store.model_calls[0].status,
+            ModelProtocolError.code,
+        )
+
+    def test_legacy_path_rejects_blank_final_text_as_protocol_error(self):
+        llm = FakeLanguageModel(
+            reply=ModelReply(text="   ", model="fake-model")
+        )
+        store = FakeStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+        item = message(message_id="legacy-blank-reply")
+
+        first = asyncio.run(application.handle(item))
+        replay = asyncio.run(application.handle(item))
+
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务返回了无法处理的响应。")
+        self.assertEqual(replay.response_id, first.response_id)
+        self.assertEqual(len(llm.requests), 1)
 
     def test_interaction_returns_avatar_action(self):
         item = message()

@@ -325,6 +325,41 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(replay.json(), first.json())
         self.assertEqual(self.llm.complete.await_count, 1)
 
+    def test_legacy_http_rejects_unexpected_tool_calls_without_500(self):
+        self.runtime.application.model_orchestrator = None
+        for index, text in enumerate((None, "不应展示的附带文本")):
+            with self.subTest(text=text):
+                self.llm.replies = [
+                    ModelReply(
+                        text=text,
+                        tool_calls=[
+                            ModelToolCall(
+                                id=f"unexpected-{index}",
+                                name="system.current_time",
+                                arguments={},
+                            )
+                        ],
+                        model="fake-model",
+                    )
+                ]
+                message_id = f"unexpected-tool-http-{index}"
+                payload = {
+                    "source": "desktop",
+                    "senderId": LOCAL_USER.id,
+                    "content": "你好",
+                    "messageId": message_id,
+                }
+
+                with TestClient(self.app) as client:
+                    first = client.post("/api/chat/message", json=payload)
+                    replay = client.post("/api/chat/message", json=payload)
+
+                self.assertEqual(first.status_code, 503)
+                self.assertEqual(replay.status_code, 503)
+                self.assertEqual(replay.json(), first.json())
+                self.assertIn("无法处理", first.json()["detail"])
+        self.assertEqual(self.llm.complete.await_count, 2)
+
     def test_desktop_chat_uses_model_time_tool_without_confirmation(self):
         self.llm.replies = [
             ModelReply(

@@ -1815,6 +1815,13 @@ git diff -- README.md \
 - 尚未验证特定真实供应商是否支持 Chat Completions `tool_calls`。不支持时必须关闭 `ASSISTANT_LLM_TOOL_CALLING_ENABLED`；不得弱化协议校验，也不得自动改用无工具请求重试。
 - Electron 确认卡片与真实 QQ 渠道的最终视觉和在线联调仍需在具备本地模型与已授权 QQ 环境中完成。
 
+终审修复补充（2026-07-29）：
+
+- OpenAI 兼容适配器在请求未声明 `tools` 时拒绝纯工具调用和「文本 + 工具调用」响应，不自动重试；legacy 应用路径同时防御工具调用、空文本与空白文本，并原子保存安全失败回复，使相同消息稳定重放。
+- catalog 会逐项筛除 JSON Schema 生成失败、顶层非对象或模型工具定义构建失败的工具，继续按稳定顺序导出其余合法工具；只捕获预期的 Pydantic/schema 异常，编程错误仍向上抛出。
+- 模型工具编排器的启用条件收紧为「真实 LLM 已启用 + Tool Calling 开关已开启 + catalog 至少有 1 个合法工具」。空目录、全高风险目录和全无效目录只构造 catalog，不构造 orchestrator，应用层注入 `None` 并走 legacy 路径。
+- 本轮新增 8 项后端回归测试。关键定向验证运行 110 项测试，完整后端验证运行 361 项测试，均汇总为 `OK`；`compileall` 退出码为 0。桌面端 14 项 Node 测试通过，Renderer 构建及 `src/main.js`、`src/preload.js` 语法检查通过。
+
 - [ ] **步骤 8：推送分支并创建草稿 PR**
 
 ```bash

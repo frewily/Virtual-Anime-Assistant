@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, RootModel
+from pydantic.errors import PydanticInvalidForJsonSchema
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -47,6 +48,22 @@ class ExtraAllowedArguments(BaseModel):
 
 class ScalarArguments(RootModel[str]):
     pass
+
+
+class InvalidJsonSchemaArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        raise PydanticInvalidForJsonSchema("unsupported test schema")
+
+
+class ProgrammingErrorArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        raise RuntimeError("programming error")
 
 
 SHARED_SCHEMA = {
@@ -136,7 +153,7 @@ class ModelToolCatalogTests(unittest.TestCase):
             False,
         )
 
-    def test_catalog_rejects_non_object_argument_schema(self):
+    def test_catalog_filters_non_object_argument_schema(self):
         registry = ToolRegistry()
         registry.register(
             definition(
@@ -146,7 +163,47 @@ class ModelToolCatalogTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaises(ValueError):
+        self.assertEqual(ModelToolCatalog(registry).list(), ())
+
+    def test_catalog_filters_expected_schema_failures_and_keeps_valid_tools(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.schema-error",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=InvalidJsonSchemaArguments,
+            )
+        )
+        registry.register(
+            definition(
+                "example.bad-description",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+            )
+        )
+        registry.register(
+            definition(
+                "example.valid",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+            )
+        )
+        bad_description = registry.require("example.bad-description")
+        object.__setattr__(bad_description, "title", "x" * 1001)
+
+        tools = ModelToolCatalog(registry).list()
+
+        self.assertEqual([tool.name for tool in tools], ["example.valid"])
+
+    def test_catalog_does_not_swallow_programming_errors(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.programming-error",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=ProgrammingErrorArguments,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "programming error"):
             ModelToolCatalog(registry).list()
 
     def test_catalog_closes_top_level_and_nested_ref_object_schemas(self):

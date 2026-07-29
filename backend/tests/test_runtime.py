@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+from pydantic import BaseModel, RootModel
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.monitor import ForegroundWindowMonitor
@@ -16,12 +18,13 @@ from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
 from channels.onebot.connection import OneBotConnectionManager
 from core.runtime import AssistantRuntime
+from domain.tools import ToolRisk, ToolSource
 from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
 from tools.catalog import ModelToolCatalog
-from tools.registry import ToolRegistry
+from tools.registry import ToolDefinition, ToolRegistry
 from tools.service import ToolExecutionService
 
 
@@ -39,6 +42,37 @@ def llm_settings(
         timeout_seconds=10,
         max_context_messages=8,
         max_context_chars=5000,
+    )
+
+
+class RuntimeToolArguments(BaseModel):
+    value: str
+
+
+class InvalidRuntimeToolArguments(RootModel[str]):
+    pass
+
+
+async def runtime_tool_handler(_: BaseModel) -> dict:
+    return {}
+
+
+def runtime_tool_definition(
+    name: str,
+    *,
+    risk: ToolRisk = ToolRisk.LOW,
+    arguments_model: type[BaseModel] = RuntimeToolArguments,
+) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        title=name,
+        arguments_model=arguments_model,
+        risk=risk,
+        impact="测试影响",
+        timeout_seconds=1,
+        cancellable=True,
+        handler=runtime_tool_handler,
+        allowed_sources=frozenset({ToolSource.MODEL}),
     )
 
 
@@ -220,6 +254,88 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIsNone(runtime.model_tool_orchestrator)
                 self.assertIsNone(runtime.application.model_orchestrator)
                 asyncio.run(runtime.aclose())
+
+    def test_runtime_requires_at_least_one_exportable_model_tool(self):
+        registries = []
+        empty_registry = ToolRegistry()
+        registries.append(empty_registry)
+
+        high_risk_registry = ToolRegistry()
+        high_risk_registry.register(
+            runtime_tool_definition(
+                "example.high-risk",
+                risk=ToolRisk.HIGH,
+            )
+        )
+        registries.append(high_risk_registry)
+
+        invalid_registry = ToolRegistry()
+        invalid_registry.register(
+            runtime_tool_definition(
+                "example.invalid",
+                arguments_model=InvalidRuntimeToolArguments,
+            )
+        )
+        registries.append(invalid_registry)
+
+        for registry in registries:
+            with self.subTest(tool_names=[
+                definition.name for definition in registry.list()
+            ]), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "assistant.db"
+                with patch(
+                    "core.runtime.ModelToolOrchestrator"
+                ) as orchestrator_type:
+                    runtime = AssistantRuntime(
+                        llm_settings=llm_settings(
+                            enabled=True,
+                            tool_calling_enabled=True,
+                        ),
+                        database_settings=DatabaseSettings(
+                            data_dir=path.parent,
+                            database_path=path,
+                        ),
+                        tool_registry=registry,
+                    )
+
+                self.assertIsInstance(
+                    runtime.model_tool_catalog,
+                    ModelToolCatalog,
+                )
+                orchestrator_type.assert_not_called()
+                self.assertIsNone(runtime.model_tool_orchestrator)
+                self.assertIsNone(runtime.application.model_orchestrator)
+                asyncio.run(runtime.aclose())
+
+    def test_runtime_enables_tools_when_catalog_has_a_valid_entry(self):
+        registry = ToolRegistry()
+        registry.register(
+            runtime_tool_definition("example.valid")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assistant.db"
+            runtime = AssistantRuntime(
+                llm_settings=llm_settings(
+                    enabled=True,
+                    tool_calling_enabled=True,
+                ),
+                database_settings=DatabaseSettings(
+                    data_dir=path.parent,
+                    database_path=path,
+                ),
+                tool_registry=registry,
+            )
+
+            self.assertEqual(
+                [tool.name for tool in runtime.model_tool_catalog.list()],
+                ["example.valid"],
+            )
+            self.assertIsNotNone(runtime.model_tool_orchestrator)
+            self.assertIs(
+                runtime.application.model_orchestrator,
+                runtime.model_tool_orchestrator,
+            )
+            asyncio.run(runtime.aclose())
 
     def test_explicit_tool_dependencies_are_preserved_without_database(self):
         registry = ToolRegistry()

@@ -324,6 +324,41 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reply.text)
         self.assertEqual(reply.tool_calls[0].arguments, {})
 
+    async def test_complete_rejects_tool_calls_when_request_has_no_tools(self):
+        for content in (None, "意外附带文本"):
+            with self.subTest(content=content):
+                gateway = OpenAICompatibleGateway(
+                    _settings(tool_calling_enabled=True),
+                    transport=httpx.MockTransport(
+                        lambda request, value=content: _json_response(
+                            {
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "content": value,
+                                            "tool_calls": [
+                                                {
+                                                    "id": "unexpected-call",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": (
+                                                            "system.current_time"
+                                                        ),
+                                                        "arguments": "{}",
+                                                    },
+                                                }
+                                            ],
+                                        }
+                                    }
+                                ]
+                            }
+                        )
+                    ),
+                )
+
+                with self.assertRaises(ModelProtocolError):
+                    await gateway.complete(_request())
+
     async def test_complete_rejects_malformed_tool_call_envelopes(self):
         invalid_calls = (
             {

@@ -2,7 +2,11 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+from pydantic.errors import (
+    PydanticInvalidForJsonSchema,
+    PydanticSchemaGenerationError,
+)
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
 from pydantic_core import core_schema
 
@@ -22,6 +26,10 @@ class _ClosedModelJsonSchema(GenerateJsonSchema):
         return generated
 
 
+class _UnsupportedToolSchemaError(ValueError):
+    pass
+
+
 def build_closed_arguments_schema(
     definition: ToolDefinition,
 ) -> dict[str, Any]:
@@ -31,7 +39,7 @@ def build_closed_arguments_schema(
         )
     )
     if schema.get("type") != "object":
-        raise ValueError(
+        raise _UnsupportedToolSchemaError(
             "tool parameters must be a top-level object schema"
         )
     _close_object_schemas(schema)
@@ -145,14 +153,19 @@ class ModelToolCatalog:
                 or ToolSource.MODEL not in definition.allowed_sources
             ):
                 continue
-            parameters = build_closed_arguments_schema(definition)
-            tools.append(
-                ModelToolDefinition(
+            try:
+                parameters = build_closed_arguments_schema(definition)
+                tool = ModelToolDefinition(
                     name=definition.name,
-                    description=(
-                        f"{definition.title}。{definition.impact}"
-                    ),
+                    description=f"{definition.title}。{definition.impact}",
                     parameters=parameters,
                 )
-            )
+            except (
+                _UnsupportedToolSchemaError,
+                PydanticInvalidForJsonSchema,
+                PydanticSchemaGenerationError,
+                ValidationError,
+            ):
+                continue
+            tools.append(tool)
         return tuple(tools)

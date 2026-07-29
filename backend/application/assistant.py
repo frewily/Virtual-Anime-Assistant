@@ -315,21 +315,35 @@ class AssistantApplication:
         started_at = perf_counter()
         try:
             reply = await self.llm.complete(request)
-        except ModelGatewayError as exc:
-            await self.store.record_model_call(
-                ModelCallRecord(
-                    message_id=user_message.id,
-                    model=self.llm.model_name,
-                    status=exc.code,
-                    latency_ms=self._elapsed_ms(started_at),
+            if reply.tool_calls or reply.text is None or not reply.text.strip():
+                raise ModelProtocolError(
+                    "legacy model reply requires text only"
                 )
-            )
-            return AssistantResponse(
+        except ModelGatewayError as exc:
+            response = AssistantResponse(
                 correlation_id=message.message_id,
                 conversation_id=message.conversation_id,
                 kind=ResponseKind.ERROR,
                 text=self._safe_model_error(exc),
             )
+            await self.store.save_model_result(
+                ModelCallRecord(
+                    message_id=user_message.id,
+                    model=self.llm.model_name,
+                    status=exc.code,
+                    latency_ms=self._elapsed_ms(started_at),
+                ),
+                StoredMessage(
+                    id=response.response_id,
+                    conversation_id=message.conversation_id,
+                    correlation_id=user_message.id,
+                    role="assistant",
+                    content=response.text,
+                    model=self.llm.model_name,
+                    status=MessageStatus.FAILED,
+                ),
+            )
+            return response
 
         response = AssistantResponse(
             correlation_id=message.message_id,

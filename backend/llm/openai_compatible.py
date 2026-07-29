@@ -126,7 +126,10 @@ class OpenAICompatibleGateway:
             raise ModelServiceError("model service request failed") from None
 
         self._raise_for_status(response.status_code)
-        return self._parse_reply(response)
+        return self._parse_reply(
+            response,
+            allow_tool_calls=bool(request.tools),
+        )
 
     @staticmethod
     def _message_payload(message: ModelMessage) -> dict[str, Any]:
@@ -170,13 +173,20 @@ class OpenAICompatibleGateway:
             raise ModelRateLimitError(f"model service returned HTTP {status_code}")
         raise ModelServiceError(f"model service returned HTTP {status_code}")
 
-    def _parse_reply(self, response: httpx.Response) -> ModelReply:
+    def _parse_reply(
+        self,
+        response: httpx.Response,
+        *,
+        allow_tool_calls: bool,
+    ) -> ModelReply:
         try:
             completion = _ChatCompletionResponse.model_validate(response.json())
             if not completion.choices:
                 raise ValueError("missing completion choice")
 
             choice = completion.choices[0]
+            if choice.message.tool_calls and not allow_tool_calls:
+                raise ValueError("unexpected tool calls")
             content = choice.message.content
             text = content.strip() if content is not None else None
             if text == "":

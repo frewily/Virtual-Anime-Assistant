@@ -85,6 +85,9 @@ class AssistantRuntime:
                     self.model_tool_catalog = ModelToolCatalog(
                         self.tool_registry
                     )
+                    tools_enabled = bool(
+                        self.model_tool_catalog.list()
+                    )
                 llm = (
                     OpenAICompatibleGateway(settings)
                     if settings.enabled

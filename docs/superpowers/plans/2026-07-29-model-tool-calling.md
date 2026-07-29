@@ -1647,7 +1647,7 @@ git commit -m "test: 覆盖桌面与 QQ 模型工具调用"
 - 修改：`README.md`
 - 修改：`docs/superpowers/plans/2026-07-29-model-tool-calling.md`
 
-- [ ] **步骤 1：更新 README 配置和安全说明**
+- [x] **步骤 1：更新 README 配置和安全说明**
 
 在模型配置表增加：
 
@@ -1662,7 +1662,7 @@ git commit -m "test: 覆盖桌面与 QQ 模型工具调用"
 - 高风险工具、Shell、文件修改、键盘输入、应用启动和 QQ 主动发送均不向模型开放。
 - 关闭开关即可回退到纯文本模型路径，无需修改数据库。
 
-- [ ] **步骤 2：运行 Python 编译与全部后端测试**
+- [x] **步骤 2：运行 Python 编译与全部后端测试**
 
 运行：
 
@@ -1673,7 +1673,7 @@ python3 -m unittest discover -s backend/tests -v
 
 预期：退出码为 0，测试汇总为 `OK`，没有失败或错误。
 
-- [ ] **步骤 3：运行桌面端回归测试**
+- [x] **步骤 3：运行桌面端回归测试**
 
 运行：
 
@@ -1685,7 +1685,7 @@ cd ..
 
 预期：退出码为 0，全部 Node 测试通过，Renderer 成功构建。
 
-- [ ] **步骤 4：检查差异和敏感信息**
+- [x] **步骤 4：检查差异和敏感信息**
 
 运行：
 
@@ -1738,7 +1738,7 @@ export ASSISTANT_LLM_TOOL_CALLING_ENABLED=true
 
 若当前供应商不支持 Tool Calling，只记录兼容性限制，不改为自动无工具重试。
 
-- [ ] **步骤 7：更新计划验收记录并提交文档**
+- [x] **步骤 7：更新计划验收记录并提交文档**
 
 把步骤 2～6 的实际命令、测试数量、供应商兼容情况和手动结果写入本计划，不记录 API Key、QQ 标识或原始供应商错误正文。
 
@@ -1746,6 +1746,74 @@ export ASSISTANT_LLM_TOOL_CALLING_ENABLED=true
 git add README.md docs/superpowers/plans/2026-07-29-model-tool-calling.md
 git commit -m "docs: 记录模型工具调用验收结果"
 ```
+
+### Task 8 验收记录（2026-07-29）
+
+自动验证使用 Python 3.14.4、Node.js v24.15.0 和 npm 12.0.1。没有读取、输出或写入真实 API Key、QQ 标识与供应商错误正文。
+
+定向测试：
+
+```bash
+python3 -m unittest \
+  backend.tests.test_llm_models_config \
+  backend.tests.test_openai_compatible \
+  backend.tests.test_model_tool_catalog \
+  backend.tests.test_model_tool_orchestrator \
+  backend.tests.test_integration \
+  backend.tests.test_onebot_api -v
+```
+
+结果：106 项测试通过，汇总为 `Ran 106 tests in 2.705s` 和 `OK`。
+
+完整后端验证：
+
+```bash
+python3 -m compileall -q backend
+python3 -m unittest discover -s backend/tests -p 'test_*.py' -v
+```
+
+结果：编译检查退出码为 0；353 项后端测试通过，汇总为 `Ran 353 tests in 3.221s` 和 `OK`。测试过程中出现 2 条指向临时 SQLite 连接的 `ResourceWarning`，未产生测试失败或错误；本任务保持文档范围，未修改测试资源清理逻辑。
+
+桌面端验证：
+
+```bash
+cd desktop-app
+npm test
+cd ..
+```
+
+结果：14 项 Node 单元测试通过，Renderer 由 esbuild 成功构建，`src/main.js` 与 `src/preload.js` 语法检查通过。首次运行因本地缺少 esbuild 退出；`npm ci` 又因锁文件引用的远程镜像被当前执行环境拒绝。随后使用 `npm install --package-lock=false --ignore-scripts` 只补充 Git 忽略的本地依赖，重跑 `npm test` 后退出码为 0，未修改 `package-lock.json`。
+
+差异与敏感信息检查：
+
+```bash
+git diff --check
+git status --short
+git diff --name-only
+rg -n \
+  "gho_|sk-[A-Za-z0-9]|ASSISTANT_QQ_ACCESS_TOKEN=.+" \
+  README.md backend docs/superpowers
+git diff -- README.md \
+  docs/superpowers/plans/2026-07-29-model-tool-calling.md |
+  rg -n \
+    "g[h]o_[A-Za-z0-9]{20,}|s[k]-[A-Za-z0-9]{20,}|ASSISTANT_QQ_ACCESS_TOKE[N]=[A-Za-z0-9]{16,}"
+```
+
+结果：`git diff --check` 无输出；提交前只有 `README.md` 与本计划发生变化。计划原始仓库级扫描会命中它自身记录的扫描表达式和后端测试中的固定假 Token，因此不能满足「无命中」预期；针对本阶段实际差异的等价扫描无命中，未发现新增敏感信息。
+
+本地 Fake 链路替代验收：
+
+- 关闭 Tool Calling 的测试路径不发送 `tools`，只保存 1 条模型调用记录，不创建工具请求或确认。
+- 开启路径使用 FakeGateway、真实 `ToolExecutionService` 与真实 SQLite：桌面和 QQ 都能执行 `system.current_time`，工具审计中的来源为 `model`、状态为 `succeeded`，确认列表为空。
+- QQ 私聊无需 `@`；群聊只有结构化 `@机器人` 时触发。重复消息以及 QQ 渠道重建后的重复事件不会再次调用模型或执行工具。
+- 模型猜测未公开或高风险工具时，工具服务或真实处理器调用次数为 0，不创建工具请求与确认。
+- 3 次模型请求与 4 个工具调用硬限制、工具结果不可信提示词、最终回复与全部模型调用记录的 SQLite 原子保存均由定向或完整后端测试覆盖。
+
+真实供应商与界面限制：
+
+- 当前环境中的 `ASSISTANT_LLM_ENABLED`、模型地址、API Key、模型名和 Tool Calling 开关均未配置。未启动真实供应商、Electron 或真实 QQ 连接，步骤 5～6 保持未勾选。
+- 尚未验证特定真实供应商是否支持 Chat Completions `tool_calls`。不支持时必须关闭 `ASSISTANT_LLM_TOOL_CALLING_ENABLED`；不得弱化协议校验，也不得自动改用无工具请求重试。
+- Electron 确认卡片与真实 QQ 渠道的最终视觉和在线联调仍需在具备本地模型与已授权 QQ 环境中完成。
 
 - [ ] **步骤 8：推送分支并创建草稿 PR**
 

@@ -118,6 +118,7 @@ export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
 | `ASSISTANT_GPT_SOVITS_URL` | `http://127.0.0.1:9880` | GPT-SoVITS 服务地址 |
 | `ASSISTANT_AUDIO_MAX_AGE_SECONDS` | `86400` | 生成音频的最大保留时间 |
 | `ASSISTANT_LLM_ENABLED` | `false` | 是否启用真实大模型；支持 `1/true/yes/on` 和 `0/false/no/off` |
+| `ASSISTANT_LLM_TOOL_CALLING_ENABLED` | `false` | 是否允许模型调用显式授权的低风险只读工具 |
 | `ASSISTANT_LLM_BASE_URL` | 空 | OpenAI 兼容服务根地址，例如 `https://api.example.com/v1` |
 | `ASSISTANT_LLM_API_KEY` | 空 | OpenAI 兼容服务 API Key |
 | `ASSISTANT_LLM_MODEL` | 空 | 兼容服务支持的模型名称 |
@@ -151,12 +152,19 @@ export ASSISTANT_LLM_ENABLED=true
 export ASSISTANT_LLM_BASE_URL=https://api.example.com/v1
 export ASSISTANT_LLM_API_KEY=your-api-key
 export ASSISTANT_LLM_MODEL=your-model
+export ASSISTANT_LLM_TOOL_CALLING_ENABLED=false
 python3 backend/main.py
 ```
 
 API Key 只从环境变量读取。不要把真实 Key 写入仓库、配置文件或日志。未配置 `ASSISTANT_LLM_API_KEY` 时不会发送 `Authorization` 请求头，是否可用取决于兼容服务自身。
 
-当前模型请求只发送消息和基础生成参数，不启用 Tool Calling，也不控制电脑。模型鉴权、限流、超时、协议和服务错误会转换为有限的安全提示，不返回服务响应体、地址或密钥。
+以上示例保留安全默认值，只启用纯文本模型路径。只有 `ASSISTANT_LLM_ENABLED=true` 与 `ASSISTANT_LLM_TOOL_CALLING_ENABLED=true` 同时成立时，后端才会向模型发送本次请求可用的 OpenAI 兼容 `tools`。需要显式启用时，仅修改工具开关：
+
+```bash
+export ASSISTANT_LLM_TOOL_CALLING_ENABLED=true
+```
+
+兼容服务必须支持 Chat Completions `tool_calls`。若供应商不支持，关闭工具开关即可回退到纯文本模型路径，无需修改或回滚 SQLite 数据库；系统不会自动改用无工具请求重试同一条消息。模型鉴权、限流、超时、协议和服务错误会转换为有限的安全提示，不返回服务响应体、地址或密钥。
 
 ### QQ / OneBot 配置
 
@@ -192,7 +200,16 @@ curl http://127.0.0.1:8080/api/qq/status
 - 注册为敏感字段的参数会在持久化和界面展示前替换为 `[REDACTED]`，原始参数不会写入审计记录。
 - 超时和内部异常只对外返回稳定错误码，不返回异常正文。
 
-当前没有注册任意 Shell、文件删除、键盘输入、应用启动、QQ 主动消息发送或其他真实电脑控制工具。QQ 适配器已直接调用统一应用服务，并使用受信任的 `qq` 来源身份；后续大模型 Tool Calling 也必须复用同一安全边界。本机 HTTP API 仅作为 Electron 和开发调试接缝，不能用于伪装 QQ 或模型来源。
+模型 Tool Calling 还受以下边界约束：
+
+- 模型只能看到同时满足「本地工具显式允许 `MODEL` 来源」和「本地静态风险为 `LOW`」的工具；仅满足低风险条件不会自动公开工具。当前唯一可调用工具是 `system.current_time`。
+- 高风险工具永不由模型自动触发，也不会向模型公开。模型猜测未公开或高风险工具名时，不会执行处理器、创建工具请求或生成确认卡片。
+- 每条用户消息最多请求模型 3 次、执行 4 个工具调用，工具按模型给出的顺序串行执行。
+- 工具结果属于不可信数据，不能覆盖系统规则或授予新权限；只有结果状态为 `succeeded` 时，模型才能声称操作成功。
+- SQLite 独立记录模型来源的工具请求、脱敏结果和审计事件，并在成功或已记录失败的回合中原子保存最终 Assistant 消息与全部模型调用元数据。
+- 当前确认流程只服务于非模型高风险请求。模型高风险调用不会进入确认流程；未来如需支持确认后恢复模型回合，必须先增加持久化上下文和可信绑定。
+
+当前没有注册任意 Shell、文件删除或修改、键盘输入、应用启动、QQ 主动消息发送或其他真实电脑控制工具。桌面与 QQ 共用应用层模型工具编排器，但 QQ 仍遵守渠道准入规则：允许用户的私聊无需 `@`；群聊必须位于允许群，并在消息段中结构化 `@机器人`。本机 HTTP API 仅作为 Electron 和开发调试接缝，不能用于伪装 QQ 或模型来源。
 
 ### 本地记忆与会话
 

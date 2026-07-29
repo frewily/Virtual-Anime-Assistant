@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
@@ -21,6 +22,10 @@ from domain.tools import (
     ToolRisk,
     ToolSource,
     utc_now,
+)
+from tools.catalog import (
+    build_closed_arguments_schema,
+    reject_additional_arguments,
 )
 from tools.policy import ToolPolicy, summarize_arguments
 from tools.registry import ToolDefinition, ToolNotFoundError, ToolRegistry
@@ -105,10 +110,14 @@ class ToolExecutionService:
 
     async def request(self, request: ToolRequest) -> ToolRequestView:
         definition = self.registry.require(request.tool_name)
-        if request.source not in definition.allowed_sources:
+        source = request.source
+        if (
+            not isinstance(source, ToolSource)
+            or source not in definition.allowed_sources
+        ):
             raise ToolNotFoundError(request.tool_name)
         risk = self.policy.risk_for(definition, request.arguments)
-        if request.source is ToolSource.MODEL and risk is not ToolRisk.LOW:
+        if source is ToolSource.MODEL and risk is not ToolRisk.LOW:
             raise ToolNotFoundError(request.tool_name)
         validated_arguments = self._validate_arguments(
             definition,
@@ -127,7 +136,7 @@ class ToolExecutionService:
         record = ToolRequestRecord(
             request_id=request.request_id,
             correlation_id=request.correlation_id,
-            source=request.source,
+            source=source,
             tool_name=definition.name,
             title=definition.title,
             risk=risk,
@@ -444,11 +453,21 @@ class ToolExecutionService:
         arguments: dict[str, Any],
     ) -> BaseModel:
         try:
-            return definition.arguments_model.model_validate(
+            serialized = json.dumps(
                 arguments,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            normalized_arguments = json.loads(serialized)
+            reject_additional_arguments(
+                normalized_arguments,
+                build_closed_arguments_schema(definition),
+            )
+            return definition.arguments_model.model_validate_json(
+                serialized,
                 strict=True,
             )
-        except ValidationError as exc:
+        except (TypeError, ValueError, ValidationError) as exc:
             raise ToolArgumentsError("tool arguments are invalid") from exc
 
     @staticmethod

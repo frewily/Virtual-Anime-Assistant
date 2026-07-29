@@ -15,8 +15,35 @@ class Arguments(BaseModel):
     value: str
 
 
+class NestedArguments(BaseModel):
+    label: str
+
+
+class ArgumentsWithNestedModel(BaseModel):
+    nested: NestedArguments
+
+
 class ScalarArguments(RootModel[str]):
     pass
+
+
+SHARED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "nested": {
+            "type": "object",
+            "properties": {"label": {"type": "string"}},
+        }
+    },
+}
+
+
+class SharedSchemaArguments(BaseModel):
+    nested: NestedArguments
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        return SHARED_SCHEMA
 
 
 async def handler(_: BaseModel) -> dict:
@@ -99,6 +126,49 @@ class ModelToolCatalogTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             ModelToolCatalog(registry).list()
+
+    def test_catalog_closes_top_level_and_nested_ref_object_schemas(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.nested",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=ArgumentsWithNestedModel,
+            )
+        )
+
+        parameters = ModelToolCatalog(registry).list()[0].parameters
+
+        self.assertIs(parameters["additionalProperties"], False)
+        self.assertIs(
+            parameters["$defs"]["NestedArguments"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    def test_catalog_deep_copies_schema_before_closing_objects(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.shared",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=SharedSchemaArguments,
+            )
+        )
+
+        parameters = ModelToolCatalog(registry).list()[0].parameters
+
+        self.assertNotIn("additionalProperties", SHARED_SCHEMA)
+        self.assertNotIn(
+            "additionalProperties",
+            SHARED_SCHEMA["properties"]["nested"],
+        )
+        self.assertIs(parameters["additionalProperties"], False)
+        self.assertIs(
+            parameters["properties"]["nested"]["additionalProperties"],
+            False,
+        )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import asyncio
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,26 @@ class Arguments(BaseModel):
     value: str = "ok"
     token: str = "private"
     count: int = 1
+
+
+class Operation(str, Enum):
+    READ = "read"
+
+
+class NestedArguments(BaseModel):
+    label: str
+
+
+class JsonArguments(BaseModel):
+    operation: Operation
+    requested_at: datetime
+    nested: NestedArguments
+    count: int
+
+
+class RuntimeArguments(BaseModel):
+    nested: NestedArguments
+    count: int
 
 
 class InMemoryToolRepository:
@@ -240,13 +261,14 @@ def build_service(
     cancellable: bool = True,
     clock=None,
     allowed_sources: frozenset[ToolSource] | None = None,
+    arguments_model: type[BaseModel] = Arguments,
 ):
     repository = InMemoryToolRepository()
     registry = ToolRegistry()
     definition_values = dict(
         name="example.tool",
         title="示例工具",
-        arguments_model=Arguments,
+        arguments_model=arguments_model,
         risk=risk,
         impact="修改示例目标" if risk is ToolRisk.HIGH else "只读取示例",
         timeout_seconds=timeout_seconds,
@@ -276,6 +298,37 @@ def request() -> ToolRequest:
 
 
 class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_string_source_cannot_bypass_source_policy(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        for source, risk, allowed_sources in (
+            ("desktop", ToolRisk.LOW, None),
+            ("model", ToolRisk.HIGH, frozenset({ToolSource.MODEL})),
+            ("invalid", ToolRisk.LOW, None),
+        ):
+            with self.subTest(source=source):
+                service, repository = build_service(
+                    risk=risk,
+                    handler=handler,
+                    allowed_sources=allowed_sources,
+                )
+                invalid_request = request().model_copy(
+                    update={"source": source}
+                )
+
+                with self.assertRaises(ToolNotFoundError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
     async def test_model_cannot_execute_low_risk_tool_without_authorization(self):
         calls = 0
 
@@ -357,6 +410,136 @@ class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, 0)
         self.assertEqual(repository.requests, {})
+
+    async def test_strict_json_accepts_enum_datetime_and_nested_object(self):
+        received = None
+
+        async def handler(arguments: JsonArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=JsonArguments,
+        )
+        json_request = request().model_copy(
+            update={
+                "arguments": {
+                    "operation": "read",
+                    "requested_at": "2026-07-29T12:00:00Z",
+                    "nested": {"label": "demo"},
+                    "count": 2,
+                }
+            }
+        )
+
+        result = await service.request(json_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertIs(received.operation, Operation.READ)
+        self.assertEqual(
+            received.requested_at,
+            datetime(2026, 7, 29, 12, tzinfo=timezone.utc),
+        )
+        self.assertIsInstance(received.nested, NestedArguments)
+
+    async def test_strict_json_rejects_numeric_string(self):
+        calls = 0
+
+        async def handler(_: JsonArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=JsonArguments,
+        )
+        invalid_request = request().model_copy(
+            update={
+                "arguments": {
+                    "operation": "read",
+                    "requested_at": "2026-07-29T12:00:00Z",
+                    "nested": {"label": "demo"},
+                    "count": "2",
+                }
+            }
+        )
+
+        with self.assertRaises(ToolArgumentsError):
+            await service.request(invalid_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+
+    async def test_non_json_arguments_are_rejected_without_side_effects(self):
+        calls = 0
+
+        async def handler(_: RuntimeArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=RuntimeArguments,
+        )
+        invalid_request = request().model_copy(
+            update={
+                "arguments": {
+                    "nested": {"label": "demo"},
+                    "count": object(),
+                }
+            }
+        )
+
+        with self.assertRaises(ToolArgumentsError):
+            await service.request(invalid_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+        self.assertEqual(repository.confirmations, {})
+
+    async def test_runtime_rejects_top_level_and_nested_extra_fields(self):
+        calls = 0
+
+        async def handler(_: RuntimeArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "nested": {"label": "demo"},
+            "count": 2,
+        }
+        for extra_arguments in (
+            {**valid_arguments, "unexpected": True},
+            {
+                **valid_arguments,
+                "nested": {"label": "demo", "unexpected": True},
+            },
+        ):
+            with self.subTest(arguments=extra_arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=RuntimeArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": extra_arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
 
     async def test_low_risk_executes_automatically_and_redacts_audit(self):
         calls = 0

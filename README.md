@@ -13,11 +13,12 @@ Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron
 - 使用 SQLite 持久化会话、消息、长期记忆和模型调用元数据。
 - 提供可扩展的工具注册表与权限状态机：低风险工具自动执行，高风险工具必须逐次确认，Electron 会展示待确认队列。
 - 使用 SQLite 持久化工具请求、确认状态和脱敏审计事件，并以原子事务处理确认竞争、过期与取消。
+- 通过 OneBot 11 反向 WebSocket 接入 QQ 私聊和群聊文字；私聊无需 `@`，群聊只有在允许群内结构化 `@机器人` 时触发。
 - 通过明确的记忆命令或管理 API 维护长期记忆，并按来源和用户隔离数据。
 - 支持客户端提供 `messageId` 作为幂等键；重复消息不会再次调用模型，冲突或模型故障只返回安全错误。
 - 默认监听 `127.0.0.1` 回环地址，Electron renderer 不具备 Node.js 权限。
 
-QQ 接入、主动电脑控制和正式安装包仍未实现。当前只能识别前台应用和接收窗口上报，不能代替用户操作电脑。仓库当前工作树不直接提供受授权限制的 Live2D 模型或 Cubism Core SDK；本地开发时可以按下文说明从归档标签恢复 Hiyori 样例资源。
+QQ 私聊与群聊文字接入已通过真实 NapCat 联调，但默认关闭；NapCat 登录和 WebUI 配置仍需要用户手动完成。主动电脑控制和正式安装包仍未实现。当前只能识别前台应用和接收窗口上报，不能代替用户操作电脑。仓库当前工作树不直接提供受授权限制的 Live2D 模型或 Cubism Core SDK；本地开发时可以按下文说明从归档标签恢复 Hiyori 样例资源。
 
 ## 环境要求
 
@@ -124,6 +125,14 @@ export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
 | `ASSISTANT_LLM_MAX_CONTEXT_MESSAGES` | `20` | 近期会话消息数量上限，范围为 1～100 |
 | `ASSISTANT_LLM_MAX_CONTEXT_CHARS` | `12000` | 模型上下文字符上限，范围为 4000～100000 |
 | `ASSISTANT_DATA_DIR` | 平台用户数据目录 | SQLite 数据库目录；文件名固定为 `assistant.db` |
+| `ASSISTANT_QQ_ENABLED` | `false` | 是否启用 QQ 渠道；支持 `1/true/yes/on` 和 `0/false/no/off` |
+| `ASSISTANT_QQ_ACCESS_TOKEN` | 空 | 启用时必填；去除首尾空格后长度为 16～512 |
+| `ASSISTANT_QQ_ALLOWED_GROUP_IDS` | 空 | 允许触发机器人的群号，使用英文逗号分隔的正整数 |
+| `ASSISTANT_QQ_ALLOWED_USER_IDS` | 空 | 允许私聊机器人的用户号，使用英文逗号分隔的正整数 |
+| `ASSISTANT_QQ_RATE_PER_MINUTE` | `10` | 每个 QQ 发送者每分钟限额，范围为 1～120 |
+| `ASSISTANT_QQ_RATE_BURST` | `2` | 瞬时容量，范围为 1～20，且不能大于每分钟限额 |
+| `ASSISTANT_QQ_MAX_CONCURRENCY` | `4` | QQ 渠道全局并发上限，范围为 1～32 |
+| `ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS` | `10` | OneBot 出站动作超时，范围为 1～60 秒 |
 
 > **安全提示：** 记忆、会话等管理 API 当前没有鉴权。CORS 只能约束浏览器，不能阻止非浏览器客户端访问。除非服务位于具备鉴权能力的可信反向代理和网络隔离之后，否则不要把 `ASSISTANT_HOST` 设置为 `0.0.0.0` 或其他非回环地址。
 
@@ -149,6 +158,30 @@ API Key 只从环境变量读取。不要把真实 Key 写入仓库、配置文�
 
 当前模型请求只发送消息和基础生成参数，不启用 Tool Calling，也不控制电脑。模型鉴权、限流、超时、协议和服务错误会转换为有限的安全提示，不返回服务响应体、地址或密钥。
 
+### QQ / OneBot 配置
+
+QQ 渠道默认关闭。启用时必须配置有效 Token，并至少配置 1 个允许群或允许用户。群白名单和用户白名单相互独立：用户位于允许群中，不代表该用户可以私聊机器人。
+
+消息触发规则如下：
+
+- 私聊：发送者必须位于 `ASSISTANT_QQ_ALLOWED_USER_IDS`，不要求 `@`。
+- 群聊：群必须位于 `ASSISTANT_QQ_ALLOWED_GROUP_IDS`，并且消息段中必须结构化 `@机器人`。
+- 群聊回复：第一段引用原消息并 `@发送者`，后续分段只发送文字。
+- 图片、语音、文件和其他富媒体不会被下载或传给模型。
+- 未授权、未 `@`、重复和超限消息会被静默忽略。
+
+NapCat 作为 WebSocket 客户端连接后端的 `/ws/qq`。共享 Token 只从环境变量读取，并通过 `Authorization: Bearer` 请求头进行常量时间校验。同一时间只允许 1 个机器人账号连接；断线、超时或 QQ 配置错误不会阻止 Electron 和本地聊天继续运行。
+
+安全状态可以通过以下接口查询：
+
+```bash
+curl http://127.0.0.1:8080/api/qq/status
+```
+
+响应只包含 `enabled`、`state`、`allowedGroupCount` 和 `allowedUserCount`，不会返回 Token、机器人 QQ 号或白名单内容。
+
+可选 NapCat Docker 配置、扫码步骤和手动验收方法见 [NapCat QQ 开发环境](qq-bot/README.md)。Docker 不会由 Electron 自动启动，也不是桌面助手的运行依赖。
+
 ### 工具权限与安全边界
 
 当前生产注册表只包含只读工具 `system.current_time`，用于读取本地或指定 IANA 时区的当前时间。工具风险由后端根据本地注册信息计算，客户端、模型和 QQ 适配器不能自行把高风险操作降级为低风险：
@@ -159,7 +192,7 @@ API Key 只从环境变量读取。不要把真实 Key 写入仓库、配置文�
 - 注册为敏感字段的参数会在持久化和界面展示前替换为 `[REDACTED]`，原始参数不会写入审计记录。
 - 超时和内部异常只对外返回稳定错误码，不返回异常正文。
 
-当前没有注册任意 Shell、文件删除、键盘输入、应用启动、QQ 消息发送或其他真实电脑控制工具。后续大模型和 QQ 适配器应直接调用同一应用服务，并使用各自受信任的来源身份；本机 HTTP API 仅作为 Electron 和开发调试接缝，不能用于伪装 QQ 或模型来源。
+当前没有注册任意 Shell、文件删除、键盘输入、应用启动、QQ 主动消息发送或其他真实电脑控制工具。QQ 适配器已直接调用统一应用服务，并使用受信任的 `qq` 来源身份；后续大模型 Tool Calling 也必须复用同一安全边界。本机 HTTP API 仅作为 Electron 和开发调试接缝，不能用于伪装 QQ 或模型来源。
 
 ### 本地记忆与会话
 
@@ -204,7 +237,9 @@ HTTP 和 WebSocket 聊天请求可以提供长度为 1～200 的 `messageId`。�
 | POST | `/api/tools/confirmations/{confirmation_id}/decision` | 对高风险操作执行一次性批准或拒绝 |
 | GET | `/api/tools/requests/{request_id}` | 查询工具请求的安全状态与结果 |
 | POST | `/api/tools/requests/{request_id}/cancel` | 取消待确认或支持安全取消的运行请求 |
+| GET | `/api/qq/status` | 获取不含 Token 和白名单内容的 QQ 渠道状态 |
 | WS | `/ws/avatar` | 双向角色消息通道 |
+| WS | `/ws/qq` | OneBot 11 反向 WebSocket；需要 Bearer Token 和 `X-Self-ID` |
 
 记忆与会话管理 API 当前仅支持本机 `local-user`：来源固定为 `desktop`，可管理的会话固定为 `desktop:local-user`。其他用户或来源的数据不会由这些端点返回或删除。
 
@@ -218,7 +253,7 @@ npm --prefix desktop-app test
 npm --prefix desktop-app run build:renderer
 ```
 
-完整优化清单与实施状态见 [项目优化实施计划](docs/superpowers/plans/2026-07-22-project-hardening.md) 和 [工具权限状态机实施计划](docs/superpowers/plans/2026-07-29-tool-permission-state-machine.md)。
+完整优化清单与实施状态见 [项目优化实施计划](docs/superpowers/plans/2026-07-22-project-hardening.md)、[工具权限状态机实施计划](docs/superpowers/plans/2026-07-29-tool-permission-state-machine.md)、[OneBot QQ 渠道设计](docs/superpowers/specs/2026-07-29-onebot-qq-channel-design.md) 和 [OneBot QQ 渠道实现计划](docs/superpowers/plans/2026-07-29-onebot-qq-channel.md)。
 
 ## 项目结构
 
@@ -227,6 +262,7 @@ backend/       FastAPI API、统一消息、工具权限、会话编排、模型
 config/        声线、回复和场景 YAML 配置
 desktop-app/   Electron 主进程、preload 和 renderer
 docs/          架构规格与分阶段实施计划
+qq-bot/        可选 NapCat Docker 配套和手动配置说明
 ```
 
 ## License

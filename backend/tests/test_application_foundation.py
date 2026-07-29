@@ -268,6 +268,42 @@ class AssistantApplicationTests(unittest.TestCase):
             publisher=self.publisher,
         )
 
+    def test_process_runs_business_logic_without_publishing(self):
+        result = asyncio.run(self.application.process(message()))
+
+        self.assertEqual(result.text, "模型回答")
+        self.assertEqual(len(self.llm.requests), 1)
+        self.assertIn("message-1", self.store.messages)
+        self.subscriber.assert_not_awaited()
+
+    def test_handle_processes_then_publishes_once(self):
+        result = asyncio.run(self.application.handle(message()))
+
+        self.assertEqual(result.text, "模型回答")
+        self.subscriber.assert_awaited_once_with(result)
+
+    def test_has_seen_message_uses_the_store_without_publishing(self):
+        item = message(
+            conversation_id="qq:private:456",
+            message_id="qq:123:10",
+            source=MessageSource.QQ,
+            sender_id="456",
+        )
+
+        self.assertFalse(
+            asyncio.run(
+                self.application.has_seen_message(item.message_id)
+            )
+        )
+        asyncio.run(self.application.process(item))
+
+        self.assertTrue(
+            asyncio.run(
+                self.application.has_seen_message(item.message_id)
+            )
+        )
+        self.subscriber.assert_not_awaited()
+
     def test_fake_store_satisfies_minimal_application_protocol(self):
         self.assertIsInstance(self.store, AssistantStore)
 

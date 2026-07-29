@@ -9,6 +9,8 @@ from api.avatar import router as avatar_router
 from api.chat import router as chat_router
 from api.conversations import router as conversations_router
 from api.memories import router as memories_router
+from api.qq import status_router as qq_status_router
+from api.qq import websocket_router as qq_websocket_router
 from api.status import router as status_router
 from api.tools import (
     confirmation_payload,
@@ -134,7 +136,9 @@ def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
     app.include_router(memories_router, prefix="/api")
     app.include_router(conversations_router, prefix="/api")
     app.include_router(tools_router, prefix="/api")
+    app.include_router(qq_status_router, prefix="/api")
     app.include_router(ws_router)
+    app.include_router(qq_websocket_router)
     app.mount(
         "/api/tts/audio",
         StaticFiles(directory=AUDIO_DIR, check_dir=False),

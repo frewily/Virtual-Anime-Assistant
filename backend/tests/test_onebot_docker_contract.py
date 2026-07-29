@@ -60,7 +60,7 @@ class OneBotDockerContractTests(unittest.TestCase):
         self.assertIn("qq-bot/data/", ignored)
         self.assertIn("qq-bot/.env", ignored)
 
-    def test_example_environment_contains_no_token_or_qq_password(self):
+    def test_example_environment_contains_no_sensitive_credentials(self):
         example = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
         lowered = example.lower()
 

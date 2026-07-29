@@ -802,7 +802,7 @@ git commit -m "feat: 暴露 OneBot WebSocket 与状态接口"
 - `test_qq_and_napcat_config_volumes_are_persistent`
 - `test_host_docker_internal_mapping_exists`
 - `test_runtime_data_directories_are_gitignored`
-- `test_example_environment_contains_no_token_or_qq_password`
+- `test_example_environment_contains_no_sensitive_credentials`
 
 - [ ] **步骤 2：运行测试并确认配套文件缺失**
 
@@ -914,7 +914,7 @@ git commit -m "feat: 增加可选 NapCat Docker 配套"
 运行：
 
 ```bash
-rg -n "T[O]DO|T[B]D|F[I]XME|gho_|qq_password|ASSISTANT_QQ_ACCESS_TOKEN=[^<[:space:]]" backend/channels/onebot backend/api/qq.py qq-bot README.md docs/superpowers/plans/2026-07-29-onebot-qq-channel.md
+rg -n "T[O]DO|T[B]D|F[I]XME|g[h]o_|q[q]_password|ASSISTANT_QQ_ACCESS_TOKEN=[^<[:space:]]" backend/channels/onebot backend/api/qq.py qq-bot README.md docs/superpowers/plans/2026-07-29-onebot-qq-channel.md
 ```
 
 预期：没有实现占位符、GitHub Token、QQ 密码或真实 OneBot Token；文档中的变量名和 `<token>` 示例可以保留。

@@ -26,6 +26,19 @@ from llm.demo import DemoLanguageModelGateway
 
 
 class LLMSettingsTests(unittest.TestCase):
+    def test_programmatic_construction_remains_backward_compatible(self):
+        settings = LLMSettings(
+            enabled=False,
+            base_url=None,
+            api_key=None,
+            model=None,
+            timeout_seconds=60,
+            max_context_messages=20,
+            max_context_chars=12000,
+        )
+
+        self.assertFalse(settings.tool_calling_enabled)
+
     def test_disabled_mode_does_not_require_remote_configuration(self):
         with patch.dict(os.environ, {}, clear=True):
             settings = LLMSettings.from_env()

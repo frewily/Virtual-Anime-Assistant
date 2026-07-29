@@ -48,13 +48,13 @@ def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
 @dataclass(frozen=True)
 class LLMSettings:
     enabled: bool
-    tool_calling_enabled: bool
     base_url: str | None
     api_key: str | None
     model: str | None
     timeout_seconds: int
     max_context_messages: int
     max_context_chars: int
+    tool_calling_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "LLMSettings":

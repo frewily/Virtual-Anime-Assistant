@@ -41,28 +41,32 @@ class AssistantRuntime:
         qq_connection: OneBotConnectionManager | None = None,
         qq_channel: OneBotChannel | None = None,
     ):
-        self.monitor = monitor if monitor is not None else SystemMonitor()
-        self.scenario_engine = (
-            scenario_engine
-            if scenario_engine is not None
-            else ScenarioEngine()
-        )
+        self._owned_resources: list[tuple[str, object]] = []
+        self._resource_closed: dict[str, bool] = {}
+        self._closed = False
         self.model_tool_catalog = None
         self.model_tool_orchestrator = None
+        self._llm = None
+        self._tts = None
 
-        if application is None:
-            settings = llm_settings or LLMSettings.from_env()
-            database = (
-                database_settings or DatabaseSettings.from_env()
-                if store is None
-                else None
+        try:
+            self.monitor = monitor if monitor is not None else SystemMonitor()
+            self.scenario_engine = (
+                scenario_engine
+                if scenario_engine is not None
+                else ScenarioEngine()
             )
-            owns_store = store is None
-            llm = None
-            tts = None
-            try:
+
+            if application is None:
+                settings = llm_settings or LLMSettings.from_env()
+                database = (
+                    database_settings or DatabaseSettings.from_env()
+                    if store is None
+                    else None
+                )
                 if store is None:
                     store = SqliteStore(database.database_path)
+                    self._register_owned("store", store)
                 self.store = store
                 self.tool_registry = (
                     tool_registry
@@ -86,6 +90,8 @@ class AssistantRuntime:
                     if settings.enabled
                     else DemoLanguageModelGateway()
                 )
+                self._llm = llm
+                self._register_owned("llm", llm)
                 if tools_enabled:
                     self.model_tool_orchestrator = ModelToolOrchestrator(
                         gateway=llm,
@@ -94,6 +100,8 @@ class AssistantRuntime:
                         enabled=True,
                     )
                 tts = TTSService()
+                self._tts = tts
+                self._register_owned("tts", tts)
                 context_builder = ConversationContextBuilder(
                     settings.max_context_messages,
                     settings.max_context_chars,
@@ -107,96 +115,109 @@ class AssistantRuntime:
                     publisher=publisher,
                     model_orchestrator=self.model_tool_orchestrator,
                 )
+            else:
+                self.store = (
+                    store
+                    if store is not None
+                    else getattr(application, "store", None)
+                )
+                self.tool_registry = (
+                    tool_registry
+                    or getattr(tool_service, "registry", None)
+                    or build_builtin_registry()
+                )
+                self.tool_service = tool_service
+                if self.tool_service is None and self.store is not None:
+                    self.tool_service = ToolExecutionService(
+                        registry=self.tool_registry,
+                        repository=self.store,
+                    )
+
+            self.application = application
+            self.qq_settings = qq_settings or OneBotSettings.from_env()
+            if qq_connection is None:
+                qq_connection = OneBotConnectionManager(
+                    action_timeout_seconds=(
+                        self.qq_settings.action_timeout_seconds
+                    ),
+                )
+                self._register_owned("qq_connection", qq_connection)
+            self.qq_connection = qq_connection
+            if qq_channel is None:
+                qq_channel = OneBotChannel(
+                    application=self.application,
+                    settings=self.qq_settings,
+                    connection=self.qq_connection,
+                )
+                self._register_owned("qq_channel", qq_channel)
+            self.qq_channel = qq_channel
+            if llm_settings is not None:
+                self.llm_mode = (
+                    "configured" if llm_settings.enabled else "demo"
+                )
+            else:
+                self.llm_mode = (
+                    "configured"
+                    if isinstance(
+                        getattr(application, "llm", None),
+                        OpenAICompatibleGateway,
+                    )
+                    else "demo"
+                )
+            self._current_window: dict | None = None
+            self._closed = all(self._resource_closed.values())
+        except BaseException:
+            self._rollback_initialization()
+            raise
+
+    def _register_owned(self, name: str, resource: object) -> None:
+        self._owned_resources.append((name, resource))
+        self._resource_closed[name] = False
+
+    def _rollback_initialization(self) -> None:
+        for name, resource in reversed(self._owned_resources):
+            if self._resource_closed[name]:
+                continue
+            try:
+                if name == "store":
+                    resource._close_sync()
+                else:
+                    self._close_resource_sync(resource)
             except BaseException:
-                self._cleanup_failed_initialization(
-                    store=store if owns_store else None,
-                    llm=llm,
-                    tts=tts,
-                )
-                raise
-        else:
-            self.store = (
-                store
-                if store is not None
-                else getattr(application, "store", None)
-            )
-            self.tool_registry = (
-                tool_registry
-                or getattr(tool_service, "registry", None)
-                or build_builtin_registry()
-            )
-            self.tool_service = tool_service
-            if self.tool_service is None and self.store is not None:
-                self.tool_service = ToolExecutionService(
-                    registry=self.tool_registry,
-                    repository=self.store,
-                )
-        self.application = application
-        self.qq_settings = qq_settings or OneBotSettings.from_env()
-        self.qq_connection = (
-            qq_connection
-            if qq_connection is not None
-            else OneBotConnectionManager(
-                action_timeout_seconds=(
-                    self.qq_settings.action_timeout_seconds
-                ),
-            )
-        )
-        self.qq_channel = (
-            qq_channel
-            if qq_channel is not None
-            else OneBotChannel(
-                application=self.application,
-                settings=self.qq_settings,
-                connection=self.qq_connection,
-            )
-        )
-        if llm_settings is not None:
-            self.llm_mode = (
-                "configured" if llm_settings.enabled else "demo"
-            )
-        else:
-            self.llm_mode = (
-                "configured"
-                if isinstance(
-                    getattr(application, "llm", None),
-                    OpenAICompatibleGateway,
-                )
-                else "demo"
-            )
-        self._current_window: dict | None = None
-        self._closed = False
-        self._qq_closed = False
-        self._store_closed = self.store is None
+                continue
+            self._resource_closed[name] = True
 
     @classmethod
-    def _cleanup_failed_initialization(
-        cls,
-        *,
-        store,
-        llm,
-        tts,
-    ) -> None:
-        for resource in (tts, llm):
-            if resource is None:
-                continue
-            close = getattr(resource, "close", None)
-            if close is None:
-                close = getattr(resource, "aclose", None)
-            if close is None:
-                continue
-            try:
-                result = close()
-                if inspect.isawaitable(result):
-                    cls._await_cleanup(result)
-            except BaseException:
-                pass
+    def _close_resource_sync(cls, resource: object) -> None:
+        close = cls._close_method(resource)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            cls._await_cleanup(result)
 
-        if store is not None:
-            try:
-                store._close_sync()
-            except BaseException:
-                pass
+    @staticmethod
+    async def _close_resource(name: str, resource: object) -> None:
+        close = AssistantRuntime._close_method(
+            resource,
+            prefer_close=name == "store",
+        )
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+    @staticmethod
+    def _close_method(resource: object, *, prefer_close: bool = False):
+        if prefer_close:
+            close = getattr(resource, "close", None)
+            if close is not None:
+                return close
+        close = getattr(resource, "aclose", None)
+        if close is not None:
+            return close
+        return getattr(resource, "close", None)
 
     @staticmethod
     def _await_cleanup(awaitable) -> None:
@@ -257,27 +278,17 @@ class AssistantRuntime:
         if self._closed:
             return
         first_error: BaseException | None = None
-        if not self._qq_closed:
+        for name, resource in reversed(self._owned_resources):
+            if self._resource_closed[name]:
+                continue
             try:
-                await self.qq_connection.aclose()
-            except BaseException as exc:
-                first_error = exc
-            else:
-                self._qq_closed = True
-
-        if not self._store_closed:
-            close = getattr(self.store, "close", None)
-            try:
-                if close is not None:
-                    result = close()
-                    if inspect.isawaitable(result):
-                        await result
+                await self._close_resource(name, resource)
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
             else:
-                self._store_closed = True
+                self._resource_closed[name] = True
 
-        self._closed = self._qq_closed and self._store_closed
+        self._closed = all(self._resource_closed.values())
         if first_error is not None:
             raise first_error

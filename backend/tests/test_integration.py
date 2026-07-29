@@ -209,6 +209,7 @@ class ApiIntegrationTests(unittest.TestCase):
 
     def tearDown(self):
         asyncio.run(self.runtime.aclose())
+        asyncio.run(self.store.close())
         self.directory.cleanup()
         from api import ws
 
@@ -447,8 +448,8 @@ class ApiIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(len(messages), 1)
 
-    def test_testclient_lifespan_closes_the_injected_store(self):
+    def test_testclient_lifespan_leaves_the_injected_store_open(self):
         with TestClient(self.app):
             self.assertFalse(self.store._closed)
 
-        self.assertTrue(self.store._closed)
+        self.assertFalse(self.store._closed)

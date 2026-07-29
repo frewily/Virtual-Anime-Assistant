@@ -258,17 +258,31 @@ class AssistantApplication:
         try:
             orchestration = await self.model_orchestrator.run(request)
         except (ModelToolOrchestrationError, ModelToolLimitError) as exc:
-            for attempt in exc.attempts:
-                await self.store.record_model_call(
-                    self._model_call_record(user_message.id, attempt)
-                )
             public_error = exc.public_error or exc
-            return AssistantResponse(
+            response = AssistantResponse(
                 correlation_id=message.message_id,
                 conversation_id=message.conversation_id,
                 kind=ResponseKind.ERROR,
                 text=self._safe_model_error(public_error),
             )
+            if exc.attempts:
+                records = [
+                    self._model_call_record(user_message.id, attempt)
+                    for attempt in exc.attempts
+                ]
+                await self.store.save_model_results(
+                    records,
+                    StoredMessage(
+                        id=response.response_id,
+                        conversation_id=message.conversation_id,
+                        correlation_id=user_message.id,
+                        role="assistant",
+                        content=response.text,
+                        model=exc.attempts[-1].model,
+                        status=MessageStatus.FAILED,
+                    ),
+                )
+            return response
 
         reply = orchestration.reply
         response = AssistantResponse(

@@ -250,6 +250,7 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
                 "qq:private:456",
             )
             asyncio.run(runtime.aclose())
+            asyncio.run(store.close())
 
 
 class OneBotWebSocketApiTests(unittest.IsolatedAsyncioTestCase):

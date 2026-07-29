@@ -81,7 +81,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIs(runtime.qq_connection, connection)
         self.assertIs(runtime.qq_channel, channel)
         asyncio.run(runtime.aclose())
-        connection.aclose.assert_awaited_once()
+        connection.aclose.assert_not_awaited()
 
     def test_misconfigured_qq_does_not_block_core_runtime(self):
         settings = OneBotSettings(
@@ -102,7 +102,7 @@ class RuntimeTests(unittest.TestCase):
         )
         asyncio.run(runtime.aclose())
 
-    def test_close_attempts_qq_before_store_and_is_idempotent(self):
+    def test_close_does_not_touch_explicit_qq_or_store_dependencies(self):
         events: list[str] = []
         connection = Mock()
         store = Mock()
@@ -126,9 +126,9 @@ class RuntimeTests(unittest.TestCase):
         asyncio.run(runtime.aclose())
         asyncio.run(runtime.aclose())
 
-        self.assertEqual(events, ["qq", "store"])
-        connection.aclose.assert_awaited_once()
-        store.close.assert_awaited_once()
+        self.assertEqual(events, [])
+        connection.aclose.assert_not_awaited()
+        store.close.assert_not_awaited()
 
     def test_runtime_registers_only_approved_builtin_tools(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -335,7 +335,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIs(runtime.application, application)
         self.assertIsNone(runtime.store)
 
-    def test_close_is_idempotent_and_closes_the_owned_store(self):
+    def test_close_is_idempotent_and_leaves_external_store_open(self):
         store = Mock()
         store.close = AsyncMock()
         application = Mock(spec=AssistantApplication)
@@ -344,26 +344,135 @@ class RuntimeTests(unittest.TestCase):
         asyncio.run(runtime.aclose())
         asyncio.run(runtime.aclose())
 
-        store.close.assert_awaited_once()
+        store.close.assert_not_awaited()
 
-    def test_close_retries_after_the_store_close_fails(self):
+    def test_close_retries_only_failed_owned_resource_and_keeps_first_error(self):
         store = Mock()
-        store.close = AsyncMock(
+        store.close = AsyncMock()
+        gateway = Mock(spec=["close"])
+        gateway.close = AsyncMock()
+        tts = Mock(spec=["close"])
+        tts.close = AsyncMock()
+        connection = Mock()
+        connection.aclose = AsyncMock(
             side_effect=[RuntimeError("temporary close failure"), None]
         )
-        runtime = AssistantRuntime(
-            application=Mock(spec=AssistantApplication),
-            store=store,
-        )
+
+        with (
+            patch("core.runtime.SqliteStore", return_value=store),
+            patch("core.runtime.OpenAICompatibleGateway", return_value=gateway),
+            patch("core.runtime.TTSService", return_value=tts),
+            patch(
+                "core.runtime.OneBotConnectionManager",
+                return_value=connection,
+            ),
+            patch("core.runtime.OneBotChannel", return_value=Mock()),
+        ):
+            runtime = AssistantRuntime(
+                llm_settings=llm_settings(enabled=True),
+                database_settings=DatabaseSettings(
+                    data_dir=Path("/tmp"),
+                    database_path=Path("/tmp/assistant.db"),
+                ),
+            )
 
         with self.assertRaisesRegex(RuntimeError, "temporary close failure"):
             asyncio.run(runtime.aclose())
 
         self.assertFalse(runtime._closed)
+        gateway.close.assert_awaited_once()
+        tts.close.assert_awaited_once()
+        store.close.assert_awaited_once()
         asyncio.run(runtime.aclose())
         asyncio.run(runtime.aclose())
         self.assertTrue(runtime._closed)
-        self.assertEqual(store.close.await_count, 2)
+        self.assertEqual(connection.aclose.await_count, 2)
+        gateway.close.assert_awaited_once()
+        tts.close.assert_awaited_once()
+        store.close.assert_awaited_once()
+
+    def test_normal_close_releases_every_owned_resource_once(self):
+        store = Mock()
+        store.close = AsyncMock()
+        gateway = Mock(spec=["close"])
+        gateway.close = Mock()
+        tts = Mock(spec=["aclose"])
+        tts.aclose = AsyncMock()
+        connection = Mock()
+        connection.aclose = AsyncMock()
+        channel = Mock(spec=["close"])
+        channel.close = Mock()
+
+        with (
+            patch("core.runtime.SqliteStore", return_value=store),
+            patch("core.runtime.OpenAICompatibleGateway", return_value=gateway),
+            patch("core.runtime.TTSService", return_value=tts),
+            patch(
+                "core.runtime.OneBotConnectionManager",
+                return_value=connection,
+            ),
+            patch("core.runtime.OneBotChannel", return_value=channel),
+        ):
+            runtime = AssistantRuntime(
+                llm_settings=llm_settings(enabled=True),
+                database_settings=DatabaseSettings(
+                    data_dir=Path("/tmp"),
+                    database_path=Path("/tmp/assistant.db"),
+                ),
+            )
+
+        asyncio.run(runtime.aclose())
+        asyncio.run(runtime.aclose())
+
+        channel.close.assert_called_once_with()
+        connection.aclose.assert_awaited_once()
+        tts.aclose.assert_awaited_once()
+        gateway.close.assert_called_once_with()
+        store.close.assert_awaited_once()
+        self.assertTrue(runtime._closed)
+
+    def test_late_channel_failure_rolls_back_all_owned_resources(self):
+        store = Mock()
+        store._close_sync = Mock()
+        gateway = Mock(spec=["close"])
+        gateway.close = Mock()
+        tts = Mock(spec=["close"])
+        tts.close = Mock()
+        connection = Mock()
+        connection.aclose = AsyncMock()
+
+        with (
+            patch("core.runtime.SqliteStore", return_value=store),
+            patch("core.runtime.OpenAICompatibleGateway", return_value=gateway),
+            patch("core.runtime.TTSService", return_value=tts),
+            patch(
+                "core.runtime.OneBotConnectionManager",
+                return_value=connection,
+            ),
+            patch(
+                "core.runtime.OneBotChannel",
+                side_effect=RuntimeError("late channel setup failed"),
+            ),
+        ):
+            async def construct_runtime():
+                AssistantRuntime(
+                    llm_settings=llm_settings(enabled=True),
+                    database_settings=DatabaseSettings(
+                        data_dir=Path("/tmp"),
+                        database_path=Path("/tmp/assistant.db"),
+                    ),
+                )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "late channel setup failed",
+            ):
+                asyncio.run(construct_runtime())
+
+        connection.aclose.assert_awaited_once()
+        tts.close.assert_called_once_with()
+        gateway.close.assert_called_once_with()
+        store._close_sync.assert_called_once_with()
 
     def test_runtime_builds_model_tool_dependencies_in_required_order(self):
         with tempfile.TemporaryDirectory() as directory:

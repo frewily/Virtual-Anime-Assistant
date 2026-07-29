@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from application.assistant import AssistantApplication, AssistantStore
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
-from application.model_tools import ModelToolOrchestrationError
+from application.model_tools import (
+    ModelToolLimitError,
+    ModelToolOrchestrationError,
+)
 from application.sessions import SessionRegistry
 from domain.messages import (
     ChatContent,
@@ -817,6 +820,9 @@ class AssistantApplicationTests(unittest.TestCase):
         orchestrator = Mock()
         orchestrator.run = AsyncMock(side_effect=error)
         store = FakeStore()
+        store.record_model_call = AsyncMock(
+            side_effect=AssertionError("must use atomic batch persistence")
+        )
         application = AssistantApplication(
             tts=self.tts,
             llm=self.llm,
@@ -826,11 +832,17 @@ class AssistantApplicationTests(unittest.TestCase):
         )
         item = message(message_id="message-tools-error")
 
-        result = asyncio.run(application.process(item))
+        first = asyncio.run(application.process(item))
+        second = asyncio.run(application.process(item))
 
-        self.assertEqual(result.kind, ResponseKind.ERROR)
-        self.assertEqual(result.text, "模型服务返回了无法处理的响应。")
-        self.assertNotIn(secret, result.text)
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务返回了无法处理的响应。")
+        self.assertNotIn(secret, first.text)
+        self.assertEqual(second.response_id, first.response_id)
+        self.assertEqual(second.kind, ResponseKind.ERROR)
+        self.assertEqual(second.text, first.text)
+        orchestrator.run.assert_awaited_once()
+        store.record_model_call.assert_not_awaited()
         self.assertEqual(
             [record.status for record in store.model_calls],
             ["succeeded", ModelProtocolError.code],
@@ -839,8 +851,89 @@ class AssistantApplicationTests(unittest.TestCase):
             [record.message_id for record in store.model_calls],
             [item.message_id, item.message_id],
         )
+        self.assertEqual(len(store.saved_model_results), 1)
+        records, assistant = store.saved_model_results[0]
+        self.assertEqual(records, store.model_calls)
+        self.assertEqual(assistant.id, first.response_id)
+        self.assertEqual(assistant.correlation_id, item.message_id)
+        self.assertEqual(assistant.content, first.text)
+        self.assertEqual(assistant.model, "fake")
+        self.assertEqual(assistant.status, MessageStatus.FAILED)
+        self.assertEqual(
+            set(store.messages),
+            {item.message_id, first.response_id},
+        )
+
+    def test_orchestration_failure_batch_error_has_no_partial_state(self):
+        public_error = ModelProtocolError("internal details")
+        error = ModelToolOrchestrationError(
+            error=public_error,
+            attempts=[
+                ModelAttempt(
+                    model="fake",
+                    status=public_error.code,
+                    latency_ms=4,
+                ),
+            ],
+        )
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(side_effect=error)
+        store = FakeStore()
+        store.record_model_call = AsyncMock(
+            side_effect=AssertionError("must not record attempts separately")
+        )
+        store.save_model_results = AsyncMock(
+            side_effect=RuntimeError("injected transaction failure")
+        )
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools-save-error")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "injected transaction failure",
+        ):
+            asyncio.run(application.process(item))
+
+        store.save_model_results.assert_awaited_once()
+        store.record_model_call.assert_not_awaited()
+        self.assertEqual(store.model_calls, [])
         self.assertEqual(list(store.messages), [item.message_id])
         self.assertEqual(store.saved_model_results, [])
+
+    def test_orchestration_failure_without_attempts_is_not_replayed(self):
+        error = ModelToolLimitError("model_tool_round_limit", attempts=[])
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(side_effect=error)
+        store = FakeStore()
+        store.record_model_call = AsyncMock()
+        store.save_model_results = AsyncMock()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools-no-attempts")
+
+        first = asyncio.run(application.process(item))
+        second = asyncio.run(application.process(item))
+
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务暂时不可用，请稍后再试。")
+        self.assertEqual(second.kind, ResponseKind.ERROR)
+        self.assertNotEqual(second.response_id, first.response_id)
+        self.assertNotEqual(second.text, first.text)
+        orchestrator.run.assert_awaited_once()
+        store.record_model_call.assert_not_awaited()
+        store.save_model_results.assert_not_awaited()
+        self.assertEqual(list(store.messages), [item.message_id])
 
     def test_duplicate_user_without_assistant_returns_generic_error(self):
         item = message(message_id="orphan-user")

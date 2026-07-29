@@ -1,0 +1,11 @@
+services:
+  napcat:
+    image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - ./data/qq:/app/.config/QQ
+      - ./data/config:/app/napcat/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

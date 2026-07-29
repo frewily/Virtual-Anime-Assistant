@@ -190,7 +190,7 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
                 ModelMessage(role=ModelRole.USER, content="几点了"),
                 ModelMessage(
                     role=ModelRole.ASSISTANT,
-                    content=None,
+                    content="这段附带文本不应进入历史请求",
                     tool_calls=[call],
                 ),
                 ModelMessage(

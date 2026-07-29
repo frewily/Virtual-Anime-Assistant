@@ -135,6 +135,7 @@ class OpenAICompatibleGateway:
             "content": message.content,
         }
         if message.role is ModelRole.ASSISTANT and message.tool_calls:
+            payload["content"] = None
             payload["tool_calls"] = [
                 {
                     "id": call.id,
@@ -151,7 +152,8 @@ class OpenAICompatibleGateway:
                 }
                 for call in message.tool_calls
             ]
-        elif message.role is ModelRole.TOOL:
+            return payload
+        if message.role is ModelRole.TOOL:
             payload["tool_call_id"] = message.tool_call_id
             payload["name"] = message.name
         return payload

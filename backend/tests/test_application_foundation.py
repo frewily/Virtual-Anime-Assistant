@@ -252,22 +252,26 @@ class FakeStore:
         records: Sequence[ModelCallRecord],
         assistant_message: StoredMessage,
     ) -> None:
-        batch = list(records)
+        batch = [
+            record.model_copy(deep=True)
+            for record in records
+        ]
         if not batch:
             raise ValueError("at least one model call is required")
+        assistant_snapshot = assistant_message.model_copy(deep=True)
 
         existing_ids = {record.id for record in self.model_calls}
         batch_ids = [record.id for record in batch]
         if (
-            assistant_message.id in self.messages
+            assistant_snapshot.id in self.messages
             or existing_ids.intersection(batch_ids)
             or len(set(batch_ids)) != len(batch_ids)
         ):
             raise ValueError("duplicate model result")
 
         self.model_calls.extend(batch)
-        self.messages[assistant_message.id] = assistant_message
-        self.saved_model_results.append((batch, assistant_message))
+        self.messages[assistant_snapshot.id] = assistant_snapshot
+        self.saved_model_results.append((batch, assistant_snapshot))
 
 
 class AssistantApplicationTests(unittest.TestCase):
@@ -362,7 +366,66 @@ class AssistantApplicationTests(unittest.TestCase):
             self.store.saved_model_results,
             [(records, assistant)],
         )
-        self.assertIs(self.store.messages[assistant.id], assistant)
+        self.assertEqual(self.store.messages[assistant.id], assistant)
+        self.assertIsNot(self.store.messages[assistant.id], assistant)
+
+    def test_fake_store_snapshots_batch_values_before_returning(self):
+        assistant = StoredMessage(
+            id="assistant-snapshot",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="original response",
+        )
+        record = ModelCallRecord(
+            id="call-snapshot",
+            message_id="message-1",
+            model="original-model",
+            status="succeeded",
+            latency_ms=10,
+        )
+
+        asyncio.run(self.store.save_model_results([record], assistant))
+        record.model = "mutated-model"
+        record.status = "mutated-status"
+        assistant.content = "mutated response"
+
+        stored_records, stored_assistant = self.store.saved_model_results[0]
+        self.assertEqual(stored_records[0].model, "original-model")
+        self.assertEqual(stored_records[0].status, "succeeded")
+        self.assertEqual(stored_assistant.content, "original response")
+        self.assertIsNot(stored_records[0], record)
+        self.assertIsNot(stored_assistant, assistant)
+        self.assertEqual(
+            self.store.messages[assistant.id].content,
+            "original response",
+        )
+
+    def test_fake_store_single_result_wrapper_snapshots_values(self):
+        assistant = StoredMessage(
+            id="assistant-single-snapshot",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="original response",
+        )
+        record = ModelCallRecord(
+            id="call-single-snapshot",
+            message_id="message-1",
+            model="original-model",
+            status="succeeded",
+            latency_ms=10,
+        )
+
+        asyncio.run(self.store.save_model_result(record, assistant))
+        record.model = "mutated-model"
+        assistant.content = "mutated response"
+
+        stored_records, stored_assistant = self.store.saved_model_results[0]
+        self.assertEqual(stored_records[0].model, "original-model")
+        self.assertEqual(stored_assistant.content, "original response")
+        self.assertIsNot(stored_records[0], record)
+        self.assertIsNot(stored_assistant, assistant)
 
     def test_fake_store_rejects_invalid_batch_without_partial_state(self):
         existing = ModelCallRecord(

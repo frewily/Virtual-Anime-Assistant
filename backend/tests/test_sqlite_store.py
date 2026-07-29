@@ -3,7 +3,9 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from inspect import signature
 from pathlib import Path
@@ -1335,6 +1337,117 @@ class SqliteStoreTests(unittest.TestCase):
             ).fetchone()[0]
 
         self.assertEqual(assistant_count, 0)
+
+    def test_save_model_results_snapshots_values_before_worker_thread_runs(self):
+        store = self.open_store()
+        asyncio.run(
+            store.upsert_conversation(
+                "conversation-1",
+                source="desktop",
+                owner_id="owner-1",
+            )
+        )
+        asyncio.run(
+            store.save_message(
+                StoredMessage(
+                    id="user-1",
+                    conversation_id="conversation-1",
+                    role="user",
+                    content="request",
+                )
+            )
+        )
+        record = ModelCallRecord(
+            id="call-snapshot",
+            message_id="user-1",
+            model="original-model",
+            status="succeeded",
+            latency_ms=10,
+            prompt_tokens=12,
+            provider_request_id="original-provider-request",
+        )
+        assistant = StoredMessage(
+            id="assistant-snapshot",
+            conversation_id="conversation-1",
+            correlation_id="user-1",
+            role="assistant",
+            content="original response",
+            model="original-model",
+        )
+
+        class QueuedExecutor(ThreadPoolExecutor):
+            def __init__(self):
+                super().__init__(max_workers=1)
+                self.submission_count = 0
+                self.save_was_queued = threading.Event()
+
+            def submit(self, fn, /, *args, **kwargs):
+                future = super().submit(fn, *args, **kwargs)
+                self.submission_count += 1
+                if self.submission_count == 2:
+                    self.save_was_queued.set()
+                return future
+
+        async def save_while_worker_is_blocked():
+            loop = asyncio.get_running_loop()
+            release_worker = threading.Event()
+            worker_started = threading.Event()
+            executor = QueuedExecutor()
+            loop.set_default_executor(executor)
+
+            def block_worker():
+                worker_started.set()
+                release_worker.wait()
+
+            blocker = loop.run_in_executor(None, block_worker)
+            while not worker_started.is_set():
+                await asyncio.sleep(0)
+
+            save_task = asyncio.create_task(
+                store.save_model_results([record], assistant)
+            )
+            while not executor.save_was_queued.is_set():
+                await asyncio.sleep(0)
+
+            record.model = "mutated-model"
+            record.status = "mutated-status"
+            record.latency_ms = 999
+            record.prompt_tokens = 999
+            record.provider_request_id = "mutated-provider-request"
+            assistant.content = "mutated response"
+            assistant.model = "mutated-model"
+
+            release_worker.set()
+            await blocker
+            await save_task
+
+        asyncio.run(save_while_worker_is_blocked())
+
+        with sqlite3.connect(self.database_path) as connection:
+            stored_record = connection.execute(
+                "SELECT model, status, latency_ms, prompt_tokens, "
+                "provider_request_id FROM model_calls WHERE id = ?",
+                ("call-snapshot",),
+            ).fetchone()
+            stored_assistant = connection.execute(
+                "SELECT content, model FROM messages WHERE id = ?",
+                ("assistant-snapshot",),
+            ).fetchone()
+
+        self.assertEqual(
+            stored_record,
+            (
+                "original-model",
+                "succeeded",
+                10,
+                12,
+                "original-provider-request",
+            ),
+        )
+        self.assertEqual(
+            stored_assistant,
+            ("original response", "original-model"),
+        )
 
     def test_delete_conversation_cascades_messages_and_model_calls(self):
         store = self.open_store()

@@ -1,7 +1,10 @@
 """OneBot 11 reverse WebSocket and safe channel status."""
 
+import asyncio
 import json
 import logging
+from collections.abc import Coroutine
+from typing import Any
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
@@ -20,6 +23,37 @@ from core.runtime import AssistantRuntime
 logger = logging.getLogger(__name__)
 status_router = APIRouter(tags=["qq"])
 websocket_router = APIRouter()
+
+
+def _finish_event_task(
+    task: asyncio.Task[None],
+    tasks: set[asyncio.Task[None]],
+) -> None:
+    tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as exc:
+        logger.error(
+            "OneBot event failed: %s",
+            type(exc).__name__,
+        )
+
+
+def _start_event_task(
+    coroutine: Coroutine[Any, Any, None],
+    tasks: set[asyncio.Task[None]],
+) -> None:
+    try:
+        task = asyncio.create_task(coroutine)
+    except BaseException:
+        coroutine.close()
+        raise
+    tasks.add(task)
+    task.add_done_callback(
+        lambda completed: _finish_event_task(completed, tasks)
+    )
 
 
 @status_router.get("/qq/status")
@@ -71,6 +105,7 @@ async def qq_websocket(ws: WebSocket) -> None:
         return
 
     invalid_frames = 0
+    event_tasks: set[asyncio.Task[None]] = set()
     try:
         await ws.accept()
         while True:
@@ -96,17 +131,22 @@ async def qq_websocket(ws: WebSocket) -> None:
             invalid_frames = 0
             if runtime.qq_connection.resolve_action_response(payload):
                 continue
-            try:
-                await runtime.qq_channel.handle_event(
+            _start_event_task(
+                runtime.qq_channel.handle_event(
                     payload,
                     self_id=self_id,
-                )
-            except Exception as exc:
-                logger.error(
-                    "OneBot event failed: %s",
-                    type(exc).__name__,
-                )
+                ),
+                event_tasks,
+            )
     except WebSocketDisconnect:
         pass
     finally:
         await runtime.qq_connection.detach(ws)
+        pending_tasks = tuple(event_tasks)
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(
+                *pending_tasks,
+                return_exceptions=True,
+            )

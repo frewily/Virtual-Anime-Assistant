@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -17,11 +18,13 @@ from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
 from channels.onebot.config import OneBotSettings
+from channels.onebot.connection import OneBotConnectionManager
 from channels.onebot.models import (
     ONEBOT_AUTHENTICATION_FAILED,
     ONEBOT_DUPLICATE_CONNECTION,
     QQ_DISABLED,
     QQ_MISCONFIGURED,
+    OneBotAction,
     OneBotChannelError,
 )
 from core.runtime import AssistantRuntime
@@ -78,9 +81,48 @@ class FakeWebSocket:
             self.headers["x-self-id"] = self_id
         self.accept = AsyncMock()
         self.close = AsyncMock()
-        self.receive_text = AsyncMock(
-            side_effect=(*frames, WebSocketDisconnect())
+        self._frames = iter((*frames, WebSocketDisconnect()))
+        self.receive_text = AsyncMock(side_effect=self._receive_text)
+
+    async def _receive_text(self):
+        await asyncio.sleep(0)
+        frame = next(self._frames)
+        if isinstance(frame, BaseException):
+            raise frame
+        return frame
+
+
+class QueuedWebSocket:
+    DISCONNECT = object()
+
+    def __init__(self, runtime) -> None:
+        self.app = SimpleNamespace(
+            state=SimpleNamespace(runtime=runtime)
         )
+        self.headers = {
+            "authorization": "Bearer 0123456789abcdef",
+            "x-self-id": "123",
+        }
+        self.accept = AsyncMock()
+        self.close = AsyncMock()
+        self.send_json = AsyncMock(side_effect=self._send_json)
+        self._incoming: asyncio.Queue[object] = asyncio.Queue()
+        self.sent: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    async def _send_json(self, payload: dict[str, object]) -> None:
+        await self.sent.put(payload)
+
+    async def receive_text(self) -> str:
+        frame = await self._incoming.get()
+        if frame is self.DISCONNECT:
+            raise WebSocketDisconnect()
+        return str(frame)
+
+    async def push_json(self, payload: dict[str, object]) -> None:
+        await self._incoming.put(json.dumps(payload))
+
+    async def disconnect(self) -> None:
+        await self._incoming.put(self.DISCONNECT)
 
 
 def runtime_for(
@@ -211,6 +253,49 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
 
 
 class OneBotWebSocketApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_action_response_resolves_while_event_is_running(self):
+        configured = replace(
+            ready_settings(),
+            action_timeout_seconds=0.05,
+        )
+        connection = OneBotConnectionManager(
+            action_timeout_seconds=configured.action_timeout_seconds
+        )
+        completed = asyncio.Event()
+
+        async def handle_event(payload, *, self_id):
+            await connection.send_action(
+                OneBotAction(
+                    "send_private_msg",
+                    {"user_id": 456, "message": []},
+                )
+            )
+            completed.set()
+
+        runtime = runtime_for(
+            configured,
+            connection=connection,
+            channel=SimpleNamespace(handle_event=handle_event),
+        )
+        websocket = QueuedWebSocket(runtime)
+        route = asyncio.create_task(qq_websocket(websocket))
+
+        await websocket.push_json({"post_type": "message"})
+        action = await asyncio.wait_for(websocket.sent.get(), 0.1)
+        await websocket.push_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "echo": action["echo"],
+            }
+        )
+
+        await asyncio.wait_for(completed.wait(), 0.1)
+        await websocket.disconnect()
+        await asyncio.wait_for(route, 0.1)
+
+        self.assertEqual(connection.pending_action_count, 0)
+
     async def test_disabled_misconfigured_and_bad_auth_are_rejected(self):
         cases = (
             (
@@ -354,24 +439,57 @@ class OneBotWebSocketApiTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_channel_failure_isolated_from_following_event(self):
-        channel = SimpleNamespace(
-            handle_event=AsyncMock(
-                side_effect=[RuntimeError("private failure"), None]
-            )
-        )
-        runtime = runtime_for(ready_settings(), channel=channel)
-        websocket = FakeWebSocket(
-            runtime,
-            frames=(
-                json.dumps({"event": 1}),
-                json.dumps({"event": 2}),
-            ),
-        )
+        second_completed = asyncio.Event()
+        calls = 0
 
-        await qq_websocket(websocket)
+        async def handle_event(payload, *, self_id):
+            nonlocal calls
+            calls += 1
+            if payload == {"event": 1}:
+                raise RuntimeError("private failure")
+            second_completed.set()
 
-        self.assertEqual(channel.handle_event.await_count, 2)
+        runtime = runtime_for(
+            ready_settings(),
+            channel=SimpleNamespace(handle_event=handle_event),
+        )
+        websocket = QueuedWebSocket(runtime)
+        route = asyncio.create_task(qq_websocket(websocket))
+
+        await websocket.push_json({"event": 1})
+        await websocket.push_json({"event": 2})
+        await asyncio.wait_for(second_completed.wait(), 0.1)
+        await websocket.disconnect()
+        await asyncio.wait_for(route, 0.1)
+
+        self.assertEqual(calls, 2)
         websocket.close.assert_not_awaited()
+
+    async def test_disconnect_cancels_and_reaps_running_event_tasks(self):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def handle_event(payload, *, self_id):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        runtime = runtime_for(
+            ready_settings(),
+            channel=SimpleNamespace(handle_event=handle_event),
+        )
+        websocket = QueuedWebSocket(runtime)
+        route = asyncio.create_task(qq_websocket(websocket))
+
+        await websocket.push_json({"post_type": "message"})
+        await asyncio.wait_for(started.wait(), 0.1)
+        await websocket.disconnect()
+        await asyncio.wait_for(route, 0.1)
+
+        await asyncio.wait_for(cancelled.wait(), 0.1)
+        runtime.qq_connection.detach.assert_awaited_once_with(websocket)
 
 
 if __name__ == "__main__":

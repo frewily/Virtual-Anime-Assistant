@@ -280,6 +280,79 @@ class FakeStore:
         self.saved_model_results.append((batch, assistant_snapshot))
 
 
+class LegacyModelStore:
+    """Minimal pre-orchestration store without the batch result API."""
+
+    def __init__(self) -> None:
+        self.messages: dict[str, StoredMessage] = {}
+        self.model_calls: list[ModelCallRecord] = []
+        self.saved_results: list[tuple[ModelCallRecord, StoredMessage]] = []
+
+    async def claim_conversation(
+        self,
+        conversation_id: str,
+        source: str,
+        owner_id: str,
+    ) -> bool:
+        return True
+
+    async def claim_message(self, item: StoredMessage) -> bool:
+        if item.id in self.messages:
+            return False
+        self.messages[item.id] = item
+        return True
+
+    async def find_message(
+        self,
+        message_id: str,
+    ) -> StoredMessage | None:
+        return self.messages.get(message_id)
+
+    async def find_assistant_by_correlation(
+        self,
+        correlation_id: str,
+    ) -> StoredMessage | None:
+        return next(
+            (
+                item
+                for item in self.messages.values()
+                if item.role == "assistant"
+                and item.correlation_id == correlation_id
+            ),
+            None,
+        )
+
+    async def recent_messages(
+        self,
+        conversation_id: str,
+        limit: int,
+    ) -> list[StoredMessage]:
+        return [
+            item
+            for item in self.messages.values()
+            if item.conversation_id == conversation_id
+        ][-limit:]
+
+    async def list_memories(
+        self,
+        source: str,
+        owner_id: str,
+    ) -> list[MemoryItem]:
+        return []
+
+    async def record_model_call(self, record: ModelCallRecord) -> None:
+        self.model_calls.append(record)
+
+    async def save_model_result(
+        self,
+        record: ModelCallRecord,
+        assistant_message: StoredMessage,
+    ) -> None:
+        self.model_calls.append(record)
+        self.messages[assistant_message.id] = assistant_message
+        self.saved_results.append((record, assistant_message))
+
+
 class AssistantApplicationTests(unittest.TestCase):
     def setUp(self):
         self.tts = AsyncMock()
@@ -305,9 +378,51 @@ class AssistantApplicationTests(unittest.TestCase):
         result = asyncio.run(self.application.process(message()))
 
         self.assertEqual(result.text, "模型回答")
+        self.assertIsNone(self.application.model_orchestrator)
         self.assertEqual(len(self.llm.requests), 1)
         self.assertIn("message-1", self.store.messages)
         self.subscriber.assert_not_awaited()
+
+    def test_uninjected_application_supports_legacy_single_result_store(self):
+        store = LegacyModelStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+
+        result = asyncio.run(
+            application.process(message(message_id="legacy-store"))
+        )
+
+        self.assertEqual(result.text, "模型回答")
+        self.assertEqual(len(self.llm.requests), 1)
+        self.assertEqual(len(store.saved_results), 1)
+        record, assistant = store.saved_results[0]
+        self.assertEqual(record.message_id, "legacy-store")
+        self.assertEqual(assistant.correlation_id, "legacy-store")
+
+    def test_uninjected_application_records_legacy_model_failure_once(self):
+        error = ModelTimeoutError("internal timeout details")
+        llm = FakeLanguageModel(error=error)
+        store = LegacyModelStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+
+        result = asyncio.run(
+            application.process(message(message_id="legacy-error"))
+        )
+
+        self.assertEqual(result.kind, ResponseKind.ERROR)
+        self.assertEqual(result.text, "模型响应超时，请稍后再试。")
+        self.assertEqual(len(store.model_calls), 1)
+        self.assertEqual(store.model_calls[0].status, error.code)
+        self.assertEqual(list(store.messages), ["legacy-error"])
 
     def test_handle_processes_then_publishes_once(self):
         result = asyncio.run(self.application.handle(message()))

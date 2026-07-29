@@ -1,6 +1,8 @@
 """Application runtime shared by HTTP, WebSocket, and background adapters."""
 
+import asyncio
 import inspect
+import threading
 
 from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
@@ -45,66 +47,90 @@ class AssistantRuntime:
             if scenario_engine is not None
             else ScenarioEngine()
         )
-        settings = llm_settings
+        self.model_tool_catalog = None
+        self.model_tool_orchestrator = None
+
         if application is None:
-            settings = settings or LLMSettings.from_env()
+            settings = llm_settings or LLMSettings.from_env()
             database = (
                 database_settings or DatabaseSettings.from_env()
                 if store is None
                 else None
             )
-            llm = (
-                OpenAICompatibleGateway(settings)
-                if settings.enabled
-                else DemoLanguageModelGateway()
-            )
-            tts = TTSService()
-            context_builder = ConversationContextBuilder(
-                settings.max_context_messages,
-                settings.max_context_chars,
-            )
-            publisher = ResponsePublisher()
-            if store is None:
-                store = SqliteStore(database.database_path)
-        self.store = (
-            store
-            if store is not None
-            else getattr(application, "store", None)
-        )
-        self.tool_registry = (
-            tool_registry
-            or getattr(tool_service, "registry", None)
-            or build_builtin_registry()
-        )
-        self.tool_service = tool_service
-        if self.tool_service is None and self.store is not None:
-            self.tool_service = ToolExecutionService(
-                registry=self.tool_registry,
-                repository=self.store,
-            )
-        self.model_tool_catalog = ModelToolCatalog(self.tool_registry)
-        self.model_tool_orchestrator = (
-            getattr(application, "model_orchestrator", None)
-            if application is not None
-            else ModelToolOrchestrator(
-                gateway=llm,
-                catalog=self.model_tool_catalog,
-                tool_service=self.tool_service,
-                enabled=(
+            owns_store = store is None
+            llm = None
+            tts = None
+            try:
+                if store is None:
+                    store = SqliteStore(database.database_path)
+                self.store = store
+                self.tool_registry = (
+                    tool_registry
+                    or getattr(tool_service, "registry", None)
+                    or build_builtin_registry()
+                )
+                self.tool_service = tool_service or ToolExecutionService(
+                    registry=self.tool_registry,
+                    repository=self.store,
+                )
+                tools_enabled = (
                     settings.enabled
                     and settings.tool_calling_enabled
-                ),
+                )
+                if tools_enabled:
+                    self.model_tool_catalog = ModelToolCatalog(
+                        self.tool_registry
+                    )
+                llm = (
+                    OpenAICompatibleGateway(settings)
+                    if settings.enabled
+                    else DemoLanguageModelGateway()
+                )
+                if tools_enabled:
+                    self.model_tool_orchestrator = ModelToolOrchestrator(
+                        gateway=llm,
+                        catalog=self.model_tool_catalog,
+                        tool_service=self.tool_service,
+                        enabled=True,
+                    )
+                tts = TTSService()
+                context_builder = ConversationContextBuilder(
+                    settings.max_context_messages,
+                    settings.max_context_chars,
+                )
+                publisher = ResponsePublisher()
+                application = AssistantApplication(
+                    tts=tts,
+                    llm=llm,
+                    store=store,
+                    context_builder=context_builder,
+                    publisher=publisher,
+                    model_orchestrator=self.model_tool_orchestrator,
+                )
+            except BaseException:
+                self._cleanup_failed_initialization(
+                    store=store if owns_store else None,
+                    llm=llm,
+                    tts=tts,
+                )
+                raise
+        else:
+            self.store = (
+                store
+                if store is not None
+                else getattr(application, "store", None)
             )
-        )
-        if application is None:
-            application = AssistantApplication(
-                tts=tts,
-                llm=llm,
-                store=store,
-                context_builder=context_builder,
-                publisher=publisher,
-                model_orchestrator=self.model_tool_orchestrator,
+            self.tool_registry = (
+                tool_registry
+                or getattr(tool_service, "registry", None)
+                or build_builtin_registry()
             )
+            self.tool_service = tool_service
+            if self.tool_service is None and self.store is not None:
+                self.tool_service = ToolExecutionService(
+                    registry=self.tool_registry,
+                    repository=self.store,
+                )
         self.application = application
         self.qq_settings = qq_settings or OneBotSettings.from_env()
         self.qq_connection = (
@@ -142,6 +168,57 @@ class AssistantRuntime:
         self._closed = False
         self._qq_closed = False
         self._store_closed = self.store is None
+
+    @classmethod
+    def _cleanup_failed_initialization(
+        cls,
+        *,
+        store,
+        llm,
+        tts,
+    ) -> None:
+        for resource in (tts, llm):
+            if resource is None:
+                continue
+            close = getattr(resource, "close", None)
+            if close is None:
+                close = getattr(resource, "aclose", None)
+            if close is None:
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    cls._await_cleanup(result)
+            except BaseException:
+                pass
+
+        if store is not None:
+            try:
+                store._close_sync()
+            except BaseException:
+                pass
+
+    @staticmethod
+    def _await_cleanup(awaitable) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(awaitable)
+            return
+
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                asyncio.run(awaitable)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        if errors:
+            raise errors[0]
 
     def report_window(self, window: dict) -> None:
         self._current_window = dict(window)

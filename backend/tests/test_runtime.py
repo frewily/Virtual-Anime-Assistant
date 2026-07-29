@@ -197,18 +197,28 @@ class RuntimeTests(unittest.TestCase):
                 tool_calling_enabled=tool_calling_enabled,
             ), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "assistant.db"
-                runtime = AssistantRuntime(
-                    llm_settings=llm_settings(
-                        enabled=enabled,
-                        tool_calling_enabled=tool_calling_enabled,
-                    ),
-                    database_settings=DatabaseSettings(
-                        data_dir=path.parent,
-                        database_path=path,
-                    ),
-                )
+                with (
+                    patch("core.runtime.ModelToolCatalog") as catalog_type,
+                    patch(
+                        "core.runtime.ModelToolOrchestrator"
+                    ) as orchestrator_type,
+                ):
+                    runtime = AssistantRuntime(
+                        llm_settings=llm_settings(
+                            enabled=enabled,
+                            tool_calling_enabled=tool_calling_enabled,
+                        ),
+                        database_settings=DatabaseSettings(
+                            data_dir=path.parent,
+                            database_path=path,
+                        ),
+                    )
 
-                self.assertFalse(runtime.model_tool_orchestrator.enabled)
+                catalog_type.assert_not_called()
+                orchestrator_type.assert_not_called()
+                self.assertIsNone(runtime.model_tool_catalog)
+                self.assertIsNone(runtime.model_tool_orchestrator)
+                self.assertIsNone(runtime.application.model_orchestrator)
                 asyncio.run(runtime.aclose())
 
     def test_explicit_tool_dependencies_are_preserved_without_database(self):
@@ -355,26 +365,203 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(runtime._closed)
         self.assertEqual(store.close.await_count, 2)
 
-    def test_runtime_builds_failure_prone_components_before_opening_store(self):
+    def test_runtime_builds_model_tool_dependencies_in_required_order(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "assistant.db"
+            events: list[str] = []
+            store = Mock()
+            registry = Mock()
+            service = Mock()
+            catalog = Mock()
+            gateway = Mock()
+            orchestrator = Mock()
+
             with (
                 patch(
-                    "core.runtime.TTSService",
-                    side_effect=RuntimeError("tts setup failed"),
+                    "core.runtime.SqliteStore",
+                    side_effect=lambda _: (events.append("store"), store)[1],
                 ),
-                patch("core.runtime.SqliteStore") as store_type,
+                patch(
+                    "core.runtime.build_builtin_registry",
+                    side_effect=lambda: (
+                        events.append("registry"),
+                        registry,
+                    )[1],
+                ),
+                patch(
+                    "core.runtime.ToolExecutionService",
+                    side_effect=lambda **_: (
+                        events.append("service"),
+                        service,
+                    )[1],
+                ),
+                patch(
+                    "core.runtime.ModelToolCatalog",
+                    side_effect=lambda _: (
+                        events.append("catalog"),
+                        catalog,
+                    )[1],
+                ),
+                patch(
+                    "core.runtime.OpenAICompatibleGateway",
+                    side_effect=lambda _: (
+                        events.append("gateway"),
+                        gateway,
+                    )[1],
+                ),
+                patch(
+                    "core.runtime.ModelToolOrchestrator",
+                    side_effect=lambda **_: (
+                        events.append("orchestrator"),
+                        orchestrator,
+                    )[1],
+                ),
+                patch(
+                    "core.runtime.TTSService",
+                    return_value=Mock(),
+                ),
+                patch(
+                    "core.runtime.AssistantApplication",
+                    return_value=Mock(),
+                ),
             ):
-                with self.assertRaisesRegex(RuntimeError, "tts setup failed"):
-                    AssistantRuntime(
-                        llm_settings=llm_settings(enabled=False),
-                        database_settings=DatabaseSettings(
-                            data_dir=path.parent,
-                            database_path=path,
-                        ),
-                    )
+                runtime = AssistantRuntime(
+                    llm_settings=llm_settings(
+                        enabled=True,
+                        tool_calling_enabled=True,
+                    ),
+                    database_settings=DatabaseSettings(
+                        data_dir=path.parent,
+                        database_path=path,
+                    ),
+                    qq_settings=OneBotSettings(),
+                    qq_connection=Mock(),
+                    qq_channel=Mock(),
+                )
 
-        store_type.assert_not_called()
+            self.assertEqual(
+                events,
+                [
+                    "store",
+                    "registry",
+                    "service",
+                    "catalog",
+                    "gateway",
+                    "orchestrator",
+                ],
+            )
+            self.assertIs(runtime.model_tool_catalog, catalog)
+            self.assertIs(runtime.model_tool_orchestrator, orchestrator)
+
+    def test_runtime_closes_owned_store_when_gateway_construction_fails(self):
+        store = Mock()
+        store._close_sync = Mock()
+
+        with (
+            patch("core.runtime.SqliteStore", return_value=store),
+            patch(
+                "core.runtime.OpenAICompatibleGateway",
+                side_effect=RuntimeError("gateway setup failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "gateway setup failed"):
+                AssistantRuntime(
+                    llm_settings=llm_settings(enabled=True),
+                    database_settings=DatabaseSettings(
+                        data_dir=Path("/tmp"),
+                        database_path=Path("/tmp/assistant.db"),
+                    ),
+                )
+
+        store._close_sync.assert_called_once_with()
+
+    def test_runtime_closes_owned_store_when_tts_construction_fails(self):
+        store = Mock()
+        store._close_sync = Mock()
+
+        with (
+            patch("core.runtime.SqliteStore", return_value=store),
+            patch("core.runtime.OpenAICompatibleGateway", return_value=Mock()),
+            patch(
+                "core.runtime.TTSService",
+                side_effect=RuntimeError("tts setup failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "tts setup failed"):
+                AssistantRuntime(
+                    llm_settings=llm_settings(enabled=True),
+                    database_settings=DatabaseSettings(
+                        data_dir=Path("/tmp"),
+                        database_path=Path("/tmp/assistant.db"),
+                    ),
+                )
+
+        store._close_sync.assert_called_once_with()
+
+    def test_runtime_closes_gateway_when_orchestrator_construction_fails(self):
+        store = Mock()
+        store._close_sync = Mock()
+        gateway = Mock(spec=["close"])
+        gateway.close = Mock()
+
+        with (
+            patch("core.runtime.SqliteStore", return_value=store),
+            patch("core.runtime.OpenAICompatibleGateway", return_value=gateway),
+            patch(
+                "core.runtime.ModelToolOrchestrator",
+                side_effect=RuntimeError("orchestrator setup failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "orchestrator setup failed",
+            ):
+                AssistantRuntime(
+                    llm_settings=llm_settings(
+                        enabled=True,
+                        tool_calling_enabled=True,
+                    ),
+                    database_settings=DatabaseSettings(
+                        data_dir=Path("/tmp"),
+                        database_path=Path("/tmp/assistant.db"),
+                    ),
+                )
+
+        gateway.close.assert_called_once_with()
+        store._close_sync.assert_called_once_with()
+
+    def test_runtime_closes_tts_gateway_and_store_if_application_fails(self):
+        store = Mock()
+        store._close_sync = Mock()
+        gateway = Mock(spec=["close"])
+        gateway.close = Mock()
+        tts = Mock(spec=["close"])
+        tts.close = Mock()
+
+        with (
+            patch("core.runtime.SqliteStore", return_value=store),
+            patch("core.runtime.OpenAICompatibleGateway", return_value=gateway),
+            patch("core.runtime.TTSService", return_value=tts),
+            patch(
+                "core.runtime.AssistantApplication",
+                side_effect=RuntimeError("application setup failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "application setup failed",
+            ):
+                AssistantRuntime(
+                    llm_settings=llm_settings(enabled=True),
+                    database_settings=DatabaseSettings(
+                        data_dir=Path("/tmp"),
+                        database_path=Path("/tmp/assistant.db"),
+                    ),
+                )
+
+        tts.close.assert_called_once_with()
+        gateway.close.assert_called_once_with()
+        store._close_sync.assert_called_once_with()
 
     def test_status_only_exposes_llm_mode_from_runtime_configuration(self):
         monitor = Mock()

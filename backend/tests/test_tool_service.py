@@ -4,9 +4,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, RootModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -54,6 +54,46 @@ class JsonArguments(BaseModel):
 class RuntimeArguments(BaseModel):
     nested: NestedArguments
     count: int
+
+
+class NamedMapping(RootModel[dict[str, NestedArguments]]):
+    pass
+
+
+class MappingArguments(BaseModel):
+    direct: dict[str, NestedArguments]
+    arrays: list[dict[str, NestedArguments]]
+    referenced: NamedMapping
+
+
+class IntegerValue(BaseModel):
+    value: int
+    a_note: str | None = None
+
+
+class StringValue(BaseModel):
+    value: str
+
+
+class CatValue(BaseModel):
+    kind: Literal["cat"]
+    value: int
+    cat_note: str | None = None
+
+
+class DogValue(BaseModel):
+    kind: Literal["dog"]
+    value: int
+    dog_note: str | None = None
+
+
+class UnionArguments(BaseModel):
+    overlap: IntegerValue | StringValue
+    pet: Annotated[
+        CatValue | DogValue,
+        Field(discriminator="kind"),
+    ]
+    items: list[IntegerValue | StringValue]
 
 
 class InMemoryToolRepository:
@@ -540,6 +580,187 @@ class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(repository.confirmations, {})
 
         self.assertEqual(calls, 0)
+
+    async def test_runtime_accepts_mapping_values_in_all_schema_positions(self):
+        received = None
+
+        async def handler(arguments: MappingArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=MappingArguments,
+        )
+        mapping_request = request().model_copy(
+            update={
+                "arguments": {
+                    "direct": {"first": {"label": "direct"}},
+                    "arrays": [{"second": {"label": "array"}}],
+                    "referenced": {"third": {"label": "referenced"}},
+                }
+            }
+        )
+
+        result = await service.request(mapping_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertIsInstance(received.direct["first"], NestedArguments)
+        self.assertIsInstance(
+            received.arrays[0]["second"],
+            NestedArguments,
+        )
+        self.assertIsInstance(
+            received.referenced.root["third"],
+            NestedArguments,
+        )
+
+    async def test_runtime_rejects_extra_fields_in_mapping_values(self):
+        calls = 0
+
+        async def handler(_: MappingArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "direct": {"first": {"label": "direct"}},
+            "arrays": [{"second": {"label": "array"}}],
+            "referenced": {"third": {"label": "referenced"}},
+        }
+        invalid_arguments = (
+            {
+                **valid_arguments,
+                "direct": {
+                    "first": {"label": "direct", "unexpected": True}
+                },
+            },
+            {
+                **valid_arguments,
+                "arrays": [
+                    {
+                        "second": {
+                            "label": "array",
+                            "unexpected": True,
+                        }
+                    }
+                ],
+            },
+            {
+                **valid_arguments,
+                "referenced": {
+                    "third": {
+                        "label": "referenced",
+                        "unexpected": True,
+                    }
+                },
+            },
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=MappingArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_follows_actual_strict_union_branch_for_extras(self):
+        calls = 0
+
+        async def handler(_: UnionArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "overlap": {"value": "string"},
+            "pet": {"kind": "cat", "value": 9},
+            "items": [{"value": 1, "a_note": "accepted"}],
+        }
+        invalid_arguments = (
+            {
+                **valid_arguments,
+                "overlap": {"value": "string", "a_note": "dropped by B"},
+            },
+            {
+                **valid_arguments,
+                "pet": {
+                    "kind": "cat",
+                    "value": 9,
+                    "dog_note": "dropped by Cat",
+                },
+            },
+            {
+                **valid_arguments,
+                "items": [
+                    {
+                        "value": "string",
+                        "a_note": "dropped by B",
+                    }
+                ],
+            },
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=UnionArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_accepts_valid_strict_union_branches(self):
+        received = None
+
+        async def handler(arguments: UnionArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=UnionArguments,
+        )
+        union_request = request().model_copy(
+            update={
+                "arguments": {
+                    "overlap": {"value": "string"},
+                    "pet": {"kind": "cat", "value": 9},
+                    "items": [{"value": 1, "a_note": "accepted"}],
+                }
+            }
+        )
+
+        result = await service.request(union_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertIsInstance(received.overlap, StringValue)
+        self.assertIsInstance(received.pet, CatValue)
+        self.assertIsInstance(received.items[0], IntegerValue)
 
     async def test_low_risk_executes_automatically_and_redacts_audit(self):
         calls = 0

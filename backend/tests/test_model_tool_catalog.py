@@ -23,6 +23,16 @@ class ArgumentsWithNestedModel(BaseModel):
     nested: NestedArguments
 
 
+class NamedMapping(RootModel[dict[str, NestedArguments]]):
+    pass
+
+
+class MappingArguments(BaseModel):
+    direct: dict[str, NestedArguments]
+    arrays: list[dict[str, NestedArguments]]
+    referenced: NamedMapping
+
+
 class ScalarArguments(RootModel[str]):
     pass
 
@@ -167,6 +177,42 @@ class ModelToolCatalogTests(unittest.TestCase):
         self.assertIs(parameters["additionalProperties"], False)
         self.assertIs(
             parameters["properties"]["nested"]["additionalProperties"],
+            False,
+        )
+
+    def test_catalog_preserves_and_closes_mapping_value_schemas(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.mapping",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=MappingArguments,
+            )
+        )
+
+        parameters = ModelToolCatalog(registry).list()[0].parameters
+
+        item_reference = {"$ref": "#/$defs/NestedArguments"}
+        self.assertEqual(
+            parameters["properties"]["direct"]["additionalProperties"],
+            item_reference,
+        )
+        self.assertEqual(
+            parameters["properties"]["arrays"]["items"][
+                "additionalProperties"
+            ],
+            item_reference,
+        )
+        self.assertEqual(
+            parameters["$defs"]["NamedMapping"][
+                "additionalProperties"
+            ],
+            item_reference,
+        )
+        self.assertIs(
+            parameters["$defs"]["NestedArguments"][
+                "additionalProperties"
+            ],
             False,
         )
 

@@ -23,10 +23,7 @@ from domain.tools import (
     ToolSource,
     utc_now,
 )
-from tools.catalog import (
-    build_closed_arguments_schema,
-    reject_additional_arguments,
-)
+from tools.catalog import reject_additional_arguments
 from tools.policy import ToolPolicy, summarize_arguments
 from tools.registry import ToolDefinition, ToolNotFoundError, ToolRegistry
 from tools.repositories import ToolRepository
@@ -459,14 +456,17 @@ class ToolExecutionService:
                 separators=(",", ":"),
             )
             normalized_arguments = json.loads(serialized)
+            validated_arguments = (
+                definition.arguments_model.model_validate_json(
+                    serialized,
+                    strict=True,
+                )
+            )
             reject_additional_arguments(
                 normalized_arguments,
-                build_closed_arguments_schema(definition),
+                validated_arguments,
             )
-            return definition.arguments_model.model_validate_json(
-                serialized,
-                strict=True,
-            )
+            return validated_arguments
         except (TypeError, ValueError, ValidationError) as exc:
             raise ToolArgumentsError("tool arguments are invalid") from exc
 

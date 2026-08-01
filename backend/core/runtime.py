@@ -20,6 +20,7 @@ from infrastructure.sqlite_store import SqliteStore
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
+from settings.resolver import RuntimeSettings
 from tools.builtin import build_builtin_registry
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolRegistry
@@ -40,6 +41,7 @@ class AssistantRuntime:
         qq_settings: OneBotSettings | None = None,
         qq_connection: OneBotConnectionManager | None = None,
         qq_channel: OneBotChannel | None = None,
+        runtime_settings: RuntimeSettings | None = None,
     ):
         self._owned_resources: list[tuple[str, object]] = []
         self._resource_closed: dict[str, bool] = {}
@@ -58,7 +60,14 @@ class AssistantRuntime:
             )
 
             if application is None:
-                settings = llm_settings or LLMSettings.from_env()
+                settings = (
+                    llm_settings
+                    or (
+                        runtime_settings.llm
+                        if runtime_settings is not None
+                        else LLMSettings.from_env()
+                    )
+                )
                 database = (
                     database_settings or DatabaseSettings.from_env()
                     if store is None
@@ -102,7 +111,20 @@ class AssistantRuntime:
                         tool_service=self.tool_service,
                         enabled=True,
                     )
-                tts = TTSService()
+                if runtime_settings is None:
+                    tts = TTSService()
+                else:
+                    tts = TTSService(
+                        gpt_sovits_url=(
+                            runtime_settings.tts.gpt_sovits_url
+                        ),
+                        default_voice=(
+                            runtime_settings.tts.default_voice_id
+                        ),
+                        audio_max_age_seconds=(
+                            runtime_settings.tts.audio_max_age_seconds
+                        ),
+                    )
                 self._tts = tts
                 self._register_owned("tts", tts)
                 context_builder = ConversationContextBuilder(
@@ -137,7 +159,14 @@ class AssistantRuntime:
                     )
 
             self.application = application
-            self.qq_settings = qq_settings or OneBotSettings.from_env()
+            self.qq_settings = (
+                qq_settings
+                or (
+                    runtime_settings.qq
+                    if runtime_settings is not None
+                    else OneBotSettings.from_env()
+                )
+            )
             if qq_connection is None:
                 qq_connection = OneBotConnectionManager(
                     action_timeout_seconds=(
@@ -154,9 +183,14 @@ class AssistantRuntime:
                 )
                 self._register_owned("qq_channel", qq_channel)
             self.qq_channel = qq_channel
-            if llm_settings is not None:
+            configured_settings = llm_settings or (
+                runtime_settings.llm
+                if runtime_settings is not None
+                else None
+            )
+            if configured_settings is not None:
                 self.llm_mode = (
-                    "configured" if llm_settings.enabled else "demo"
+                    "configured" if configured_settings.enabled else "demo"
                 )
             else:
                 self.llm_mode = (

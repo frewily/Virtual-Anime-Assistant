@@ -23,6 +23,7 @@ from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
+from settings.resolver import RuntimeSettings, TTSRuntimeSettings
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolDefinition, ToolRegistry
 from tools.service import ToolExecutionService
@@ -77,6 +78,110 @@ def runtime_tool_definition(
 
 
 class RuntimeTests(unittest.TestCase):
+    @staticmethod
+    def runtime_settings_bundle(
+        *,
+        llm: LLMSettings | None = None,
+        qq: OneBotSettings | None = None,
+        default_voice: str = "character_002",
+    ) -> RuntimeSettings:
+        return RuntimeSettings(
+            llm=llm or llm_settings(enabled=False),
+            qq=qq or OneBotSettings(rate_per_minute=25),
+            tts=TTSRuntimeSettings(
+                gpt_sovits_url="http://tts.example:9880/",
+                default_voice_id=default_voice,
+                audio_max_age_seconds=3600,
+            ),
+        )
+
+    def test_runtime_builds_components_from_unified_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assistant.db"
+            runtime = AssistantRuntime(
+                runtime_settings=self.runtime_settings_bundle(),
+                database_settings=DatabaseSettings(
+                    data_dir=path.parent,
+                    database_path=path,
+                ),
+            )
+
+            self.assertIsInstance(
+                runtime.application.llm,
+                DemoLanguageModelGateway,
+            )
+            self.assertEqual(runtime.qq_settings.rate_per_minute, 25)
+            self.assertEqual(
+                runtime.application.tts.gpt_sovits_url,
+                "http://tts.example:9880",
+            )
+            self.assertEqual(
+                runtime.application.tts.default_voice,
+                "character_002",
+            )
+            self.assertEqual(
+                runtime.application.tts.audio_max_age_seconds,
+                3600,
+            )
+            asyncio.run(runtime.aclose())
+
+    def test_explicit_llm_and_qq_settings_override_unified_settings(self):
+        explicit_llm = llm_settings(enabled=True)
+        explicit_qq = OneBotSettings(rate_per_minute=40)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assistant.db"
+            runtime = AssistantRuntime(
+                runtime_settings=self.runtime_settings_bundle(),
+                llm_settings=explicit_llm,
+                qq_settings=explicit_qq,
+                database_settings=DatabaseSettings(
+                    data_dir=path.parent,
+                    database_path=path,
+                ),
+            )
+
+            self.assertIsInstance(runtime.application.llm, OpenAICompatibleGateway)
+            self.assertIs(runtime.qq_settings, explicit_qq)
+            asyncio.run(runtime.aclose())
+
+    def test_runtime_settings_are_consumed_only_during_construction(self):
+        first_bundle = self.runtime_settings_bundle(
+            qq=OneBotSettings(rate_per_minute=25)
+        )
+        second_bundle = self.runtime_settings_bundle(
+            qq=OneBotSettings(rate_per_minute=30)
+        )
+        application = Mock(spec=AssistantApplication)
+
+        first = AssistantRuntime(
+            application=application,
+            runtime_settings=first_bundle,
+        )
+        second = AssistantRuntime(
+            application=application,
+            runtime_settings=second_bundle,
+        )
+
+        self.assertEqual(first.qq_settings.rate_per_minute, 25)
+        self.assertEqual(second.qq_settings.rate_per_minute, 30)
+        asyncio.run(first.aclose())
+        asyncio.run(second.aclose())
+
+    def test_explicit_application_does_not_construct_llm_or_tts(self):
+        application = Mock(spec=AssistantApplication)
+        with (
+            patch("core.runtime.LLMSettings.from_env") as llm_from_env,
+            patch("core.runtime.TTSService") as tts_type,
+        ):
+            runtime = AssistantRuntime(
+                application=application,
+                runtime_settings=self.runtime_settings_bundle(),
+            )
+
+        llm_from_env.assert_not_called()
+        tts_type.assert_not_called()
+        asyncio.run(runtime.aclose())
+
     def test_runtime_builds_side_effect_free_disabled_qq_components(self):
         application = Mock(spec=AssistantApplication)
 
@@ -858,6 +963,49 @@ class RuntimeTests(unittest.TestCase):
         runtime_type.assert_not_called()
         store_type.assert_not_called()
         self.assertIsNone(application.state.runtime)
+
+    def test_runtime_settings_factory_is_lazy_and_called_once(self):
+        bundle = self.runtime_settings_bundle()
+        factory = Mock(return_value=bundle)
+        runtime = Mock()
+        runtime.application.publisher.subscribe.return_value = Mock()
+        runtime.tool_service = None
+        runtime.aclose = AsyncMock()
+
+        with patch(
+            "api.app.AssistantRuntime",
+            return_value=runtime,
+        ) as runtime_type:
+            application = create_app(runtime_settings_factory=factory)
+            factory.assert_not_called()
+
+            async def exercise():
+                async with lifespan(application):
+                    pass
+
+            asyncio.run(exercise())
+
+        factory.assert_called_once_with()
+        runtime_type.assert_called_once_with(runtime_settings=bundle)
+
+    def test_injected_runtime_does_not_call_settings_factory(self):
+        runtime = Mock()
+        runtime.application.publisher.subscribe.return_value = Mock()
+        runtime.tool_service = None
+        runtime.aclose = AsyncMock()
+        factory = Mock(side_effect=AssertionError("factory must stay lazy"))
+        application = create_app(
+            runtime_instance=runtime,
+            runtime_settings_factory=factory,
+        )
+
+        async def exercise():
+            async with lifespan(application):
+                pass
+
+        asyncio.run(exercise())
+
+        factory.assert_not_called()
 
     def test_fresh_import_does_not_instantiate_tts_or_database(self):
         backend = Path(__file__).resolve().parents[1]

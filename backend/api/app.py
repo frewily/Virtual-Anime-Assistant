@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
@@ -25,6 +26,7 @@ from agent.monitor import run as run_window_monitor
 from core.runtime import AssistantRuntime
 from core.tts import AUDIO_DIR
 from domain.tools import ToolEvent
+from settings.resolver import RuntimeSettings
 
 
 logger = logging.getLogger(__name__)
@@ -72,7 +74,13 @@ def _start_background_task(coroutine, tasks: list[asyncio.Task]) -> None:
 async def lifespan(app: FastAPI):
     runtime = app.state.runtime
     if runtime is None:
-        runtime = AssistantRuntime()
+        runtime_settings_factory = app.state.runtime_settings_factory
+        if runtime_settings_factory is None:
+            runtime = AssistantRuntime()
+        else:
+            runtime = AssistantRuntime(
+                runtime_settings=runtime_settings_factory()
+            )
         app.state.runtime = runtime
     unsubscribe = None
     unsubscribe_tools = None
@@ -117,9 +125,13 @@ async def lifespan(app: FastAPI):
                 await runtime.aclose()
 
 
-def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
+def create_app(
+    runtime_instance: AssistantRuntime | None = None,
+    runtime_settings_factory: Callable[[], RuntimeSettings] | None = None,
+) -> FastAPI:
     app = FastAPI(title="Desktop Assistant API", version="1.0.0", lifespan=lifespan)
     app.state.runtime = runtime_instance
+    app.state.runtime_settings_factory = runtime_settings_factory
 
     app.add_middleware(
         CORSMiddleware,

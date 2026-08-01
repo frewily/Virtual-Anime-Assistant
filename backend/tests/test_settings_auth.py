@@ -1,6 +1,6 @@
 """Security-focused tests for local settings authentication."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 import hmac
 import threading
@@ -111,6 +111,32 @@ class PasswordHashTests(unittest.TestCase):
         with patch("settings.auth.hashlib.scrypt", side_effect=ValueError("failure")):
             self.assertFalse(service.verify_password("long-enough-password", record))
 
+    def test_base64_length_and_ascii_are_checked_before_decoding(self) -> None:
+        service = SettingsAuthService(random_bytes=IncrementingRandom())
+        valid = service.hash_password("long-enough-password")
+        invalid_records = (
+            valid.model_copy(update={"salt": "A" * 1_000_000}),
+            valid.model_copy(update={"salt": "密" * 24}),
+            valid.model_copy(update={"hash": "A" * 1_000_000}),
+            valid.model_copy(update={"hash": "密" * 44}),
+        )
+        decode_calls = 0
+
+        def count_decode_calls(*args: object, **kwargs: object) -> bytes:
+            nonlocal decode_calls
+            decode_calls += 1
+            return b""
+
+        with patch(
+            "settings.auth.base64.b64decode", side_effect=count_decode_calls
+        ):
+            for record in invalid_records:
+                self.assertFalse(
+                    service.verify_password("long-enough-password", record)
+                )
+
+        self.assertEqual(decode_calls, 0)
+
 
 class SessionTests(unittest.TestCase):
     def test_session_expires_at_exactly_1800_seconds(self) -> None:
@@ -208,6 +234,30 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len({session.token for session in sessions}), 40)
         self.assertEqual(found, sessions)
 
+    def test_expired_sessions_are_globally_pruned_before_creation(self) -> None:
+        clock = MutableClock()
+        service = SettingsAuthService(
+            clock=clock, random_bytes=IncrementingRandom()
+        )
+        expired = [service.create_session() for _ in range(1000)]
+
+        clock.now = 1800.0
+        replacement = service.create_session()
+
+        self.assertEqual(len(service._sessions), 1)
+        self.assertIs(service.get_session(replacement.token), replacement)
+        self.assertIsNone(service.get_session(expired[0].token))
+
+    def test_active_session_capacity_is_bounded(self) -> None:
+        service = SettingsAuthService(random_bytes=IncrementingRandom())
+        for _ in range(1024):
+            service.create_session()
+
+        with self.assertRaisesRegex(
+            AuthError, "^authentication operation failed$"
+        ):
+            service.create_session()
+
 
 class LoginTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -262,6 +312,129 @@ class LoginTests(unittest.TestCase):
         )
         with self.assertRaises(LoginRateLimited):
             self.service.login("client-a", "correct-password", self.record)
+
+    def test_password_verification_does_not_hold_the_shared_lock(self) -> None:
+        lookup_session = self.service.create_session()
+        revoke_session = self.service.create_session()
+        verification_started = threading.Event()
+        release_verification = threading.Event()
+
+        def blocking_verify(password: str, record: AuthRecord) -> bool:
+            verification_started.set()
+            release_verification.wait(timeout=2.0)
+            return False
+
+        with patch.object(
+            self.service, "verify_password", side_effect=blocking_verify
+        ):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                login_future = pool.submit(
+                    self.service.login,
+                    "blocked-client",
+                    "wrong-password",
+                    self.record,
+                )
+                self.assertTrue(verification_started.wait(timeout=1.0))
+                create_future = pool.submit(self.service.create_session)
+                get_future = pool.submit(
+                    self.service.get_session, lookup_session.token
+                )
+                revoke_future = pool.submit(
+                    self.service.revoke, revoke_session.token
+                )
+                try:
+                    _, pending = wait(
+                        (create_future, get_future, revoke_future), timeout=0.5
+                    )
+                    self.assertFalse(pending)
+                    self.assertIsNotNone(create_future.result())
+                    self.assertIs(get_future.result(), lookup_session)
+                    self.assertIsNone(revoke_future.result())
+                finally:
+                    release_verification.set()
+
+                self.assertIsNone(login_future.result(timeout=1.0))
+
+    def test_concurrent_failures_record_only_five_attempts(self) -> None:
+        attempts = 8
+        all_verifying = threading.Barrier(attempts)
+
+        def concurrent_failure(password: str, record: AuthRecord) -> bool:
+            all_verifying.wait(timeout=2.0)
+            return False
+
+        def attempt_login(_: int) -> str:
+            try:
+                result = self.service.login(
+                    "shared-client", "wrong-password", self.record
+                )
+            except LoginRateLimited:
+                return "limited"
+            self.assertIsNone(result)
+            return "failed"
+
+        with patch.object(
+            self.service, "verify_password", side_effect=concurrent_failure
+        ):
+            with ThreadPoolExecutor(max_workers=attempts) as pool:
+                results = list(pool.map(attempt_login, range(attempts)))
+
+        self.assertEqual(results.count("failed"), 5)
+        self.assertEqual(results.count("limited"), 3)
+
+    def test_expired_failures_for_all_clients_are_globally_pruned(self) -> None:
+        with patch.object(self.service, "verify_password", return_value=False):
+            for index in range(1000):
+                self.assertIsNone(
+                    self.service.login(
+                        f"old-client-{index}", "wrong-password", self.record
+                    )
+                )
+
+            self.clock.now = 61.0
+            self.assertIsNone(
+                self.service.login("new-client", "wrong-password", self.record)
+            )
+
+        self.assertEqual(len(self.service._login_failures), 1)
+        self.assertIn("new-client", self.service._login_failures)
+
+    def test_active_failed_client_capacity_is_bounded(self) -> None:
+        with patch.object(
+            self.service, "verify_password", return_value=False
+        ) as verify:
+            for index in range(1024):
+                self.service.login(
+                    f"active-client-{index}", "wrong-password", self.record
+                )
+
+            with self.assertRaisesRegex(
+                LoginRateLimited, "^login temporarily unavailable$"
+            ):
+                self.service.login(
+                    "one-client-too-many", "correct-password", self.record
+                )
+
+        self.assertEqual(verify.call_count, 1024)
+
+    def test_invalid_client_keys_are_rejected_without_leaking_input(self) -> None:
+        invalid_clients = (["private-client"], "", "private-client" * 30)
+
+        with patch.object(
+            self.service, "verify_password", return_value=False
+        ) as verify:
+            for client in invalid_clients:
+                with self.subTest(client_type=type(client)):
+                    with self.assertRaises(LoginRateLimited) as raised:
+                        self.service.login(
+                            client,  # type: ignore[arg-type]
+                            "wrong-password",
+                            self.record,
+                        )
+                    rendered = str(raised.exception) + repr(raised.exception)
+                    self.assertNotIn("private-client", rendered)
+
+        verify.assert_not_called()
 
 
 class ErrorRedactionTests(unittest.TestCase):

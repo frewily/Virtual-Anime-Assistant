@@ -320,10 +320,24 @@ class SqliteStore:
         record: ModelCallRecord,
         assistant_message: StoredMessage,
     ) -> None:
+        await self.save_model_results((record,), assistant_message)
+
+    async def save_model_results(
+        self,
+        records: Sequence[ModelCallRecord],
+        assistant_message: StoredMessage,
+    ) -> None:
+        record_snapshots = tuple(
+            record.model_copy(deep=True)
+            for record in records
+        )
+        if not record_snapshots:
+            raise ValueError("at least one model call is required")
+        assistant_snapshot = assistant_message.model_copy(deep=True)
         await asyncio.to_thread(
-            self._save_model_result_sync,
-            record,
-            assistant_message,
+            self._save_model_results_sync,
+            record_snapshots,
+            assistant_snapshot,
         )
 
     async def create_request(
@@ -708,16 +722,17 @@ class SqliteStore:
         with self._lock, self._connection:
             self._insert_model_call(record)
 
-    def _save_model_result_sync(
+    def _save_model_results_sync(
         self,
-        record: ModelCallRecord,
+        records: Sequence[ModelCallRecord],
         assistant_message: StoredMessage,
     ) -> None:
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 self._insert_message(assistant_message)
-                self._insert_model_call(record)
+                for record in records:
+                    self._insert_model_call(record)
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()

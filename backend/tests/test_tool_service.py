@@ -2,10 +2,17 @@ import asyncio
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -21,8 +28,9 @@ from domain.tools import (
     ToolRisk,
     ToolSource,
 )
-from tools.registry import ToolDefinition, ToolRegistry
+from tools.registry import ToolDefinition, ToolNotFoundError, ToolRegistry
 from tools.service import (
+    ToolArgumentsError,
     ToolExecutionService,
     ToolStateConflictError,
 )
@@ -31,6 +39,96 @@ from tools.service import (
 class Arguments(BaseModel):
     value: str = "ok"
     token: str = "private"
+    count: int = 1
+
+
+class Operation(str, Enum):
+    READ = "read"
+
+
+class NestedArguments(BaseModel):
+    label: str
+
+
+class JsonArguments(BaseModel):
+    operation: Operation
+    requested_at: datetime
+    nested: NestedArguments
+    count: int
+
+
+class RuntimeArguments(BaseModel):
+    nested: NestedArguments
+    count: int
+
+
+class NamedMapping(RootModel[dict[str, NestedArguments]]):
+    pass
+
+
+class MappingArguments(BaseModel):
+    direct: dict[str, NestedArguments]
+    arrays: list[dict[str, NestedArguments]]
+    referenced: NamedMapping
+
+
+class IntegerValue(BaseModel):
+    value: int
+    a_note: str | None = None
+
+
+class StringValue(BaseModel):
+    value: str
+
+
+class CatValue(BaseModel):
+    kind: Literal["cat"]
+    value: int
+    cat_note: str | None = None
+
+
+class DogValue(BaseModel):
+    kind: Literal["dog"]
+    value: int
+    dog_note: str | None = None
+
+
+class UnionArguments(BaseModel):
+    overlap: IntegerValue | StringValue
+    pet: Annotated[
+        CatValue | DogValue,
+        Field(discriminator="kind"),
+    ]
+    items: list[IntegerValue | StringValue]
+
+
+class ExtraAllowedNestedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    label: str
+
+
+class ExtraAllowedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    nested: ExtraAllowedNestedArguments
+
+
+class NestedAliasArguments(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    nested_value: str = Field(alias="nestedValue")
+
+
+class AliasArguments(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    regular_value: str = Field(alias="regularValue")
+    validation_value: str = Field(validation_alias="validationValue")
+    choice_value: str = Field(
+        validation_alias=AliasChoices("choiceValue", "legacyChoice")
+    )
+    nested: NestedAliasArguments
 
 
 class InMemoryToolRepository:
@@ -237,22 +335,25 @@ def build_service(
     timeout_seconds: float = 1,
     cancellable: bool = True,
     clock=None,
+    allowed_sources: frozenset[ToolSource] | None = None,
+    arguments_model: type[BaseModel] = Arguments,
 ):
     repository = InMemoryToolRepository()
     registry = ToolRegistry()
-    registry.register(
-        ToolDefinition(
-            name="example.tool",
-            title="示例工具",
-            arguments_model=Arguments,
-            risk=risk,
-            impact="修改示例目标" if risk is ToolRisk.HIGH else "只读取示例",
-            timeout_seconds=timeout_seconds,
-            cancellable=cancellable,
-            sensitive_fields=frozenset({"token"}),
-            handler=handler,
-        )
+    definition_values = dict(
+        name="example.tool",
+        title="示例工具",
+        arguments_model=arguments_model,
+        risk=risk,
+        impact="修改示例目标" if risk is ToolRisk.HIGH else "只读取示例",
+        timeout_seconds=timeout_seconds,
+        cancellable=cancellable,
+        sensitive_fields=frozenset({"token"}),
+        handler=handler,
     )
+    if allowed_sources is not None:
+        definition_values["allowed_sources"] = allowed_sources
+    registry.register(ToolDefinition(**definition_values))
     service = ToolExecutionService(
         registry=registry,
         repository=repository,
@@ -272,6 +373,554 @@ def request() -> ToolRequest:
 
 
 class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_string_source_cannot_bypass_source_policy(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        for source, risk, allowed_sources in (
+            ("desktop", ToolRisk.LOW, None),
+            ("model", ToolRisk.HIGH, frozenset({ToolSource.MODEL})),
+            ("invalid", ToolRisk.LOW, None),
+        ):
+            with self.subTest(source=source):
+                service, repository = build_service(
+                    risk=risk,
+                    handler=handler,
+                    allowed_sources=allowed_sources,
+                )
+                invalid_request = request().model_copy(
+                    update={"source": source}
+                )
+
+                with self.assertRaises(ToolNotFoundError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_model_cannot_execute_low_risk_tool_without_authorization(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+        )
+        model_request = request().model_copy(
+            update={
+                "source": ToolSource.MODEL,
+                "arguments": {"value": 123},
+            }
+        )
+
+        with self.assertRaises(ToolNotFoundError):
+            await service.request(model_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+        self.assertEqual(repository.confirmations, {})
+
+    async def test_model_cannot_execute_high_risk_tool_when_authorized(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+        )
+        model_request = request().model_copy(
+            update={"source": ToolSource.MODEL}
+        )
+
+        with self.assertRaises(ToolNotFoundError):
+            await service.request(model_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+        self.assertEqual(repository.confirmations, {})
+
+    async def test_argument_validation_is_strict(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+        )
+        invalid_request = request().model_copy(
+            update={
+                "arguments": {
+                    "value": "hello",
+                    "token": "private-token",
+                    "count": "2",
+                }
+            }
+        )
+
+        self.assertEqual(
+            Arguments.model_validate(invalid_request.arguments).count,
+            2,
+        )
+        with self.assertRaises(ToolArgumentsError):
+            await service.request(invalid_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+
+    async def test_strict_json_accepts_enum_datetime_and_nested_object(self):
+        received = None
+
+        async def handler(arguments: JsonArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=JsonArguments,
+        )
+        json_request = request().model_copy(
+            update={
+                "arguments": {
+                    "operation": "read",
+                    "requested_at": "2026-07-29T12:00:00Z",
+                    "nested": {"label": "demo"},
+                    "count": 2,
+                }
+            }
+        )
+
+        result = await service.request(json_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertIs(received.operation, Operation.READ)
+        self.assertEqual(
+            received.requested_at,
+            datetime(2026, 7, 29, 12, tzinfo=timezone.utc),
+        )
+        self.assertIsInstance(received.nested, NestedArguments)
+
+    async def test_strict_json_rejects_numeric_string(self):
+        calls = 0
+
+        async def handler(_: JsonArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=JsonArguments,
+        )
+        invalid_request = request().model_copy(
+            update={
+                "arguments": {
+                    "operation": "read",
+                    "requested_at": "2026-07-29T12:00:00Z",
+                    "nested": {"label": "demo"},
+                    "count": "2",
+                }
+            }
+        )
+
+        with self.assertRaises(ToolArgumentsError):
+            await service.request(invalid_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+
+    async def test_non_json_arguments_are_rejected_without_side_effects(self):
+        calls = 0
+
+        async def handler(_: RuntimeArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=RuntimeArguments,
+        )
+        invalid_request = request().model_copy(
+            update={
+                "arguments": {
+                    "nested": {"label": "demo"},
+                    "count": object(),
+                }
+            }
+        )
+
+        with self.assertRaises(ToolArgumentsError):
+            await service.request(invalid_request)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(repository.requests, {})
+        self.assertEqual(repository.confirmations, {})
+
+    async def test_runtime_rejects_top_level_and_nested_extra_fields(self):
+        calls = 0
+
+        async def handler(_: RuntimeArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "nested": {"label": "demo"},
+            "count": 2,
+        }
+        for extra_arguments in (
+            {**valid_arguments, "unexpected": True},
+            {
+                **valid_arguments,
+                "nested": {"label": "demo", "unexpected": True},
+            },
+        ):
+            with self.subTest(arguments=extra_arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=RuntimeArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": extra_arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_accepts_mapping_values_in_all_schema_positions(self):
+        received = None
+
+        async def handler(arguments: MappingArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=MappingArguments,
+        )
+        mapping_request = request().model_copy(
+            update={
+                "arguments": {
+                    "direct": {"first": {"label": "direct"}},
+                    "arrays": [{"second": {"label": "array"}}],
+                    "referenced": {"third": {"label": "referenced"}},
+                }
+            }
+        )
+
+        result = await service.request(mapping_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertIsInstance(received.direct["first"], NestedArguments)
+        self.assertIsInstance(
+            received.arrays[0]["second"],
+            NestedArguments,
+        )
+        self.assertIsInstance(
+            received.referenced.root["third"],
+            NestedArguments,
+        )
+
+    async def test_runtime_rejects_extra_fields_in_mapping_values(self):
+        calls = 0
+
+        async def handler(_: MappingArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "direct": {"first": {"label": "direct"}},
+            "arrays": [{"second": {"label": "array"}}],
+            "referenced": {"third": {"label": "referenced"}},
+        }
+        invalid_arguments = (
+            {
+                **valid_arguments,
+                "direct": {
+                    "first": {"label": "direct", "unexpected": True}
+                },
+            },
+            {
+                **valid_arguments,
+                "arrays": [
+                    {
+                        "second": {
+                            "label": "array",
+                            "unexpected": True,
+                        }
+                    }
+                ],
+            },
+            {
+                **valid_arguments,
+                "referenced": {
+                    "third": {
+                        "label": "referenced",
+                        "unexpected": True,
+                    }
+                },
+            },
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=MappingArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_follows_actual_strict_union_branch_for_extras(self):
+        calls = 0
+
+        async def handler(_: UnionArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "overlap": {"value": "string"},
+            "pet": {"kind": "cat", "value": 9},
+            "items": [{"value": 1, "a_note": "accepted"}],
+        }
+        invalid_arguments = (
+            {
+                **valid_arguments,
+                "overlap": {"value": "string", "a_note": "dropped by B"},
+            },
+            {
+                **valid_arguments,
+                "pet": {
+                    "kind": "cat",
+                    "value": 9,
+                    "dog_note": "dropped by Cat",
+                },
+            },
+            {
+                **valid_arguments,
+                "items": [
+                    {
+                        "value": "string",
+                        "a_note": "dropped by B",
+                    }
+                ],
+            },
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=UnionArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_accepts_valid_strict_union_branches(self):
+        received = None
+
+        async def handler(arguments: UnionArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=UnionArguments,
+        )
+        union_request = request().model_copy(
+            update={
+                "arguments": {
+                    "overlap": {"value": "string"},
+                    "pet": {"kind": "cat", "value": 9},
+                    "items": [{"value": 1, "a_note": "accepted"}],
+                }
+            }
+        )
+
+        result = await service.request(union_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertIsInstance(received.overlap, StringValue)
+        self.assertIsInstance(received.pet, CatValue)
+        self.assertIsInstance(received.items[0], IntegerValue)
+
+    async def test_runtime_rejects_extra_allow_model_fields_consistently(self):
+        calls = 0
+
+        async def handler(_: ExtraAllowedArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        for arguments in (
+            {
+                "nested": {"label": "demo"},
+                "unexpected": True,
+            },
+            {
+                "nested": {
+                    "label": "demo",
+                    "unexpected": True,
+                },
+            },
+        ):
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=ExtraAllowedArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_rejects_duplicate_alias_inputs(self):
+        calls = 0
+
+        async def handler(_: AliasArguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        valid_arguments = {
+            "regularValue": "regular",
+            "validationValue": "validation",
+            "choiceValue": "choice",
+            "nested": {"nestedValue": "nested"},
+        }
+        invalid_arguments = (
+            {
+                **valid_arguments,
+                "regular_value": "duplicate",
+            },
+            {
+                **valid_arguments,
+                "validation_value": "duplicate",
+            },
+            {
+                **valid_arguments,
+                "legacyChoice": "duplicate",
+            },
+            {
+                **valid_arguments,
+                "nested": {
+                    "nestedValue": "nested",
+                    "nested_value": "duplicate",
+                },
+            },
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    arguments_model=AliasArguments,
+                )
+                invalid_request = request().model_copy(
+                    update={"arguments": arguments}
+                )
+
+                with self.assertRaises(ToolArgumentsError):
+                    await service.request(invalid_request)
+
+                self.assertEqual(repository.requests, {})
+                self.assertEqual(repository.confirmations, {})
+
+        self.assertEqual(calls, 0)
+
+    async def test_runtime_accepts_one_legal_alias_per_field(self):
+        received = None
+
+        async def handler(arguments: AliasArguments) -> dict:
+            nonlocal received
+            received = arguments
+            return {"accepted": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            arguments_model=AliasArguments,
+        )
+        alias_request = request().model_copy(
+            update={
+                "arguments": {
+                    "regularValue": "regular",
+                    "validationValue": "validation",
+                    "legacyChoice": "choice",
+                    "nested": {"nestedValue": "nested"},
+                }
+            }
+        )
+
+        result = await service.request(alias_request)
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(received.regular_value, "regular")
+        self.assertEqual(received.validation_value, "validation")
+        self.assertEqual(received.choice_value, "choice")
+        self.assertEqual(received.nested.nested_value, "nested")
+
     async def test_low_risk_executes_automatically_and_redacts_audit(self):
         calls = 0
 

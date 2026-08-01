@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from domain.tools import ToolRisk
+from domain.tools import ToolRisk, ToolSource
 
 
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{2,99}$")
@@ -29,6 +29,11 @@ class ToolDefinition:
     cancellable: bool
     handler: ToolHandler
     sensitive_fields: frozenset[str] = field(default_factory=frozenset)
+    allowed_sources: frozenset[ToolSource] = field(
+        default_factory=lambda: frozenset(
+            {ToolSource.DESKTOP, ToolSource.SYSTEM}
+        )
+    )
 
     def __post_init__(self) -> None:
         if not _TOOL_NAME_PATTERN.fullmatch(self.name):
@@ -46,6 +51,14 @@ class ToolDefinition:
             raise TypeError("tool handler must be callable")
         if not 0 < self.timeout_seconds <= 300:
             raise ValueError("tool timeout must be between 0 and 300 seconds")
+        normalized_sources = frozenset(self.allowed_sources)
+        if not normalized_sources:
+            raise ValueError("tool allowed sources must not be empty")
+        if any(
+            not isinstance(source, ToolSource)
+            for source in normalized_sources
+        ):
+            raise TypeError("tool allowed sources must contain ToolSource values")
         normalized_fields = frozenset(
             field_name.casefold()
             for field_name in self.sensitive_fields
@@ -54,6 +67,7 @@ class ToolDefinition:
         object.__setattr__(self, "title", self.title.strip())
         object.__setattr__(self, "impact", self.impact.strip())
         object.__setattr__(self, "sensitive_fields", normalized_fields)
+        object.__setattr__(self, "allowed_sources", normalized_sources)
 
 
 class ToolRegistry:

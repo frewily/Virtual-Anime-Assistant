@@ -54,6 +54,7 @@ class LLMSettings:
     timeout_seconds: int
     max_context_messages: int
     max_context_chars: int
+    tool_calling_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "LLMSettings":
@@ -76,6 +77,10 @@ class LLMSettings:
 
         return cls(
             enabled=enabled,
+            tool_calling_enabled=_parse_bool(
+                "ASSISTANT_LLM_TOOL_CALLING_ENABLED",
+                default=False,
+            ),
             base_url=base_url,
             api_key=api_key,
             model=model,

@@ -67,6 +67,7 @@ class ApiTests(unittest.TestCase):
 
     def tearDown(self):
         asyncio.run(self.runtime.aclose())
+        asyncio.run(self.store.close())
         self.directory.cleanup()
         from api import ws
 

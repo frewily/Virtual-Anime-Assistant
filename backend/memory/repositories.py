@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from .models import MemoryItem, ModelCallRecord, StoredMessage
@@ -79,5 +80,11 @@ class ModelCallRepository(Protocol):
     async def save_model_result(
         self,
         record: ModelCallRecord,
+        assistant_message: StoredMessage,
+    ) -> None: ...
+
+    async def save_model_results(
+        self,
+        records: Sequence[ModelCallRecord],
         assistant_message: StoredMessage,
     ) -> None: ...

@@ -1,8 +1,10 @@
 import asyncio
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,7 @@ from api.qq import get_qq_status, qq_websocket
 from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
+from application.model_tools import ModelToolOrchestrator
 from channels.onebot.config import OneBotSettings
 from channels.onebot.connection import OneBotConnectionManager
 from channels.onebot.models import (
@@ -29,7 +32,10 @@ from channels.onebot.models import (
 )
 from core.runtime import AssistantRuntime
 from infrastructure.sqlite_store import SqliteStore
-from llm.models import ModelReply
+from llm.models import ModelReply, ModelRequest, ModelToolCall
+from tools.builtin import build_builtin_registry
+from tools.catalog import ModelToolCatalog
+from tools.service import ToolExecutionService
 
 
 def ready_settings() -> OneBotSettings:
@@ -62,6 +68,21 @@ class RecordingConnection(FakeConnection):
 
     async def _send(self, action) -> None:
         self.actions.append(action)
+
+
+class QueuedFakeGateway:
+    model_name = "fake-model"
+
+    def __init__(self, replies: list[ModelReply]) -> None:
+        self.replies = list(replies)
+        self.requests: list[ModelRequest] = []
+        self.complete = AsyncMock(side_effect=self._complete)
+
+    async def _complete(self, request: ModelRequest) -> ModelReply:
+        self.requests.append(request)
+        if not self.replies:
+            raise AssertionError("fake model reply queue exhausted")
+        return self.replies.pop(0)
 
 
 class FakeWebSocket:
@@ -188,6 +209,70 @@ class OneBotStatusApiTests(unittest.TestCase):
 
 
 class OneBotApplicationIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _time_tool_reply(call_id: str) -> ModelReply:
+        return ModelReply(
+            text=None,
+            tool_calls=[
+                ModelToolCall(
+                    id=call_id,
+                    name="system.current_time",
+                    arguments={"timezone": "UTC"},
+                )
+            ],
+            model="fake-model",
+        )
+
+    @staticmethod
+    def _build_tool_runtime(
+        store: SqliteStore,
+        replies: list[ModelReply],
+    ):
+        gateway = QueuedFakeGateway(replies)
+        registry = build_builtin_registry()
+        tool_service = ToolExecutionService(
+            registry=registry,
+            repository=store,
+        )
+        catalog = ModelToolCatalog(registry)
+        orchestrator = ModelToolOrchestrator(
+            gateway=gateway,
+            catalog=catalog,
+            tool_service=tool_service,
+            enabled=True,
+        )
+        tts = Mock()
+        tts.synthesize = AsyncMock(return_value=None)
+        publisher = ResponsePublisher()
+        desktop_subscriber = AsyncMock()
+        publisher.subscribe(desktop_subscriber)
+        application = AssistantApplication(
+            tts=tts,
+            llm=gateway,
+            store=store,
+            context_builder=ConversationContextBuilder(20, 12000),
+            publisher=publisher,
+            model_orchestrator=orchestrator,
+        )
+        connection = RecordingConnection()
+        runtime = AssistantRuntime(
+            application=application,
+            store=store,
+            tool_registry=registry,
+            tool_service=tool_service,
+            qq_settings=ready_settings(),
+            qq_connection=connection,
+        )
+        runtime.model_tool_catalog = catalog
+        runtime.model_tool_orchestrator = orchestrator
+        return (
+            runtime,
+            gateway,
+            application,
+            connection,
+            desktop_subscriber,
+        )
+
     def test_qq_uses_real_application_sqlite_and_does_not_publish_desktop(
         self,
     ):
@@ -250,6 +335,216 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
                 "qq:private:456",
             )
             asyncio.run(runtime.aclose())
+            asyncio.run(store.close())
+
+    def test_qq_trigger_rules_reuse_model_tool_orchestrator_and_deduplicate(
+        self,
+    ):
+        replies = [
+            self._time_tool_reply("private-time"),
+            ModelReply(text="QQ 私聊时间回复", model="fake-model"),
+            self._time_tool_reply("group-time"),
+            ModelReply(text="QQ 群聊时间回复", model="fake-model"),
+        ]
+        private_event = {
+            "post_type": "message",
+            "message_type": "private",
+            "self_id": 123,
+            "user_id": 456,
+            "message_id": 901,
+            "message": "现在几点？",
+        }
+        unmentioned_group_event = {
+            "post_type": "message",
+            "message_type": "group",
+            "self_id": 123,
+            "user_id": 457,
+            "group_id": 789,
+            "message_id": 902,
+            "message": [
+                {"type": "text", "data": {"text": "现在几点？"}},
+            ],
+        }
+        mentioned_group_event = {
+            **unmentioned_group_event,
+            "message_id": 903,
+            "message": [
+                {"type": "at", "data": {"qq": "123"}},
+                {"type": "text", "data": {"text": " 现在几点？"}},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SqliteStore(Path(directory) / "assistant.db")
+            (
+                runtime,
+                gateway,
+                application,
+                connection,
+                desktop_subscriber,
+            ) = self._build_tool_runtime(
+                store=store,
+                replies=replies,
+            )
+
+            asyncio.run(
+                runtime.qq_channel.handle_event(private_event, self_id=123)
+            )
+            asyncio.run(
+                runtime.qq_channel.handle_event(
+                    unmentioned_group_event,
+                    self_id=123,
+                )
+            )
+            asyncio.run(
+                runtime.qq_channel.handle_event(
+                    mentioned_group_event,
+                    self_id=123,
+                )
+            )
+
+            self.assertIs(
+                application.model_orchestrator,
+                runtime.model_tool_orchestrator,
+            )
+            self.assertEqual(gateway.complete.await_count, 4)
+            self.assertEqual(len(gateway.requests), 4)
+            self.assertEqual(gateway.replies, [])
+            self.assertEqual(len(connection.actions), 2)
+            private_reply, group_reply = connection.actions
+            self.assertEqual(private_reply.action, "send_private_msg")
+            self.assertEqual(private_reply.params["user_id"], 456)
+            self.assertEqual(
+                private_reply.params["message"],
+                [
+                    {
+                        "type": "text",
+                        "data": {"text": "QQ 私聊时间回复"},
+                    }
+                ],
+            )
+            self.assertEqual(group_reply.action, "send_group_msg")
+            self.assertEqual(group_reply.params["group_id"], 789)
+            self.assertEqual(
+                group_reply.params["message"],
+                [
+                    {"type": "reply", "data": {"id": "903"}},
+                    {"type": "at", "data": {"qq": "457"}},
+                    {
+                        "type": "text",
+                        "data": {"text": "QQ 群聊时间回复"},
+                    },
+                ],
+            )
+            desktop_subscriber.assert_not_awaited()
+            with closing(
+                sqlite3.connect(store.database_path)
+            ) as connection_db:
+                tool_rows = connection_db.execute(
+                    "SELECT source, state FROM tool_requests "
+                    "ORDER BY created_at"
+                ).fetchall()
+                model_call_count = connection_db.execute(
+                    "SELECT COUNT(*) FROM model_calls"
+                ).fetchone()[0]
+                confirmation_count = connection_db.execute(
+                    "SELECT COUNT(*) FROM tool_confirmations"
+                ).fetchone()[0]
+                audit_count = connection_db.execute(
+                    "SELECT COUNT(*) FROM tool_audit_events"
+                ).fetchone()[0]
+                persisted_ids = connection_db.execute(
+                    "SELECT id, correlation_id, role FROM messages "
+                    "ORDER BY role, id"
+                ).fetchall()
+            self.assertEqual(
+                tool_rows,
+                [("model", "succeeded"), ("model", "succeeded")],
+            )
+            self.assertEqual(model_call_count, 4)
+            self.assertEqual(confirmation_count, 0)
+            self.assertEqual(audit_count, 6)
+            self.assertEqual(len(persisted_ids), 4)
+            self.assertEqual(
+                {
+                    (message_id, correlation_id, role)
+                    for message_id, correlation_id, role in persisted_ids
+                    if role == "user"
+                },
+                {
+                    ("qq:123:901", None, "user"),
+                    ("qq:123:903", None, "user"),
+                },
+            )
+            self.assertEqual(
+                {
+                    correlation_id
+                    for _, correlation_id, role in persisted_ids
+                    if role == "assistant"
+                },
+                {"qq:123:901", "qq:123:903"},
+            )
+
+            asyncio.run(runtime.aclose())
+            (
+                replay_runtime,
+                replay_gateway,
+                replay_application,
+                replay_connection,
+                replay_desktop_subscriber,
+            ) = self._build_tool_runtime(
+                store=store,
+                replies=[],
+            )
+            self.assertIsNot(application, replay_application)
+            self.assertIsNot(
+                runtime.qq_channel,
+                replay_runtime.qq_channel,
+            )
+            self.assertIsNot(
+                runtime.qq_channel._recent_messages,
+                replay_runtime.qq_channel._recent_messages,
+            )
+
+            asyncio.run(
+                replay_runtime.qq_channel.handle_event(
+                    private_event,
+                    self_id=123,
+                )
+            )
+            asyncio.run(
+                replay_runtime.qq_channel.handle_event(
+                    mentioned_group_event,
+                    self_id=123,
+                )
+            )
+
+            self.assertEqual(replay_gateway.complete.await_count, 0)
+            self.assertEqual(replay_gateway.requests, [])
+            self.assertEqual(replay_connection.actions, [])
+            replay_desktop_subscriber.assert_not_awaited()
+            with closing(
+                sqlite3.connect(store.database_path)
+            ) as connection_db:
+                replay_counts = connection_db.execute(
+                    "SELECT "
+                    "(SELECT COUNT(*) FROM model_calls), "
+                    "(SELECT COUNT(*) FROM tool_requests), "
+                    "(SELECT COUNT(*) FROM tool_audit_events), "
+                    "(SELECT COUNT(*) FROM messages)"
+                ).fetchone()
+            self.assertEqual(
+                replay_counts,
+                (
+                    model_call_count,
+                    len(tool_rows),
+                    audit_count,
+                    len(persisted_ids),
+                ),
+            )
+
+            asyncio.run(replay_runtime.aclose())
+            asyncio.run(store.close())
 
 
 class OneBotWebSocketApiTests(unittest.IsolatedAsyncioTestCase):

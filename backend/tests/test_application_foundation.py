@@ -3,15 +3,21 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections.abc import Sequence
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from application.assistant import AssistantApplication, AssistantStore
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
+from application.model_tools import (
+    ModelToolLimitError,
+    ModelToolOrchestrationError,
+)
 from application.sessions import SessionRegistry
 from domain.messages import (
     ChatContent,
@@ -29,7 +35,13 @@ from llm.errors import (
     ModelRateLimitError,
     ModelTimeoutError,
 )
-from llm.models import ModelReply, ModelRequest
+from llm.models import (
+    ModelAttempt,
+    ModelOrchestrationResult,
+    ModelReply,
+    ModelRequest,
+    ModelToolCall,
+)
 from infrastructure.sqlite_store import SqliteStore
 from memory.models import (
     MemoryItem,
@@ -147,7 +159,9 @@ class FakeStore:
         self.memories: dict[tuple[str, str, str], MemoryItem] = {}
         self.model_calls: list[ModelCallRecord] = []
         self.recent_limits: list[int] = []
-        self.saved_model_results: list[tuple[ModelCallRecord, StoredMessage]] = []
+        self.saved_model_results: list[
+            tuple[list[ModelCallRecord], StoredMessage]
+        ] = []
 
     async def claim_conversation(
         self,
@@ -242,9 +256,106 @@ class FakeStore:
         record: ModelCallRecord,
         assistant_message: StoredMessage,
     ) -> None:
+        await self.save_model_results((record,), assistant_message)
+
+    async def save_model_results(
+        self,
+        records: Sequence[ModelCallRecord],
+        assistant_message: StoredMessage,
+    ) -> None:
+        batch = [
+            record.model_copy(deep=True)
+            for record in records
+        ]
+        if not batch:
+            raise ValueError("at least one model call is required")
+        assistant_snapshot = assistant_message.model_copy(deep=True)
+
+        existing_ids = {record.id for record in self.model_calls}
+        batch_ids = [record.id for record in batch]
+        if (
+            assistant_snapshot.id in self.messages
+            or existing_ids.intersection(batch_ids)
+            or len(set(batch_ids)) != len(batch_ids)
+        ):
+            raise ValueError("duplicate model result")
+
+        self.model_calls.extend(batch)
+        self.messages[assistant_snapshot.id] = assistant_snapshot
+        self.saved_model_results.append((batch, assistant_snapshot))
+
+
+class LegacyModelStore:
+    """Minimal pre-orchestration store without the batch result API."""
+
+    def __init__(self) -> None:
+        self.messages: dict[str, StoredMessage] = {}
+        self.model_calls: list[ModelCallRecord] = []
+        self.saved_results: list[tuple[ModelCallRecord, StoredMessage]] = []
+
+    async def claim_conversation(
+        self,
+        conversation_id: str,
+        source: str,
+        owner_id: str,
+    ) -> bool:
+        return True
+
+    async def claim_message(self, item: StoredMessage) -> bool:
+        if item.id in self.messages:
+            return False
+        self.messages[item.id] = item
+        return True
+
+    async def find_message(
+        self,
+        message_id: str,
+    ) -> StoredMessage | None:
+        return self.messages.get(message_id)
+
+    async def find_assistant_by_correlation(
+        self,
+        correlation_id: str,
+    ) -> StoredMessage | None:
+        return next(
+            (
+                item
+                for item in self.messages.values()
+                if item.role == "assistant"
+                and item.correlation_id == correlation_id
+            ),
+            None,
+        )
+
+    async def recent_messages(
+        self,
+        conversation_id: str,
+        limit: int,
+    ) -> list[StoredMessage]:
+        return [
+            item
+            for item in self.messages.values()
+            if item.conversation_id == conversation_id
+        ][-limit:]
+
+    async def list_memories(
+        self,
+        source: str,
+        owner_id: str,
+    ) -> list[MemoryItem]:
+        return []
+
+    async def record_model_call(self, record: ModelCallRecord) -> None:
+        self.model_calls.append(record)
+
+    async def save_model_result(
+        self,
+        record: ModelCallRecord,
+        assistant_message: StoredMessage,
+    ) -> None:
         self.model_calls.append(record)
         self.messages[assistant_message.id] = assistant_message
-        self.saved_model_results.append((record, assistant_message))
+        self.saved_results.append((record, assistant_message))
 
 
 class AssistantApplicationTests(unittest.TestCase):
@@ -272,9 +383,57 @@ class AssistantApplicationTests(unittest.TestCase):
         result = asyncio.run(self.application.process(message()))
 
         self.assertEqual(result.text, "模型回答")
+        self.assertIsNone(self.application.model_orchestrator)
         self.assertEqual(len(self.llm.requests), 1)
         self.assertIn("message-1", self.store.messages)
         self.subscriber.assert_not_awaited()
+
+    def test_uninjected_application_supports_legacy_single_result_store(self):
+        store = LegacyModelStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+
+        result = asyncio.run(
+            application.process(message(message_id="legacy-store"))
+        )
+
+        self.assertEqual(result.text, "模型回答")
+        self.assertEqual(len(self.llm.requests), 1)
+        self.assertEqual(len(store.saved_results), 1)
+        record, assistant = store.saved_results[0]
+        self.assertEqual(record.message_id, "legacy-store")
+        self.assertEqual(assistant.correlation_id, "legacy-store")
+
+    def test_uninjected_application_records_legacy_model_failure_once(self):
+        error = ModelTimeoutError("internal timeout details")
+        llm = FakeLanguageModel(error=error)
+        store = LegacyModelStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+
+        result = asyncio.run(
+            application.process(message(message_id="legacy-error"))
+        )
+
+        self.assertEqual(result.kind, ResponseKind.ERROR)
+        self.assertEqual(result.text, "模型响应超时，请稍后再试。")
+        self.assertEqual(len(store.model_calls), 1)
+        self.assertEqual(store.model_calls[0].status, error.code)
+        self.assertEqual(len(store.messages), 2)
+        assistant = next(
+            stored
+            for stored in store.messages.values()
+            if stored.role == "assistant"
+        )
+        self.assertEqual(assistant.status, MessageStatus.FAILED)
 
     def test_handle_processes_then_publishes_once(self):
         result = asyncio.run(self.application.handle(message()))
@@ -306,6 +465,133 @@ class AssistantApplicationTests(unittest.TestCase):
 
     def test_fake_store_satisfies_minimal_application_protocol(self):
         self.assertIsInstance(self.store, AssistantStore)
+
+    def test_fake_store_saves_model_results_in_stable_batch_order(self):
+        assistant = StoredMessage(
+            id="assistant-batch",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="final response",
+        )
+        records = [
+            ModelCallRecord(
+                id="call-1",
+                message_id="message-1",
+                model="fake-model",
+                status="succeeded",
+                latency_ms=10,
+            ),
+            ModelCallRecord(
+                id="call-2",
+                message_id="message-1",
+                model="fake-model",
+                status="succeeded",
+                latency_ms=20,
+            ),
+        ]
+
+        asyncio.run(self.store.save_model_results(records, assistant))
+
+        self.assertEqual(self.store.model_calls, records)
+        self.assertEqual(
+            self.store.saved_model_results,
+            [(records, assistant)],
+        )
+        self.assertEqual(self.store.messages[assistant.id], assistant)
+        self.assertIsNot(self.store.messages[assistant.id], assistant)
+
+    def test_fake_store_snapshots_batch_values_before_returning(self):
+        assistant = StoredMessage(
+            id="assistant-snapshot",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="original response",
+        )
+        record = ModelCallRecord(
+            id="call-snapshot",
+            message_id="message-1",
+            model="original-model",
+            status="succeeded",
+            latency_ms=10,
+        )
+
+        asyncio.run(self.store.save_model_results([record], assistant))
+        record.model = "mutated-model"
+        record.status = "mutated-status"
+        assistant.content = "mutated response"
+
+        stored_records, stored_assistant = self.store.saved_model_results[0]
+        self.assertEqual(stored_records[0].model, "original-model")
+        self.assertEqual(stored_records[0].status, "succeeded")
+        self.assertEqual(stored_assistant.content, "original response")
+        self.assertIsNot(stored_records[0], record)
+        self.assertIsNot(stored_assistant, assistant)
+        self.assertEqual(
+            self.store.messages[assistant.id].content,
+            "original response",
+        )
+
+    def test_fake_store_single_result_wrapper_snapshots_values(self):
+        assistant = StoredMessage(
+            id="assistant-single-snapshot",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="original response",
+        )
+        record = ModelCallRecord(
+            id="call-single-snapshot",
+            message_id="message-1",
+            model="original-model",
+            status="succeeded",
+            latency_ms=10,
+        )
+
+        asyncio.run(self.store.save_model_result(record, assistant))
+        record.model = "mutated-model"
+        assistant.content = "mutated response"
+
+        stored_records, stored_assistant = self.store.saved_model_results[0]
+        self.assertEqual(stored_records[0].model, "original-model")
+        self.assertEqual(stored_assistant.content, "original response")
+        self.assertIsNot(stored_records[0], record)
+        self.assertIsNot(stored_assistant, assistant)
+
+    def test_fake_store_rejects_invalid_batch_without_partial_state(self):
+        existing = ModelCallRecord(
+            id="duplicate-call",
+            message_id="message-1",
+            model="fake-model",
+            status="succeeded",
+            latency_ms=5,
+        )
+        self.store.model_calls.append(existing)
+        assistant = StoredMessage(
+            id="assistant-batch",
+            conversation_id="desktop:user-1",
+            correlation_id="message-1",
+            role="assistant",
+            content="must not be saved",
+        )
+        records = [
+            ModelCallRecord(
+                id="new-call",
+                message_id="message-1",
+                model="fake-model",
+                status="succeeded",
+                latency_ms=10,
+            ),
+            existing,
+        ]
+
+        with self.assertRaisesRegex(ValueError, "duplicate model result"):
+            asyncio.run(self.store.save_model_results(records, assistant))
+
+        self.assertEqual(self.store.model_calls, [existing])
+        self.assertNotIn(assistant.id, self.store.messages)
+        self.assertEqual(self.store.saved_model_results, [])
 
     def test_chat_persists_messages_model_metadata_context_and_publishes(self):
         previous_user = StoredMessage(
@@ -354,7 +640,9 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertIn("上一句", request_text)
         self.assertIn("喜欢红茶", request_text)
         self.assertNotIn("不应出现", request_text)
-        record, assistant = self.store.saved_model_results[0]
+        records, assistant = self.store.saved_model_results[0]
+        self.assertEqual(len(records), 1)
+        record = records[0]
         self.assertEqual(record.message_id, item.message_id)
         self.assertEqual(record.status, "succeeded")
         self.assertEqual(record.model, "fake-model-v2")
@@ -468,6 +756,193 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertEqual(second.text, first.text)
         self.assertEqual(second.kind, ResponseKind.SPEAK)
 
+    def test_chat_uses_orchestrator_and_saves_all_model_attempts(self):
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(
+            return_value=ModelOrchestrationResult(
+                reply=ModelReply(text="现在是 12:00", model="fake"),
+                attempts=[
+                    ModelAttempt(
+                        model="fake",
+                        status="succeeded",
+                        latency_ms=5,
+                        prompt_tokens=10,
+                    ),
+                    ModelAttempt(
+                        model="fake",
+                        status="succeeded",
+                        latency_ms=4,
+                        completion_tokens=3,
+                    ),
+                ],
+            )
+        )
+        store = FakeStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools")
+
+        first = asyncio.run(application.process(item))
+        second = asyncio.run(application.process(item))
+
+        self.assertEqual(first.text, "现在是 12:00")
+        self.assertEqual(second.response_id, first.response_id)
+        self.assertEqual(second.text, first.text)
+        orchestrator.run.assert_awaited_once()
+        self.assertEqual(len(store.model_calls), 2)
+        self.assertEqual(
+            [record.prompt_tokens for record in store.model_calls],
+            [10, None],
+        )
+        self.assertEqual(
+            [record.completion_tokens for record in store.model_calls],
+            [None, 3],
+        )
+        self.assertEqual(len(store.saved_model_results), 1)
+        self.assertEqual(self.llm.requests, [])
+
+    def test_orchestration_failure_saves_attempts_and_hides_internal_error(self):
+        secret = "secret-api-key-and-provider-body"
+        public_error = ModelProtocolError(secret)
+        error = ModelToolOrchestrationError(
+            error=public_error,
+            attempts=[
+                ModelAttempt(
+                    model="fake",
+                    status="succeeded",
+                    latency_ms=5,
+                    prompt_tokens=10,
+                ),
+                ModelAttempt(
+                    model="fake",
+                    status=public_error.code,
+                    latency_ms=4,
+                ),
+            ],
+        )
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(side_effect=error)
+        store = FakeStore()
+        store.record_model_call = AsyncMock(
+            side_effect=AssertionError("must use atomic batch persistence")
+        )
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools-error")
+
+        first = asyncio.run(application.process(item))
+        second = asyncio.run(application.process(item))
+
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务返回了无法处理的响应。")
+        self.assertNotIn(secret, first.text)
+        self.assertEqual(second.response_id, first.response_id)
+        self.assertEqual(second.kind, ResponseKind.ERROR)
+        self.assertEqual(second.text, first.text)
+        orchestrator.run.assert_awaited_once()
+        store.record_model_call.assert_not_awaited()
+        self.assertEqual(
+            [record.status for record in store.model_calls],
+            ["succeeded", ModelProtocolError.code],
+        )
+        self.assertEqual(
+            [record.message_id for record in store.model_calls],
+            [item.message_id, item.message_id],
+        )
+        self.assertEqual(len(store.saved_model_results), 1)
+        records, assistant = store.saved_model_results[0]
+        self.assertEqual(records, store.model_calls)
+        self.assertEqual(assistant.id, first.response_id)
+        self.assertEqual(assistant.correlation_id, item.message_id)
+        self.assertEqual(assistant.content, first.text)
+        self.assertEqual(assistant.model, "fake")
+        self.assertEqual(assistant.status, MessageStatus.FAILED)
+        self.assertEqual(
+            set(store.messages),
+            {item.message_id, first.response_id},
+        )
+
+    def test_orchestration_failure_batch_error_has_no_partial_state(self):
+        public_error = ModelProtocolError("internal details")
+        error = ModelToolOrchestrationError(
+            error=public_error,
+            attempts=[
+                ModelAttempt(
+                    model="fake",
+                    status=public_error.code,
+                    latency_ms=4,
+                ),
+            ],
+        )
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(side_effect=error)
+        store = FakeStore()
+        store.record_model_call = AsyncMock(
+            side_effect=AssertionError("must not record attempts separately")
+        )
+        store.save_model_results = AsyncMock(
+            side_effect=RuntimeError("injected transaction failure")
+        )
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools-save-error")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "injected transaction failure",
+        ):
+            asyncio.run(application.process(item))
+
+        store.save_model_results.assert_awaited_once()
+        store.record_model_call.assert_not_awaited()
+        self.assertEqual(store.model_calls, [])
+        self.assertEqual(list(store.messages), [item.message_id])
+        self.assertEqual(store.saved_model_results, [])
+
+    def test_orchestration_failure_without_attempts_is_not_replayed(self):
+        error = ModelToolLimitError("model_tool_round_limit", attempts=[])
+        orchestrator = Mock()
+        orchestrator.run = AsyncMock(side_effect=error)
+        store = FakeStore()
+        store.record_model_call = AsyncMock()
+        store.save_model_results = AsyncMock()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=self.llm,
+            store=store,
+            context_builder=self.context_builder,
+            model_orchestrator=orchestrator,
+        )
+        item = message(message_id="message-tools-no-attempts")
+
+        first = asyncio.run(application.process(item))
+        second = asyncio.run(application.process(item))
+
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务暂时不可用，请稍后再试。")
+        self.assertEqual(second.kind, ResponseKind.ERROR)
+        self.assertNotEqual(second.response_id, first.response_id)
+        self.assertNotEqual(second.text, first.text)
+        orchestrator.run.assert_awaited_once()
+        store.record_model_call.assert_not_awaited()
+        store.save_model_results.assert_not_awaited()
+        self.assertEqual(list(store.messages), [item.message_id])
+
     def test_duplicate_user_without_assistant_returns_generic_error(self):
         item = message(message_id="orphan-user")
         self.store.messages[item.message_id] = StoredMessage(
@@ -533,7 +1008,7 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertEqual(result.kind, ResponseKind.ERROR)
         self.assertEqual(result.text, "记忆内容不能为空。")
 
-    def test_model_errors_are_safely_mapped_and_only_user_is_saved(self):
+    def test_model_errors_are_safely_mapped_persisted_and_replayed(self):
         cases = (
             (ModelAuthenticationError, "认证"),
             (ModelRateLimitError, "频繁"),
@@ -556,15 +1031,83 @@ class AssistantApplicationTests(unittest.TestCase):
                 item = message(message_id=f"error-{index}")
 
                 result = asyncio.run(application.handle(item))
+                replay = asyncio.run(application.handle(item))
 
                 self.assertEqual(result.kind, ResponseKind.ERROR)
                 self.assertIn(expected_text, result.text)
                 self.assertNotIn(secret, result.text)
-                self.assertEqual(list(store.messages), [item.message_id])
+                self.assertEqual(replay.response_id, result.response_id)
+                self.assertEqual(replay.kind, ResponseKind.ERROR)
+                self.assertEqual(replay.text, result.text)
+                self.assertEqual(len(store.messages), 2)
                 self.assertEqual(len(store.model_calls), 1)
                 self.assertEqual(store.model_calls[0].status, error_type.code)
                 self.assertEqual(store.model_calls[0].model, llm.model_name)
                 self.assertEqual(store.model_calls[0].message_id, item.message_id)
+                assistant = next(
+                    stored
+                    for stored in store.messages.values()
+                    if stored.role == "assistant"
+                )
+                self.assertEqual(assistant.status, MessageStatus.FAILED)
+
+    def test_legacy_path_rejects_tool_calls_and_replays_safe_error(self):
+        llm = FakeLanguageModel(
+            reply=ModelReply(
+                text="不应展示的附带文本",
+                tool_calls=[
+                    ModelToolCall(
+                        id="unexpected-call",
+                        name="system.current_time",
+                        arguments={},
+                    )
+                ],
+                model="fake-model",
+            )
+        )
+        store = FakeStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+        item = message(message_id="legacy-unexpected-tool-call")
+
+        first = asyncio.run(application.handle(item))
+        replay = asyncio.run(application.handle(item))
+
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务返回了无法处理的响应。")
+        self.assertEqual(replay.response_id, first.response_id)
+        self.assertEqual(replay.text, first.text)
+        self.assertEqual(len(llm.requests), 1)
+        self.assertEqual(len(store.model_calls), 1)
+        self.assertEqual(
+            store.model_calls[0].status,
+            ModelProtocolError.code,
+        )
+
+    def test_legacy_path_rejects_blank_final_text_as_protocol_error(self):
+        llm = FakeLanguageModel(
+            reply=ModelReply(text="   ", model="fake-model")
+        )
+        store = FakeStore()
+        application = AssistantApplication(
+            tts=self.tts,
+            llm=llm,
+            store=store,
+            context_builder=self.context_builder,
+        )
+        item = message(message_id="legacy-blank-reply")
+
+        first = asyncio.run(application.handle(item))
+        replay = asyncio.run(application.handle(item))
+
+        self.assertEqual(first.kind, ResponseKind.ERROR)
+        self.assertEqual(first.text, "模型服务返回了无法处理的响应。")
+        self.assertEqual(replay.response_id, first.response_id)
+        self.assertEqual(len(llm.requests), 1)
 
     def test_interaction_returns_avatar_action(self):
         item = message()
@@ -637,7 +1180,7 @@ class AssistantApplicationSqliteSafetyTests(unittest.TestCase):
         self.assertEqual(alice_result.kind, ResponseKind.SPEAK)
         self.assertEqual(bob_result.kind, ResponseKind.ERROR)
         self.assertEqual(len(self.llm.requests), 1)
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             owner = connection.execute(
                 "SELECT source, owner_id FROM conversations WHERE id = ?",
                 ("shared-conversation",),
@@ -693,7 +1236,7 @@ class AssistantApplicationSqliteSafetyTests(unittest.TestCase):
             [result.kind for result in results],
             [ResponseKind.SPEAK, ResponseKind.ERROR],
         )
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             rows = connection.execute(
                 "SELECT conversation_id, role FROM messages WHERE id = ?",
                 ("shared-message-id",),

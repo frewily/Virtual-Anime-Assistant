@@ -1,7 +1,9 @@
 import asyncio
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -14,14 +16,39 @@ from api.app import create_app
 from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
 from application.events import ResponsePublisher
+from application.model_tools import ModelToolOrchestrator
 from channels.desktop import LOCAL_USER
 from core.runtime import AssistantRuntime
 from infrastructure.sqlite_store import SqliteStore
 from llm.errors import ModelServiceError
-from llm.models import ModelReply
+from llm.models import ModelReply, ModelRequest, ModelToolCall
 from memory.models import MemoryItem, StoredMessage
 from domain.tools import ToolRisk
+from tools.catalog import ModelToolCatalog
 from tools.registry import ToolDefinition
+
+
+class QueuedFakeGateway:
+    model_name = "fake-model"
+
+    def __init__(self) -> None:
+        self.replies = [
+            ModelReply(
+                text="主人说得有道理~",
+                model=self.model_name,
+            )
+        ]
+        self.requests: list[ModelRequest] = []
+        self.error: Exception | None = None
+        self.complete = AsyncMock(side_effect=self._complete)
+
+    async def _complete(self, request: ModelRequest) -> ModelReply:
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        if not self.replies:
+            raise AssertionError("fake model reply queue exhausted")
+        return self.replies.pop(0)
 
 
 class HighRiskArguments(BaseModel):
@@ -34,14 +61,7 @@ class ApiIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.store = SqliteStore(Path(self.directory.name) / "assistant.db")
-        self.llm = Mock()
-        self.llm.model_name = "fake-model"
-        self.llm.complete = AsyncMock(
-            return_value=ModelReply(
-                text="主人说得有道理~",
-                model="fake-model",
-            )
-        )
+        self.llm = QueuedFakeGateway()
         tts = Mock()
         tts.synthesize = AsyncMock(return_value=None)
         application = AssistantApplication(
@@ -63,6 +83,16 @@ class ApiIntegrationTests(unittest.TestCase):
             application=application,
             scenario_engine=scenario_engine,
         )
+        catalog = ModelToolCatalog(self.runtime.tool_registry)
+        orchestrator = ModelToolOrchestrator(
+            gateway=self.llm,
+            catalog=catalog,
+            tool_service=self.runtime.tool_service,
+            enabled=False,
+        )
+        application.model_orchestrator = orchestrator
+        self.runtime.model_tool_catalog = catalog
+        self.runtime.model_tool_orchestrator = orchestrator
         self.app = create_app(runtime_instance=self.runtime)
 
     def register_high_risk_tool(self):
@@ -209,6 +239,7 @@ class ApiIntegrationTests(unittest.TestCase):
 
     def tearDown(self):
         asyncio.run(self.runtime.aclose())
+        asyncio.run(self.store.close())
         self.directory.cleanup()
         from api import ws
 
@@ -294,8 +325,145 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(replay.json(), first.json())
         self.assertEqual(self.llm.complete.await_count, 1)
 
+    def test_legacy_http_rejects_unexpected_tool_calls_without_500(self):
+        self.runtime.application.model_orchestrator = None
+        for index, text in enumerate((None, "不应展示的附带文本")):
+            with self.subTest(text=text):
+                self.llm.replies = [
+                    ModelReply(
+                        text=text,
+                        tool_calls=[
+                            ModelToolCall(
+                                id=f"unexpected-{index}",
+                                name="system.current_time",
+                                arguments={},
+                            )
+                        ],
+                        model="fake-model",
+                    )
+                ]
+                message_id = f"unexpected-tool-http-{index}"
+                payload = {
+                    "source": "desktop",
+                    "senderId": LOCAL_USER.id,
+                    "content": "你好",
+                    "messageId": message_id,
+                }
+
+                with TestClient(self.app) as client:
+                    first = client.post("/api/chat/message", json=payload)
+                    replay = client.post("/api/chat/message", json=payload)
+
+                self.assertEqual(first.status_code, 503)
+                self.assertEqual(replay.status_code, 503)
+                self.assertEqual(replay.json(), first.json())
+                self.assertIn("无法处理", first.json()["detail"])
+        self.assertEqual(self.llm.complete.await_count, 2)
+
+    def test_desktop_chat_uses_model_time_tool_without_confirmation(self):
+        self.llm.replies = [
+            ModelReply(
+                text=None,
+                tool_calls=[
+                    ModelToolCall(
+                        id="time-call",
+                        name="system.current_time",
+                        arguments={"timezone": "UTC"},
+                    )
+                ],
+                model="fake-model",
+                prompt_tokens=10,
+                completion_tokens=2,
+                provider_request_id="desktop-tool-1",
+            ),
+            ModelReply(
+                text="已读取 UTC 时间",
+                model="fake-model",
+                prompt_tokens=20,
+                completion_tokens=4,
+                provider_request_id="desktop-tool-2",
+            ),
+        ]
+        self.runtime.model_tool_orchestrator.enabled = True
+
+        with TestClient(self.app) as client:
+            response = client.post(
+                "/api/chat/message",
+                json={
+                    "source": "desktop",
+                    "senderId": LOCAL_USER.id,
+                    "content": "UTC 现在几点？",
+                    "messageId": "desktop-tool-message",
+                },
+            )
+            confirmations = client.get("/api/tools/confirmations")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"reply": "已读取 UTC 时间", "status": "ok"},
+        )
+        self.assertEqual(confirmations.json(), [])
+        self.assertEqual(self.llm.complete.await_count, 2)
+        self.assertEqual(len(self.llm.requests), 2)
+        self.assertEqual(
+            [tool.name for tool in self.llm.requests[0].tools],
+            ["system.current_time"],
+        )
+        self.assertEqual(
+            self.llm.requests[1].messages[-1].role.value,
+            "tool",
+        )
+        self.assertIs(
+            self.runtime.tool_registry.require(
+                "system.current_time"
+            ).risk,
+            ToolRisk.LOW,
+        )
+        with closing(
+            sqlite3.connect(self.store.database_path)
+        ) as connection:
+            source, state, request_id = connection.execute(
+                "SELECT source, state, id FROM tool_requests "
+                "WHERE tool_name = 'system.current_time'"
+            ).fetchone()
+            audit_events = connection.execute(
+                "SELECT event_type FROM tool_audit_events "
+                "WHERE request_id = ? ORDER BY created_at",
+                (request_id,),
+            ).fetchall()
+            model_calls = connection.execute(
+                "SELECT status, provider_request_id FROM model_calls "
+                "WHERE message_id = ? ORDER BY created_at, id",
+                ("desktop-tool-message",),
+            ).fetchall()
+            assistant = connection.execute(
+                "SELECT content, status FROM messages "
+                "WHERE correlation_id = ? AND role = 'assistant'",
+                ("desktop-tool-message",),
+            ).fetchone()
+            pending_count = connection.execute(
+                "SELECT COUNT(*) FROM tool_confirmations "
+                "WHERE state = 'pending'"
+            ).fetchone()[0]
+
+        self.assertEqual((source, state), ("model", "succeeded"))
+        self.assertEqual(
+            [event[0] for event in audit_events],
+            ["requested", "execution_started", "succeeded"],
+        )
+        self.assertEqual(
+            model_calls,
+            [
+                ("succeeded", "desktop-tool-1"),
+                ("succeeded", "desktop-tool-2"),
+            ],
+        )
+        self.assertEqual(assistant, ("已读取 UTC 时间", "completed"))
+        self.assertEqual(pending_count, 0)
+
     def test_chat_model_error_is_a_safe_503(self):
-        self.llm.complete.side_effect = ModelServiceError(
+        self.llm.error = ModelServiceError(
             "private provider body with api-key"
         )
 
@@ -447,8 +615,8 @@ class ApiIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(len(messages), 1)
 
-    def test_testclient_lifespan_closes_the_injected_store(self):
+    def test_testclient_lifespan_leaves_the_injected_store_open(self):
         with TestClient(self.app):
             self.assertFalse(self.store._closed)
 
-        self.assertTrue(self.store._closed)
+        self.assertFalse(self.store._closed)

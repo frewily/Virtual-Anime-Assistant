@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from domain.tools import ToolRisk
+from domain.tools import ToolRisk, ToolSource
 from tools.registry import ToolDefinition, ToolRegistry
 from tools.service import ToolExecutionError
 
@@ -62,6 +62,13 @@ def build_builtin_registry() -> ToolRegistry:
             timeout_seconds=2,
             cancellable=True,
             handler=current_time,
+            allowed_sources=frozenset(
+                {
+                    ToolSource.DESKTOP,
+                    ToolSource.MODEL,
+                    ToolSource.SYSTEM,
+                }
+            ),
         )
     )
     return registry

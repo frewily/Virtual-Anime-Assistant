@@ -25,8 +25,15 @@ from settings.service import (
     VoiceSummary,
     create_settings_service,
 )
-from settings.transactions import SettingsTransactionCoordinator
-from settings.validation import SettingsDraft, SettingsValidationError
+from settings.transactions import (
+    SettingsTransactionCoordinator,
+    SettingsTransactionError,
+)
+from settings.validation import (
+    SettingsDraft,
+    SettingsValidationError,
+    SettingsValidationService,
+)
 
 
 class MemorySecretStore:
@@ -538,7 +545,7 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertEqual(stored.llm.api_key_ref, reference)
         self.assertEqual(stored.tts.audio_max_age_seconds, 321)
 
-    def test_unavailable_keychain_rejects_secret_mutation_and_enabled_retain(self) -> None:
+    def test_unavailable_keychain_rejects_secret_mutation_but_allows_retain(self) -> None:
         unavailable = MemorySecretStore(available=False)
         service = SettingsService(
             paths=self.paths,
@@ -562,9 +569,106 @@ class SettingsServiceTests(unittest.TestCase):
         persisted.llm.model = "model"
         self.file_store.save(persisted)
         retain = service.get_draft()
-        with self.assertRaises(SettingsServiceError) as raised:
-            service.save(retain)
-        self.assertEqual(raised.exception.code, "KEYCHAIN_UNAVAILABLE")
+        retain.tts.audio_max_age_seconds = 444
+        result = service.save(retain)
+        self.assertTrue(result.restart_required)
+        stored = self.file_store.load()
+        self.assertEqual(stored.llm.api_key_ref, "llm-api-key:existing")
+        self.assertEqual(stored.tts.audio_max_age_seconds, 444)
+        self.assertEqual(unavailable.get_calls, 0)
+
+    def test_missing_credential_is_validation_error_only_when_enabled(self) -> None:
+        self.secret_store.values.clear()
+        persisted = self.file_store.load()
+        persisted.llm.api_key_ref = "llm-api-key:missing"
+        persisted.llm.enabled = True
+        persisted.llm.base_url = "https://api.example.test/v1"
+        persisted.llm.model = "model"
+        self.file_store.save(persisted)
+        enabled = self.service.get_draft()
+
+        with self.assertRaises(SettingsValidationError) as raised:
+            self.service.save(enabled)
+
+        self.assertIn("llm.apiKey", raised.exception.fields)
+        persisted.llm.enabled = False
+        self.file_store.save(persisted)
+        disabled = self.service.get_draft()
+        disabled.tts.audio_max_age_seconds = 555
+        self.service.save(disabled)
+        stored = self.file_store.load()
+        self.assertEqual(stored.llm.api_key_ref, "llm-api-key:missing")
+        self.assertEqual(stored.tts.audio_max_age_seconds, 555)
+        presentation = self.service.get_config()
+        self.assertTrue(presentation.fields["llm.apiKey"].missing)
+
+    def test_save_uses_entry_snapshot_when_secret_operation_mutates(self) -> None:
+        draft = self.service.get_draft()
+        draft.llm.api_key = SecretMutation(
+            operation="replace", value="entry-secret"
+        )
+
+        errors = self._save_while_validation_blocked(
+            draft,
+            lambda: setattr(
+                draft.llm,
+                "api_key",
+                SecretMutation(operation="retain"),
+            ),
+        )
+
+        self.assertEqual(errors, [])
+        reference = self.file_store.load().llm.api_key_ref
+        self.assertIsNotNone(reference)
+        self.assertEqual(self.secret_store.values[reference], "entry-secret")
+
+    def test_save_uses_entry_snapshot_when_plain_field_mutates(self) -> None:
+        draft = self.service.get_draft()
+        draft.tts.audio_max_age_seconds = 111
+
+        errors = self._save_while_validation_blocked(
+            draft,
+            lambda: setattr(draft.tts, "audio_max_age_seconds", 222),
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(self.file_store.load().tts.audio_max_age_seconds, 111)
+
+    def _save_while_validation_blocked(
+        self,
+        draft: VersionedSettingsDraft,
+        mutate,
+    ) -> list[BaseException]:
+        entered = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+        original_validate = SettingsValidationService.validate
+
+        def blocked_validate(validation_service, received, existing):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("validation release timed out")
+            return original_validate(validation_service, received, existing)
+
+        def save() -> None:
+            try:
+                self.service.save(draft)
+            except BaseException as error:
+                errors.append(error)
+
+        with patch.object(
+            SettingsValidationService,
+            "validate",
+            new=blocked_validate,
+        ):
+            worker = threading.Thread(target=save)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=5))
+            mutate()
+            release.set()
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive())
+        return errors
 
     def test_unavailable_keychain_preserves_pending_recovery_journal(self) -> None:
         self.file_store.write_journal(
@@ -819,6 +923,37 @@ class SettingsServiceTests(unittest.TestCase):
         payload = " ".join((str(error), repr(error), error.json(), json.dumps(error.to_dict())))
         self.assertNotIn("secret", payload.lower())
         self.assertEqual(error.code, "SETTINGS_SAVE_FAILED")
+
+    def test_failed_secret_transaction_clears_plaintext_from_traceback_frames(self) -> None:
+        coordinator = Mock(spec=SettingsTransactionCoordinator)
+        coordinator.save.side_effect = SettingsTransactionError(
+            "private transaction detail"
+        )
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=self.secret_store,
+            transaction_coordinator=coordinator,
+            voice_catalog_loader=catalog,
+            environ={},
+        )
+        draft = service.get_draft()
+        draft.llm.api_key = SecretMutation(
+            operation="replace", value="traceback-plaintext-secret"
+        )
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            service.save(draft)
+
+        frames: list[str] = []
+        traceback = raised.exception.__traceback__
+        while traceback is not None:
+            frames.append(repr(traceback.tb_frame.f_locals))
+            traceback = traceback.tb_next
+        rendered = " ".join(frames)
+        self.assertNotIn("traceback-plaintext-secret", rendered)
+        self.assertNotIn("private transaction detail", rendered)
+        self.assertIsNone(raised.exception.__context__)
 
 
 if __name__ == "__main__":

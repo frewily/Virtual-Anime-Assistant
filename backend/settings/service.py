@@ -11,7 +11,7 @@ import threading
 from typing import Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic.alias_generators import to_camel
 
 from core.config_loader import VoiceCatalog, load_voice_catalog
@@ -377,27 +377,31 @@ class SettingsService:
 
         with _LIFECYCLE_LOCK:
             current = self._load_settings()
+            snapshot = self._snapshot_draft(draft)
             if (
-                not isinstance(draft, VersionedSettingsDraft)
-                or not self._valid_revision(draft.revision)
-                or not hmac.compare_digest(draft.revision, self._revision(current))
+                snapshot is None
+                or not self._valid_revision(snapshot.revision)
+                or not hmac.compare_digest(snapshot.revision, self._revision(current))
             ):
                 raise SettingsServiceError("SETTINGS_CONFLICT")
-            self._reject_environment_mutations(draft, current)
+            self._reject_environment_mutations(snapshot, current)
 
             catalog = self._load_voice_catalog()
             validation = SettingsValidationService(catalog)
             validated = validation.validate(
-                draft,
-                self._existing_secrets_for_validation(draft, current),
+                snapshot,
+                self._existing_secrets_for_validation(snapshot, current),
             )
             proposed = self._proposed_settings(current, validated.draft)
-            replacements = self._replacement_values(draft, validated)
+            replacements = self._replacement_values(validated)
             transaction_failed = False
             try:
-                self._transaction.save(current, proposed, replacements)
-            except SettingsTransactionError:
-                transaction_failed = True
+                try:
+                    self._transaction.save(current, proposed, replacements)
+                except SettingsTransactionError:
+                    transaction_failed = True
+            finally:
+                replacements.clear()
             if transaction_failed:
                 raise SettingsServiceError("SETTINGS_SAVE_FAILED")
             return SaveResult(restart_required=True)
@@ -537,6 +541,24 @@ class SettingsService:
             and all(character in "0123456789abcdef" for character in value)
         )
 
+    @staticmethod
+    def _snapshot_draft(
+        draft: object,
+    ) -> VersionedSettingsDraft | None:
+        snapshot: VersionedSettingsDraft | None = None
+        if isinstance(draft, VersionedSettingsDraft):
+            try:
+                snapshot = VersionedSettingsDraft.model_validate(
+                    draft.model_dump(
+                        mode="python",
+                        by_alias=False,
+                        warnings="none",
+                    )
+                )
+            except Exception:
+                snapshot = None
+        return snapshot
+
     def _existing_secrets_for_validation(
         self,
         draft: SettingsDraft,
@@ -561,10 +583,10 @@ class SettingsService:
         for path, mutation, enabled, reference in slots:
             environment_variable = _ENVIRONMENT_VARIABLES_BY_PATH[path]
             if environment_variable in environment:
-                results[path] = environment[environment_variable]
+                results[path] = SecretStr(environment[environment_variable])
                 continue
             if mutation.operation is not SecretOperation.RETAIN:
-                if not self._secret_store_available():
+                if self._secret_store_availability() is not True:
                     raise SettingsServiceError("KEYCHAIN_UNAVAILABLE")
                 results[path] = None
                 continue
@@ -574,31 +596,31 @@ class SettingsService:
             if reference is None:
                 results[path] = None
                 continue
-            secret = self._read_secret(reference)
-            results[path] = secret
+            availability = self._secret_store_availability()
+            if availability is None:
+                raise SettingsServiceError("KEYCHAIN_UNAVAILABLE")
+            if availability is False:
+                results[path] = True
+                continue
+            results[path] = self._read_secret(reference)
         return results
 
-    def _secret_store_available(self) -> bool:
+    def _secret_store_availability(self) -> bool | None:
         try:
             return bool(self._secret_store.available())
         except Exception:
-            return False
+            return None
 
-    def _read_secret(self, reference: str) -> str:
+    def _read_secret(self, reference: str) -> SecretStr | None:
         secret: str | None = None
         failed = False
         try:
-            if not self._secret_store.available():
-                failed = True
-            else:
-                secret = self._secret_store.get(reference)
-                if secret is None:
-                    failed = True
+            secret = self._secret_store.get(reference)
         except Exception:
             failed = True
-        if failed or secret is None:
+        if failed:
             raise SettingsServiceError("KEYCHAIN_UNAVAILABLE")
-        return secret
+        return SecretStr(secret) if secret is not None else None
 
     @staticmethod
     def _proposed_settings(current, validated) -> PersistedSettings:
@@ -640,11 +662,11 @@ class SettingsService:
         )
 
     @staticmethod
-    def _replacement_values(draft, validated) -> dict[str, str]:
+    def _replacement_values(validated) -> dict[str, str]:
         replacements: dict[str, str] = {}
         for path, mutation in (
-            ("llm.apiKey", draft.llm.api_key),
-            ("qq.accessToken", draft.qq.access_token),
+            ("llm.apiKey", validated.draft.llm.api_key),
+            ("qq.accessToken", validated.draft.qq.access_token),
         ):
             if mutation.operation is SecretOperation.REPLACE:
                 secret = validated.effective_secret(path)

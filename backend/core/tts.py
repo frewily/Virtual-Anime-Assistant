@@ -1,5 +1,7 @@
+from copy import deepcopy
 import logging
 import os
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -32,7 +34,9 @@ class TTSService:
         if voices is None or default_voice is None or fallback_voice is None:
             catalog = load_voice_catalog()
         self.voices = (
-            voices if voices is not None else catalog.copy_voices()
+            deepcopy(voices)
+            if voices is not None
+            else catalog.copy_voices()
         )
         self._voices_by_id = {voice["id"]: voice for voice in self.voices}
         self.default_voice = (
@@ -143,9 +147,10 @@ class TTSService:
             try:
                 if filepath.suffix.lower() not in {".mp3", ".wav"}:
                     continue
-                if not filepath.is_file():
+                metadata = filepath.lstat()
+                if not stat.S_ISREG(metadata.st_mode):
                     continue
-                if filepath.stat().st_mtime < cutoff:
+                if metadata.st_mtime < cutoff:
                     filepath.unlink()
                     removed += 1
             except OSError:

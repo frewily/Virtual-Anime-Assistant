@@ -35,12 +35,16 @@ class _StrictSafeLoader(yaml.SafeLoader):
 
 def _deep_freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError(_VOICE_CATALOG_ERROR)
         return MappingProxyType(
             {key: _deep_freeze(item) for key, item in value.items()}
         )
     if isinstance(value, (list, tuple)):
         return tuple(_deep_freeze(item) for item in value)
-    return value
+    if value is None or isinstance(value, (bool, float, int, str)):
+        return value
+    raise ValueError(_VOICE_CATALOG_ERROR)
 
 
 def _deep_thaw(value: Any) -> Any:
@@ -90,6 +94,11 @@ def load_voice_catalog(path: str | Path | None = None) -> VoiceCatalog:
             Loader=_StrictSafeLoader,
         )
     except (OSError, UnicodeError, yaml.YAMLError):
+        raise ValueError(_VOICE_CATALOG_ERROR) from None
+
+    try:
+        _deep_freeze(data)
+    except ValueError:
         raise ValueError(_VOICE_CATALOG_ERROR) from None
 
     if not isinstance(data, dict):

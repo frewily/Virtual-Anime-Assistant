@@ -1,5 +1,6 @@
 import asyncio
 import os
+import stat
 import sys
 import tempfile
 import traceback
@@ -83,6 +84,59 @@ class TTSServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unknown voice"):
             asyncio.run(service.synthesize("测试", "missing"))
+
+    def test_explicit_voices_are_recursively_copied(self):
+        voices = [
+            {
+                "id": "character_001",
+                "name": "original",
+                "description": "voice",
+                "defaultParams": {"temperature": 1.0},
+            }
+        ]
+        service = TTSService(
+            voices=voices,
+            default_voice="character_001",
+            fallback_voice="fallback",
+            audio_dir=self.temp_dir.name,
+        )
+
+        voices[0]["name"] = "caller-mutated"
+        voices[0]["defaultParams"]["temperature"] = 0.5
+        self.assertEqual(service.voices[0]["name"], "original")
+        self.assertEqual(
+            service.voices[0]["defaultParams"]["temperature"],
+            1.0,
+        )
+
+        service.voices[0]["name"] = "service-mutated"
+        service.voices[0]["defaultParams"]["temperature"] = 0.25
+        self.assertEqual(voices[0]["name"], "caller-mutated")
+        self.assertEqual(voices[0]["defaultParams"]["temperature"], 0.5)
+
+    def test_catalog_voices_are_copied_before_service_mutation(self):
+        catalog = VoiceCatalog(
+            voices=(
+                {
+                    "id": "character_001",
+                    "name": "original",
+                    "description": "voice",
+                    "defaultParams": {"temperature": 1.0},
+                },
+            ),
+            default_voice="character_001",
+            fallback_voice="fallback",
+        )
+        with patch("core.tts.load_voice_catalog", return_value=catalog):
+            service = TTSService(audio_dir=self.temp_dir.name)
+
+        service.voices[0]["name"] = "service-mutated"
+        service.voices[0]["defaultParams"]["temperature"] = 0.5
+        self.assertEqual(catalog.voices[0]["name"], "original")
+        self.assertEqual(
+            catalog.voices[0]["defaultParams"]["temperature"],
+            1.0,
+        )
 
     def test_explicit_default_voice_must_exist(self):
         with self.assertRaisesRegex(ValueError, "^unknown default voice$"):
@@ -180,13 +234,12 @@ class TTSServiceTests(unittest.TestCase):
             audio_max_age_seconds=999,
         )
         vanished = Mock(suffix=".wav")
-        vanished.is_file.side_effect = FileNotFoundError
+        vanished.lstat.side_effect = FileNotFoundError
         stat_error = Mock(suffix=".wav")
-        stat_error.is_file.return_value = True
-        stat_error.stat.side_effect = OSError("stat failed")
+        stat_error.lstat.side_effect = OSError("stat failed")
         unlink_error = Mock(suffix=".mp3")
-        unlink_error.is_file.return_value = True
-        unlink_error.stat.return_value.st_mtime = 0
+        unlink_error.lstat.return_value.st_mode = stat.S_IFREG | 0o600
+        unlink_error.lstat.return_value.st_mtime = 0
         unlink_error.unlink.side_effect = OSError("unlink failed")
         service.audio_dir = Mock()
         service.audio_dir.iterdir.return_value = (
@@ -201,6 +254,32 @@ class TTSServiceTests(unittest.TestCase):
         self.assertEqual(removed, 0)
         stat_error.unlink.assert_not_called()
         unlink_error.unlink.assert_called_once_with()
+
+    def test_cleanup_does_not_follow_audio_symlinks(self):
+        root = Path(self.temp_dir.name)
+        audio_dir = root / "audio"
+        service = TTSService(
+            voices=self.voices,
+            default_voice="character_001",
+            fallback_voice="zh-CN-XiaoxiaoNeural",
+            audio_dir=audio_dir,
+            audio_max_age_seconds=999,
+        )
+        external_target = root / "outside.wav"
+        external_target.write_bytes(b"external-audio")
+        os.utime(external_target, (99, 99))
+        link = audio_dir / "symlink.wav"
+        try:
+            link.symlink_to(external_target)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"symlinks unavailable: {type(exc).__name__}")
+
+        with patch("core.tts.time.time", return_value=100):
+            removed = service.cleanup_expired_audio(0)
+
+        self.assertEqual(removed, 0)
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(external_target.is_file())
 
     def test_cleanup_returns_zero_when_directory_cannot_be_listed(self):
         service = TTSService(
@@ -358,6 +437,64 @@ default: {{voiceId: character_001, fallbackVoice: fallback}}
                 while context is not None:
                     self.assertNotIn(secret, str(context))
                     context = context.__context__
+
+    def test_rejects_yaml_sets_without_leaking_content(self):
+        secret = "PRIVATE-YAML-SET-CONTENT"
+        cases = (
+            f"""
+voices: !!set
+  {secret}: null
+default: {{voiceId: character_001, fallbackVoice: fallback}}
+""",
+            f"""
+voices:
+  - id: character_001
+    name: A
+    description: first
+    defaultParams: !!set
+      {secret}: null
+default: {{voiceId: character_001, fallbackVoice: fallback}}
+""",
+        )
+        for content in cases:
+            with (
+                self.subTest(content=content),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = self._write_catalog(directory, content)
+                with self.assertRaises(ValueError) as raised:
+                    load_voice_catalog(path)
+
+                error = raised.exception
+                rendered = "".join(
+                    traceback.format_exception(
+                        type(error),
+                        error,
+                        error.__traceback__,
+                    )
+                )
+                self.assertEqual(str(error), "invalid voice catalog")
+                self.assertNotIn(secret, rendered)
+
+    def test_direct_catalog_rejects_unsupported_containers(self):
+        for unsupported in ({"value"}, frozenset({"value"})):
+            with self.subTest(type=type(unsupported).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^invalid voice catalog$",
+                ):
+                    VoiceCatalog(
+                        voices=(
+                            {
+                                "id": "character_001",
+                                "name": "A",
+                                "description": "first",
+                                "defaultParams": unsupported,
+                            },
+                        ),
+                        default_voice="character_001",
+                        fallback_voice="fallback",
+                    )
 
     def test_rejects_duplicate_ids_and_missing_default(self):
         cases = (

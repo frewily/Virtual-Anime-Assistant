@@ -187,6 +187,23 @@ class SettingsValidationTests(unittest.TestCase):
             {"qq.accessToken", "qq.rateBurst"},
         )
 
+    def test_disabled_qq_still_validates_replacement_token_length(self) -> None:
+        for token in ("too-short", "x" * 513):
+            with self.subTest(length=len(token)):
+                draft = valid_draft(
+                    qq=QQSettingsDraft(
+                        enabled=False,
+                        access_token=SecretMutation(
+                            operation="replace",
+                            value=token,
+                        ),
+                    )
+                )
+
+                error = self.assert_field_errors(draft, {"qq.accessToken"})
+                rendered = f"{error!s}{error!r}{error.to_dict()}{error.json()}"
+                self.assertNotIn(token, rendered)
+
     def test_numeric_runtime_boundaries_are_enforced(self) -> None:
         cases = (
             (LLMSettingsDraft(timeout_seconds=0), "llm.timeoutSeconds", None),

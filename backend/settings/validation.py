@@ -261,13 +261,20 @@ class SettingsValidationService:
         )
         if qq.rate_burst > qq.rate_per_minute:
             errors["qq.rateBurst"] = _FIELD_MESSAGE
+        qq_secret = secret_values["qq.accessToken"]
+        if (
+            qq.access_token.operation is SecretOperation.REPLACE
+            and not _valid_qq_token(qq_secret)
+        ):
+            errors["qq.accessToken"] = _FIELD_MESSAGE
         if qq.enabled:
-            qq_secret = secret_values["qq.accessToken"]
             if not secret_configured["qq.accessToken"]:
-                errors["qq.accessToken"] = _REQUIRED_MESSAGE
-            elif qq_secret is not None and not 16 <= len(
-                qq_secret.get_secret_value().strip()
-            ) <= 512:
+                errors.setdefault("qq.accessToken", _REQUIRED_MESSAGE)
+            elif (
+                qq.access_token.operation is SecretOperation.RETAIN
+                and qq_secret is not None
+                and not _valid_qq_token(qq_secret)
+            ):
                 errors["qq.accessToken"] = _FIELD_MESSAGE
             if not qq.allowed_group_ids and not qq.allowed_user_ids:
                 errors["qq.allowedGroupIds"] = _REQUIRED_MESSAGE
@@ -464,6 +471,12 @@ def _result(code: ConnectionTestCode) -> ConnectionTestResult:
 
 def _nonempty(value: str | None) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_qq_token(value: SecretStr | None) -> bool:
+    if value is None:
+        return False
+    return 16 <= len(value.get_secret_value().strip()) <= 512
 
 
 def _is_safe_http_url(value: object) -> bool:

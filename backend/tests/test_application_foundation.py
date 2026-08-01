@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Sequence
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -1179,7 +1180,7 @@ class AssistantApplicationSqliteSafetyTests(unittest.TestCase):
         self.assertEqual(alice_result.kind, ResponseKind.SPEAK)
         self.assertEqual(bob_result.kind, ResponseKind.ERROR)
         self.assertEqual(len(self.llm.requests), 1)
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             owner = connection.execute(
                 "SELECT source, owner_id FROM conversations WHERE id = ?",
                 ("shared-conversation",),
@@ -1235,7 +1236,7 @@ class AssistantApplicationSqliteSafetyTests(unittest.TestCase):
             [result.kind for result in results],
             [ResponseKind.SPEAK, ResponseKind.ERROR],
         )
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             rows = connection.execute(
                 "SELECT conversation_id, role FROM messages WHERE id = ?",
                 ("shared-message-id",),

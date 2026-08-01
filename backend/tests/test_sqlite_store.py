@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from inspect import signature
@@ -149,7 +150,7 @@ EXPECTED_INDEX_COLUMNS = {
 
 def create_version_one_database(database_path: Path) -> None:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database_path) as connection:
+    with closing(sqlite3.connect(database_path)) as connection, connection:
         connection.execute(
             """
             CREATE TABLE schema_migrations (
@@ -396,7 +397,7 @@ class SqliteStoreTests(unittest.TestCase):
         self.assertEqual(store.schema_version, 2)
         self.assertEqual(store.table_names(), EXPECTED_TABLES)
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             indexes = {
                 row[0]
                 for row in connection.execute(
@@ -410,7 +411,7 @@ class SqliteStoreTests(unittest.TestCase):
     def test_each_table_has_exact_column_contract(self):
         self.open_store()
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             for table_name, expected_columns in EXPECTED_COLUMNS.items():
                 with self.subTest(table=table_name):
                     actual_columns = [
@@ -424,7 +425,7 @@ class SqliteStoreTests(unittest.TestCase):
     def test_each_index_has_exact_column_order(self):
         self.open_store()
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             for index_name, expected_columns in EXPECTED_INDEX_COLUMNS.items():
                 with self.subTest(index=index_name):
                     actual_columns = [
@@ -440,7 +441,7 @@ class SqliteStoreTests(unittest.TestCase):
         asyncio.run(first.close())
         self.store = SqliteStore(self.database_path)
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             migration_rows = connection.execute(
                 "SELECT version, name FROM schema_migrations"
             ).fetchall()
@@ -457,7 +458,7 @@ class SqliteStoreTests(unittest.TestCase):
         store = self.open_store()
 
         self.assertEqual(store.schema_version, 2)
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             row = connection.execute(
                 "SELECT source, owner_id FROM conversations WHERE id = ?",
                 ("conversation-before-upgrade",),
@@ -474,7 +475,7 @@ class SqliteStoreTests(unittest.TestCase):
 
     def test_existing_wal_database_is_switched_to_delete_journal(self):
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             configured_mode = connection.execute(
                 "PRAGMA journal_mode=WAL"
             ).fetchone()[0]
@@ -499,7 +500,7 @@ class SqliteStoreTests(unittest.TestCase):
         stored_confirmation = asyncio.run(
             store.get_confirmation(confirmation.confirmation_id)
         )
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             details_json = connection.execute(
                 "SELECT details_json FROM tool_audit_events "
                 "WHERE id = 'audit-1'"
@@ -795,7 +796,7 @@ class SqliteStoreTests(unittest.TestCase):
             with self.assertRaises(sqlite3.Error):
                 SqliteStore(self.database_path)
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             versions = connection.execute(
                 "SELECT version FROM schema_migrations"
             ).fetchall()
@@ -833,7 +834,7 @@ class SqliteStoreTests(unittest.TestCase):
             )
         )
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             conversation = connection.execute(
                 "SELECT source, owner_id, title FROM conversations WHERE id = ?",
                 ("conversation-1",),
@@ -936,7 +937,7 @@ class SqliteStoreTests(unittest.TestCase):
             )
         )
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             conversation = connection.execute(
                 "SELECT source, owner_id, title "
                 "FROM conversations WHERE id = ?",
@@ -1104,7 +1105,7 @@ class SqliteStoreTests(unittest.TestCase):
 
         asyncio.run(store.record_model_call(record))
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             stored = connection.execute(
                 "SELECT status, latency_ms, prompt_tokens, completion_tokens, "
                 "provider_request_id FROM model_calls WHERE id = ?",
@@ -1138,7 +1139,7 @@ class SqliteStoreTests(unittest.TestCase):
             provider_request_id="original-request",
         )
         asyncio.run(store.record_model_call(existing_record))
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             original_record = connection.execute(
                 "SELECT * FROM model_calls WHERE id = ?",
                 ("call-rollback",),
@@ -1162,7 +1163,7 @@ class SqliteStoreTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             asyncio.run(store.save_model_result(duplicate_record, assistant))
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             assistant_count = connection.execute(
                 "SELECT COUNT(*) FROM messages WHERE id = ?",
                 ("assistant-rollback",),
@@ -1222,7 +1223,7 @@ class SqliteStoreTests(unittest.TestCase):
 
         asyncio.run(store.save_model_results(records, assistant))
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             stored_ids = [
                 row[0]
                 for row in connection.execute(
@@ -1293,7 +1294,7 @@ class SqliteStoreTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             asyncio.run(store.save_model_results(records, assistant))
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM messages WHERE id = ?",
@@ -1330,7 +1331,7 @@ class SqliteStoreTests(unittest.TestCase):
         ):
             asyncio.run(store.save_model_results([], assistant))
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             assistant_count = connection.execute(
                 "SELECT COUNT(*) FROM messages WHERE id = ?",
                 (assistant.id,),
@@ -1423,7 +1424,7 @@ class SqliteStoreTests(unittest.TestCase):
 
         asyncio.run(save_while_worker_is_blocked())
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             stored_record = connection.execute(
                 "SELECT model, status, latency_ms, prompt_tokens, "
                 "provider_request_id FROM model_calls WHERE id = ?",
@@ -1484,7 +1485,7 @@ class SqliteStoreTests(unittest.TestCase):
         self.assertTrue(asyncio.run(store.delete_conversation("conversation-1")))
         self.assertFalse(asyncio.run(store.delete_conversation("conversation-1")))
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
             message_count = connection.execute(
                 "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
                 ("conversation-1",),

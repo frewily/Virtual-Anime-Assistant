@@ -36,6 +36,14 @@ from settings.transactions import (
     SettingsTransactionCoordinator,
     SettingsTransactionError,
 )
+from settings.service import (
+    SaveResult,
+    SessionStatus,
+    SettingsService,
+    SettingsServiceError,
+    VoiceSummary,
+    create_settings_service,
+)
 
 __all__ = [
     "AuthError",
@@ -54,14 +62,20 @@ __all__ = [
     "SecretStore",
     "SecretStoreUnavailable",
     "Session",
+    "SessionStatus",
     "KeychainSecretStore",
     "SettingsPaths",
     "SettingsPresentation",
     "SettingsResolver",
     "SettingsAuthService",
+    "SettingsService",
+    "SettingsServiceError",
     "SettingsTransactionCoordinator",
     "SettingsTransactionError",
     "TTSSettings",
     "TTSRuntimeSettings",
     "ValueFieldPresentation",
+    "SaveResult",
+    "VoiceSummary",
+    "create_settings_service",
 ]

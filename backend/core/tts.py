@@ -32,7 +32,7 @@ class TTSService:
         if voices is None or default_voice is None or fallback_voice is None:
             catalog = load_voice_catalog()
         self.voices = (
-            voices if voices is not None else list(catalog.voices)
+            voices if voices is not None else catalog.copy_voices()
         )
         self._voices_by_id = {voice["id"]: voice for voice in self.voices}
         self.default_voice = (
@@ -134,14 +134,21 @@ class TTSService:
         )
         cutoff = time.time() - max_age
         removed = 0
-        for filepath in self.audio_dir.iterdir():
-            if filepath.suffix.lower() not in {".mp3", ".wav"}:
-                continue
+        try:
+            entries = list(self.audio_dir.iterdir())
+        except OSError:
+            logger.warning("Audio cleanup skipped: directory unavailable")
+            return 0
+        for filepath in entries:
             try:
+                if filepath.suffix.lower() not in {".mp3", ".wav"}:
+                    continue
+                if not filepath.is_file():
+                    continue
                 if filepath.stat().st_mtime < cutoff:
                     filepath.unlink()
                     removed += 1
-            except FileNotFoundError:
+            except OSError:
                 continue
         return removed
 

@@ -2,6 +2,7 @@
 
 import json
 import sys
+import traceback
 import unittest
 import warnings
 from pathlib import Path
@@ -461,11 +462,51 @@ class SettingsResolverTests(unittest.TestCase):
             configured=False,
         )
 
-        with self.assertRaises((ValidationError, TypeError)):
+        with self.assertRaises(TypeError) as raised:
             field.value = secret
 
+        for rendered in (
+            str(raised.exception),
+            repr(raised.exception),
+            "".join(traceback.format_exception(raised.exception)),
+        ):
+            self.assertNotIn(secret, rendered)
         self.assertNotIn(secret, repr(field))
         self.assertNotIn(secret, field.model_dump_json())
+
+    def test_secret_model_copy_cannot_bypass_its_own_redaction(self) -> None:
+        secret = "probe-secret"
+        field = SecretFieldPresentation(
+            source=FieldSource.ENVIRONMENT,
+            read_only=True,
+            environment_variable="ASSISTANT_LLM_API_KEY",
+            configured=True,
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            copied = field.model_copy(update={"value": secret})
+            dumped = copied.model_dump()
+            dumped_json = copied.model_dump_json()
+
+        self.assertEqual(caught, [])
+        self.assertIsNone(copied.value)
+        self.assertIsNone(dumped["value"])
+        self.assertIsNone(json.loads(dumped_json)["value"])
+        for rendered in (repr(copied), str(dumped), dumped_json):
+            self.assertNotIn(secret, rendered)
+
+        object.__setattr__(copied, "value", secret)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            bypassed_dump = copied.model_dump()
+            bypassed_json = copied.model_dump_json()
+
+        self.assertEqual(caught, [])
+        self.assertIsNone(bypassed_dump["value"])
+        self.assertIsNone(json.loads(bypassed_json)["value"])
+        for rendered in (repr(copied), str(bypassed_dump), bypassed_json):
+            self.assertNotIn(secret, rendered)
 
     def test_entire_presentation_rejects_secret_path_as_value_field(self) -> None:
         secret = "probe-secret"
@@ -509,9 +550,15 @@ class SettingsResolverTests(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             presentation.fields["llm.apiKey"] = unsafe
-        with self.assertRaises((ValidationError, TypeError)):
+        with self.assertRaises(TypeError) as raised:
             presentation.fields = {"llm.apiKey": unsafe}
 
+        for rendered in (
+            str(raised.exception),
+            repr(raised.exception),
+            "".join(traceback.format_exception(raised.exception)),
+        ):
+            self.assertNotIn(secret, rendered)
         self.assertNotIn(secret, repr(presentation))
         self.assertNotIn(secret, presentation.model_dump_json())
 
@@ -532,7 +579,8 @@ class SettingsResolverTests(unittest.TestCase):
             read_only=True,
             environment_variable="ASSISTANT_LLM_API_KEY",
             configured=True,
-        ).model_copy(update={"value": secret})
+        )
+        object.__setattr__(unsafe_secret, "value", secret)
         bypassed = presentation.model_copy(
             update={
                 "fields": {

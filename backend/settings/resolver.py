@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 import os
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Self
 
 from pydantic import (
     BaseModel,
@@ -76,6 +76,35 @@ class SecretFieldPresentation(_FieldPresentation):
     configured: bool
     missing: bool = False
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "value":
+            raise TypeError("secret presentation value is immutable")
+        super().__setattr__(name, value)
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        safe_update = dict(update or {})
+        safe_update["value"] = None
+        return super().model_copy(update=safe_update, deep=deep)
+
+    @field_serializer("value")
+    def serialize_value(self, value: object) -> None:
+        return None
+
+    def __repr_args__(self):
+        return (
+            ("source", self.source),
+            ("read_only", self.read_only),
+            ("environment_variable", self.environment_variable),
+            ("value", None),
+            ("configured", self.configured),
+            ("missing", self.missing),
+        )
+
     @model_validator(mode="before")
     @classmethod
     def reject_secret_value(cls, data: object) -> object:
@@ -95,6 +124,11 @@ _SECRET_FIELD_PATHS = frozenset({"llm.apiKey", "qq.accessToken"})
 class SettingsPresentation(_PresentationModel):
     fields: Mapping[str, FieldPresentation]
     keychain_available: bool
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "fields":
+            raise TypeError("settings presentation fields are immutable")
+        super().__setattr__(name, value)
 
     @model_validator(mode="before")
     @classmethod

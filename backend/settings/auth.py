@@ -170,7 +170,12 @@ class SettingsAuthService:
         """Compare a supplied CSRF token in constant time."""
         if not isinstance(token, str):
             return False
-        return hmac.compare_digest(session.csrf_token, token)
+        try:
+            expected = session.csrf_token.encode("ascii")
+            candidate = token.encode("ascii")
+        except UnicodeEncodeError:
+            return False
+        return hmac.compare_digest(expected, candidate)
 
     def revoke(self, token: str | None) -> None:
         """Revoke a session; absent and null tokens are harmless."""

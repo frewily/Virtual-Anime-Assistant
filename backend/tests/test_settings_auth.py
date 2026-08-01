@@ -189,6 +189,13 @@ class SessionTests(unittest.TestCase):
 
         self.assertEqual(compare.call_count, 2)
 
+    def test_non_ascii_csrf_candidate_is_rejected_without_an_error(self) -> None:
+        service = SettingsAuthService(random_bytes=IncrementingRandom())
+        session = service.create_session()
+        candidate = "密"
+
+        self.assertFalse(service.validate_csrf(session, candidate))
+
     def test_concurrent_session_creation_and_lookup_is_safe(self) -> None:
         service = SettingsAuthService(random_bytes=IncrementingRandom())
 

@@ -41,6 +41,7 @@ from settings.service import (
     SessionStatus,
     SettingsService,
     SettingsServiceError,
+    VersionedSettingsDraft,
     VoiceSummary,
     create_settings_service,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "SettingsAuthService",
     "SettingsService",
     "SettingsServiceError",
+    "VersionedSettingsDraft",
     "SettingsTransactionCoordinator",
     "SettingsTransactionError",
     "TTSSettings",

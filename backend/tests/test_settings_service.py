@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.config_loader import VoiceCatalog
 from settings.auth import AuthError, PasswordPolicyError, Session, SettingsAuthService
-from settings.file_store import SettingsFileError, SettingsFileStore
+from settings.file_store import SaveJournal, SettingsFileError, SettingsFileStore
 from settings.models import SecretMutation
 from settings.paths import SettingsPaths
 from settings.secrets import SecretStoreUnavailable
@@ -21,6 +21,7 @@ from settings.service import (
     SessionStatus,
     SettingsService,
     SettingsServiceError,
+    VersionedSettingsDraft,
     VoiceSummary,
     create_settings_service,
 )
@@ -32,21 +33,29 @@ class MemorySecretStore:
     def __init__(self, *, available: bool = True) -> None:
         self.values: dict[str, str] = {}
         self.is_available = available
+        self.available_calls = 0
+        self.get_calls = 0
+        self.set_calls = 0
+        self.delete_calls = 0
 
     def available(self) -> bool:
+        self.available_calls += 1
         return self.is_available
 
     def get(self, reference: str) -> str | None:
+        self.get_calls += 1
         if not self.is_available:
             raise SecretStoreUnavailable("sensitive backend detail")
         return self.values.get(reference)
 
     def set(self, reference: str, value: str) -> None:
+        self.set_calls += 1
         if not self.is_available:
             raise SecretStoreUnavailable("sensitive backend detail")
         self.values[reference] = value
 
     def delete(self, reference: str) -> None:
+        self.delete_calls += 1
         if not self.is_available:
             raise SecretStoreUnavailable("sensitive backend detail")
         self.values.pop(reference, None)
@@ -195,7 +204,7 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertIsNone(raised.exception.__cause__)
 
     def test_setup_interrupts_roll_back_auth_and_propagate_unchanged(self) -> None:
-        for interruption in (KeyboardInterrupt, SystemExit):
+        for interruption in (KeyboardInterrupt, SystemExit, GeneratorExit):
             with self.subTest(interruption=interruption.__name__):
                 with tempfile.TemporaryDirectory() as directory:
                     paths = SettingsPaths.from_root(Path(directory))
@@ -406,6 +415,154 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertIsNone(self.file_store.load().llm.api_key_ref)
         self.assertNotIn(second_ref, self.secret_store.values)
 
+    def test_stale_draft_cannot_overwrite_another_tabs_nonsecret_save(self) -> None:
+        first_tab = self.service.get_draft()
+        second_tab = self.service.get_draft()
+        first_tab.tts.gpt_sovits_url = "http://127.0.0.1:9881"
+        self.service.save(first_tab)
+        second_tab.tts.audio_max_age_seconds = 123
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            self.service.save(second_tab)
+
+        self.assertEqual(raised.exception.code, "SETTINGS_CONFLICT")
+        stored = self.file_store.load()
+        self.assertEqual(stored.tts.gpt_sovits_url, "http://127.0.0.1:9881")
+        self.assertEqual(stored.tts.audio_max_age_seconds, 86400)
+
+    def test_stale_secret_delete_has_zero_keychain_activity(self) -> None:
+        initial = self.service.get_draft()
+        initial.llm.api_key = SecretMutation(operation="replace", value="first-secret")
+        self.service.save(initial)
+        stale_delete = self.service.get_draft()
+        stale_delete.llm.api_key = SecretMutation(operation="delete")
+
+        replacement = self.service.get_draft()
+        replacement.llm.api_key = SecretMutation(
+            operation="replace", value="second-secret"
+        )
+        self.service.save(replacement)
+        stored_before = self.file_store.load()
+        values_before = dict(self.secret_store.values)
+        self.secret_store.available_calls = 0
+        self.secret_store.get_calls = 0
+        self.secret_store.set_calls = 0
+        self.secret_store.delete_calls = 0
+        voice_loader = Mock(side_effect=AssertionError("catalog must not load"))
+        self.service._voice_catalog_loader = voice_loader
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            self.service.save(stale_delete)
+
+        self.assertEqual(raised.exception.code, "SETTINGS_CONFLICT")
+        self.assertEqual(self.file_store.load(), stored_before)
+        self.assertEqual(self.secret_store.values, values_before)
+        self.assertEqual(
+            (
+                self.secret_store.available_calls,
+                self.secret_store.get_calls,
+                self.secret_store.set_calls,
+                self.secret_store.delete_calls,
+            ),
+            (0, 0, 0, 0),
+        )
+        voice_loader.assert_not_called()
+
+    def test_versioned_draft_json_round_trip_and_invalid_revisions(self) -> None:
+        draft = self.service.get_draft()
+        self.assertIsInstance(draft, VersionedSettingsDraft)
+        restored = VersionedSettingsDraft.model_validate_json(
+            draft.model_dump_json()
+        )
+        self.assertEqual(restored, draft)
+        restored.tts.audio_max_age_seconds = 222
+        self.service.save(restored)
+        self.assertEqual(self.file_store.load().tts.audio_max_age_seconds, 222)
+        with self.assertRaises(Exception):
+            VersionedSettingsDraft.model_validate(
+                {**draft.model_dump(by_alias=True), "revision": "forged"}
+            )
+        payload = draft.model_dump(by_alias=True)
+        payload.pop("revision")
+        with self.assertRaises(Exception):
+            VersionedSettingsDraft.model_validate(payload)
+
+        forged = draft.model_copy(deep=True)
+        forged.revision = "0" * 64
+        with self.assertRaises(SettingsServiceError) as raised:
+            self.service.save(forged)
+        self.assertEqual(raised.exception.code, "SETTINGS_CONFLICT")
+
+        bypassed = draft.model_copy(update={"revision": object()})
+        with self.assertRaises(SettingsServiceError) as raised:
+            self.service.save(bypassed)
+        self.assertEqual(raised.exception.code, "SETTINGS_CONFLICT")
+
+    def test_unavailable_keychain_allows_nonsecret_save_with_retained_refs(self) -> None:
+        initial = self.service.get_draft()
+        initial.llm.api_key = SecretMutation(operation="replace", value="first-secret")
+        self.service.save(initial)
+        reference = self.file_store.load().llm.api_key_ref
+        self.secret_store.is_available = False
+        draft = self.service.get_draft()
+        draft.tts.audio_max_age_seconds = 321
+
+        result = self.service.save(draft)
+
+        self.assertTrue(result.restart_required)
+        stored = self.file_store.load()
+        self.assertEqual(stored.llm.api_key_ref, reference)
+        self.assertEqual(stored.tts.audio_max_age_seconds, 321)
+
+    def test_unavailable_keychain_rejects_secret_mutation_and_enabled_retain(self) -> None:
+        unavailable = MemorySecretStore(available=False)
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=unavailable,
+            voice_catalog_loader=catalog,
+            environ={},
+        )
+        replace = service.get_draft()
+        replace.llm.api_key = SecretMutation(
+            operation="replace", value="must-not-leak"
+        )
+        with self.assertRaises(SettingsServiceError) as raised:
+            service.save(replace)
+        self.assertEqual(raised.exception.code, "KEYCHAIN_UNAVAILABLE")
+
+        persisted = self.file_store.load()
+        persisted.llm.api_key_ref = "llm-api-key:existing"
+        persisted.llm.enabled = True
+        persisted.llm.base_url = "https://api.example.test/v1"
+        persisted.llm.model = "model"
+        self.file_store.save(persisted)
+        retain = service.get_draft()
+        with self.assertRaises(SettingsServiceError) as raised:
+            service.save(retain)
+        self.assertEqual(raised.exception.code, "KEYCHAIN_UNAVAILABLE")
+
+    def test_unavailable_keychain_preserves_pending_recovery_journal(self) -> None:
+        self.file_store.write_journal(
+            SaveJournal(
+                transaction_id="pending",
+                old_refs=[],
+                new_refs=["llm-api-key:orphan"],
+                target_refs=["llm-api-key:orphan"],
+            )
+        )
+        self.secret_store.is_available = False
+        original = self.file_store.load()
+        draft = self.service.get_draft()
+        draft.tts.audio_max_age_seconds = 333
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            self.service.save(draft)
+
+        self.assertEqual(raised.exception.code, "SETTINGS_SAVE_FAILED")
+        self.assertEqual(self.file_store.load(), original)
+        self.assertIsNotNone(self.file_store.read_journal())
+
     def test_validation_and_voice_snapshot_are_shared_by_save(self) -> None:
         calls = 0
 
@@ -492,10 +649,13 @@ class SettingsServiceTests(unittest.TestCase):
 
         runtime = service.runtime_settings()
         self.assertEqual(runtime.llm.model, "environment-model")
+        self.assertEqual(self.secret_store.available_calls, 0)
+        self.assertEqual(self.secret_store.get_calls, 0)
         for operation in (service.get_config, service.get_draft):
             with self.assertRaises(SettingsServiceError) as raised:
                 operation()
             self.assertEqual(raised.exception.code, "SETTINGS_FILE_INVALID")
+            self.assertIsNone(raised.exception.__context__)
         with self.assertRaises(SettingsServiceError) as raised:
             service.save(SettingsDraft())
         self.assertEqual(raised.exception.code, "SETTINGS_FILE_INVALID")
@@ -551,6 +711,43 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "VOICE_CATALOG_INVALID")
         self.assertNotIn("/private/path", repr(raised.exception))
         self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+
+        invalid_catalog = VoiceCatalog(
+            voices=({"id": "voice", "name": 123, "description": "safe"},),
+            default_voice="voice",
+            fallback_voice="voice",
+        )
+        invalid_service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=self.secret_store,
+            voice_catalog_loader=lambda: invalid_catalog,
+            environ={},
+        )
+        with self.assertRaises(SettingsServiceError) as raised:
+            invalid_service.get_voices()
+        self.assertEqual(raised.exception.code, "VOICE_CATALOG_INVALID")
+        self.assertIsNone(raised.exception.__context__)
+
+    def test_resolver_failure_has_no_retained_exception_context(self) -> None:
+        resolver = Mock()
+        resolver.resolve.side_effect = ValueError("private resolver secret")
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=self.secret_store,
+            resolver=resolver,
+            voice_catalog_loader=catalog,
+            environ={},
+        )
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            service.get_config()
+
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertNotIn("private", repr(raised.exception))
 
     def test_result_models_are_strict_frozen_and_safe(self) -> None:
         status = SessionStatus(

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import hashlib
+import hmac
 import json
+import os
 import threading
 from typing import Self
 
@@ -50,6 +53,16 @@ from settings.validation import (
 )
 
 
+class VersionedSettingsDraft(SettingsDraft):
+    """Editable settings plus an opaque full-snapshot concurrency revision."""
+
+    revision: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
 class _ResponseModel(BaseModel):
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -94,6 +107,7 @@ class VoiceSummary(_ResponseModel):
 
 _SERVICE_MESSAGES = {
     "KEYCHAIN_UNAVAILABLE": "操作系统凭据库不可用",
+    "SETTINGS_CONFLICT": "设置已被其他页面更新，请刷新后重试",
     "SETTINGS_ALREADY_INITIALIZED": "设置密码已经初始化",
     "SETTINGS_AUTH_FAILED": "认证操作失败",
     "SETTINGS_FILE_INVALID": "设置文件无效，请修复或移走后重试",
@@ -156,6 +170,43 @@ _SECRET_DRAFT_PATHS = {
     "llm.apiKey": ("llm", "api_key"),
     "qq.accessToken": ("qq", "access_token"),
 }
+_ENVIRONMENT_VARIABLES_BY_PATH = {
+    "llm.enabled": "ASSISTANT_LLM_ENABLED",
+    "llm.baseUrl": "ASSISTANT_LLM_BASE_URL",
+    "llm.model": "ASSISTANT_LLM_MODEL",
+    "llm.timeoutSeconds": "ASSISTANT_LLM_TIMEOUT_SECONDS",
+    "llm.maxContextMessages": "ASSISTANT_LLM_MAX_CONTEXT_MESSAGES",
+    "llm.maxContextChars": "ASSISTANT_LLM_MAX_CONTEXT_CHARS",
+    "llm.toolCallingEnabled": "ASSISTANT_LLM_TOOL_CALLING_ENABLED",
+    "llm.apiKey": "ASSISTANT_LLM_API_KEY",
+    "qq.enabled": "ASSISTANT_QQ_ENABLED",
+    "qq.allowedGroupIds": "ASSISTANT_QQ_ALLOWED_GROUP_IDS",
+    "qq.allowedUserIds": "ASSISTANT_QQ_ALLOWED_USER_IDS",
+    "qq.ratePerMinute": "ASSISTANT_QQ_RATE_PER_MINUTE",
+    "qq.rateBurst": "ASSISTANT_QQ_RATE_BURST",
+    "qq.maxConcurrency": "ASSISTANT_QQ_MAX_CONCURRENCY",
+    "qq.actionTimeoutSeconds": "ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS",
+    "qq.accessToken": "ASSISTANT_QQ_ACCESS_TOKEN",
+    "tts.gptSovitsUrl": "ASSISTANT_GPT_SOVITS_URL",
+    "tts.defaultVoiceId": "ASSISTANT_TTS_DEFAULT_VOICE_ID",
+    "tts.audioMaxAgeSeconds": "ASSISTANT_AUDIO_MAX_AGE_SECONDS",
+}
+
+
+class _FallbackSecretStore:
+    """Resolver-only store that performs no platform credential I/O."""
+
+    def available(self) -> bool:
+        return False
+
+    def get(self, reference: str) -> None:
+        raise RuntimeError("fallback secret access is disabled")
+
+    def set(self, reference: str, value: str) -> None:
+        raise RuntimeError("fallback secret access is disabled")
+
+    def delete(self, reference: str) -> None:
+        raise RuntimeError("fallback secret access is disabled")
 
 
 class SettingsService:
@@ -189,18 +240,28 @@ class SettingsService:
 
         with _LIFECYCLE_LOCK:
             self._load_settings()
+            recovery_failed = False
             try:
                 self._transaction.recover()
             except SettingsTransactionError:
-                raise SettingsServiceError("SETTINGS_RECOVERY_FAILED") from None
+                recovery_failed = True
+            if recovery_failed:
+                raise SettingsServiceError("SETTINGS_RECOVERY_FAILED")
 
     def runtime_settings(self) -> RuntimeSettings:
         """Resolve runtime values, falling back on defaults for a corrupt file."""
 
+        corrupt = False
         try:
             persisted = self._file_store.load()
         except SettingsFileError:
+            corrupt = True
             persisted = PersistedSettings()
+        if corrupt:
+            return self._resolve_with(
+                SettingsResolver(_FallbackSecretStore()),
+                persisted,
+            ).runtime
         return self._resolve(persisted).runtime
 
     def session_status(self, token: str | None) -> SessionStatus:
@@ -231,35 +292,37 @@ class SettingsService:
             except (PasswordPolicyError, AuthError):
                 raise
             except Exception:
-                raise SettingsServiceError("SETTINGS_AUTH_FAILED") from None
+                auth_record = None
+            if auth_record is None:
+                raise SettingsServiceError("SETTINGS_AUTH_FAILED")
 
             proposed = current.model_copy(update={"auth": auth_record})
+            save_failed = False
             try:
                 self._transaction.save(current, proposed, {})
             except SettingsTransactionError:
-                raise SettingsServiceError("SETTINGS_SAVE_FAILED") from None
+                save_failed = True
+            if save_failed:
+                raise SettingsServiceError("SETTINGS_SAVE_FAILED")
 
+            rollback_failed = False
             try:
                 # SettingsAuthService.create_session mutates its registry only after
                 # every fallible token-generation step has completed, so an error
                 # cannot leave a newly inserted session that lacks a returned token.
                 return self._auth.create_session()
-            except (KeyboardInterrupt, SystemExit):
+            except BaseException as failure:
                 try:
                     self._transaction.save(proposed, current, {})
                 except BaseException:
-                    # Preserve the original process-control exception even when the
-                    # best-effort CAS rollback encounters a conflict or I/O failure.
-                    pass
-                raise
-            except Exception:
-                try:
-                    self._transaction.save(proposed, current, {})
-                except SettingsTransactionError:
-                    raise SettingsServiceError(
-                        "SETTINGS_SETUP_STATE_UNCERTAIN"
-                    ) from None
-                raise SettingsServiceError("SETTINGS_AUTH_FAILED") from None
+                    rollback_failed = True
+                if not isinstance(failure, Exception):
+                    # Preserve process-control exceptions even when the best-effort
+                    # CAS rollback encounters a conflict or another interruption.
+                    raise
+            if rollback_failed:
+                raise SettingsServiceError("SETTINGS_SETUP_STATE_UNCERTAIN")
+            raise SettingsServiceError("SETTINGS_AUTH_FAILED")
 
     def login(self, client: str, password: str) -> Session | None:
         persisted = self._load_settings()
@@ -273,13 +336,14 @@ class SettingsService:
     def get_config(self) -> SettingsPresentation:
         return self._resolve(self._load_settings()).presentation
 
-    def get_draft(self) -> SettingsDraft:
+    def get_draft(self) -> VersionedSettingsDraft:
         return self._draft_from_persisted(self._load_settings())
 
     def get_voices(self) -> list[VoiceSummary]:
         catalog = self._load_voice_catalog()
+        summaries: list[VoiceSummary] | None = None
         try:
-            return [
+            summaries = [
                 VoiceSummary(
                     id=voice["id"],
                     name=voice["name"],
@@ -288,33 +352,39 @@ class SettingsService:
                 for voice in catalog.voices
             ]
         except Exception:
-            raise SettingsServiceError("VOICE_CATALOG_INVALID") from None
+            summaries = None
+        if summaries is None:
+            raise SettingsServiceError("VOICE_CATALOG_INVALID")
+        return summaries
 
-    def save(self, draft: SettingsDraft) -> SaveResult:
+    def save(self, draft: VersionedSettingsDraft) -> SaveResult:
         """Validate and atomically persist a complete browser draft."""
 
         with _LIFECYCLE_LOCK:
             current = self._load_settings()
-            resolved = self._resolve(current)
-            self._reject_environment_mutations(draft, current, resolved.presentation)
-            if not resolved.presentation.keychain_available:
-                raise SettingsServiceError("KEYCHAIN_UNAVAILABLE")
+            if (
+                not isinstance(draft, VersionedSettingsDraft)
+                or not self._valid_revision(draft.revision)
+                or not hmac.compare_digest(draft.revision, self._revision(current))
+            ):
+                raise SettingsServiceError("SETTINGS_CONFLICT")
+            self._reject_environment_mutations(draft, current)
 
             catalog = self._load_voice_catalog()
             validation = SettingsValidationService(catalog)
             validated = validation.validate(
                 draft,
-                {
-                    "llm.apiKey": resolved.runtime.llm.api_key,
-                    "qq.accessToken": resolved.runtime.qq.access_token,
-                },
+                self._existing_secrets_for_validation(draft, current),
             )
             proposed = self._proposed_settings(current, validated.draft)
             replacements = self._replacement_values(draft, validated)
+            transaction_failed = False
             try:
                 self._transaction.save(current, proposed, replacements)
             except SettingsTransactionError:
-                raise SettingsServiceError("SETTINGS_SAVE_FAILED") from None
+                transaction_failed = True
+            if transaction_failed:
+                raise SettingsServiceError("SETTINGS_SAVE_FAILED")
             return SaveResult(restart_required=True)
 
     async def test_llm(
@@ -345,31 +415,53 @@ class SettingsService:
         ).test_tts(request, transport)
 
     def _load_settings(self) -> PersistedSettings:
+        load_failed = False
         try:
             return self._file_store.load()
         except SettingsFileError:
-            raise SettingsServiceError("SETTINGS_FILE_INVALID") from None
+            load_failed = True
+        if load_failed:
+            raise SettingsServiceError("SETTINGS_FILE_INVALID")
+        raise AssertionError("unreachable")
 
     def _resolve(self, persisted: PersistedSettings) -> ResolvedSettings:
+        return self._resolve_with(self._resolver, persisted)
+
+    def _resolve_with(
+        self,
+        resolver: SettingsResolver,
+        persisted: PersistedSettings,
+    ) -> ResolvedSettings:
+        resolution_failed = False
         try:
-            return self._resolver.resolve(persisted, self._environ)
+            return resolver.resolve(persisted, self._environ)
         except SettingsServiceError:
             raise
         except Exception:
-            raise SettingsServiceError("SETTINGS_FILE_INVALID") from None
+            resolution_failed = True
+        if resolution_failed:
+            raise SettingsServiceError("SETTINGS_FILE_INVALID")
+        raise AssertionError("unreachable")
 
     def _load_voice_catalog(self) -> VoiceCatalog:
+        catalog: VoiceCatalog | None = None
         try:
             catalog = self._voice_catalog_loader()
             if not isinstance(catalog, VoiceCatalog):
                 raise TypeError
-            return catalog
         except Exception:
-            raise SettingsServiceError("VOICE_CATALOG_INVALID") from None
+            catalog = None
+        if catalog is None:
+            raise SettingsServiceError("VOICE_CATALOG_INVALID")
+        return catalog
 
-    @staticmethod
-    def _draft_from_persisted(persisted: PersistedSettings) -> SettingsDraft:
-        return SettingsDraft(
+    @classmethod
+    def _draft_from_persisted(
+        cls,
+        persisted: PersistedSettings,
+    ) -> VersionedSettingsDraft:
+        return VersionedSettingsDraft(
+            revision=cls._revision(persisted),
             llm=LLMSettingsDraft(
                 enabled=persisted.llm.enabled,
                 base_url=persisted.llm.base_url,
@@ -395,26 +487,105 @@ class SettingsService:
             ),
         )
 
-    @staticmethod
     def _reject_environment_mutations(
+        self,
         draft: SettingsDraft,
         current: PersistedSettings,
-        presentation: SettingsPresentation,
     ) -> None:
+        environment = os.environ if self._environ is None else self._environ
         errors: dict[str, str] = {}
         for path, (section, attribute) in _ENVIRONMENT_FIELD_PATHS.items():
-            field = presentation.fields[path]
-            if field.read_only and getattr(getattr(draft, section), attribute) != getattr(
+            if _ENVIRONMENT_VARIABLES_BY_PATH[path] in environment and getattr(
+                getattr(draft, section), attribute
+            ) != getattr(
                 getattr(current, section), attribute
             ):
                 errors[path] = "环境变量接管的配置不可修改"
         for path, (section, attribute) in _SECRET_DRAFT_PATHS.items():
-            field = presentation.fields[path]
             mutation = getattr(getattr(draft, section), attribute)
-            if field.read_only and mutation.operation is not SecretOperation.RETAIN:
+            if (
+                _ENVIRONMENT_VARIABLES_BY_PATH[path] in environment
+                and mutation.operation is not SecretOperation.RETAIN
+            ):
                 errors[path] = "环境变量接管的配置不可修改"
         if errors:
             raise SettingsValidationError(errors) from None
+
+    @staticmethod
+    def _revision(persisted: PersistedSettings) -> str:
+        payload = persisted.model_dump_json(by_alias=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _valid_revision(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    def _existing_secrets_for_validation(
+        self,
+        draft: SettingsDraft,
+        current: PersistedSettings,
+    ) -> dict[str, object]:
+        environment = os.environ if self._environ is None else self._environ
+        results: dict[str, object] = {}
+        slots = (
+            (
+                "llm.apiKey",
+                draft.llm.api_key,
+                draft.llm.enabled,
+                current.llm.api_key_ref,
+            ),
+            (
+                "qq.accessToken",
+                draft.qq.access_token,
+                draft.qq.enabled,
+                current.qq.access_token_ref,
+            ),
+        )
+        for path, mutation, enabled, reference in slots:
+            environment_variable = _ENVIRONMENT_VARIABLES_BY_PATH[path]
+            if environment_variable in environment:
+                results[path] = environment[environment_variable]
+                continue
+            if mutation.operation is not SecretOperation.RETAIN:
+                if not self._secret_store_available():
+                    raise SettingsServiceError("KEYCHAIN_UNAVAILABLE")
+                results[path] = None
+                continue
+            if not enabled:
+                results[path] = reference is not None
+                continue
+            if reference is None:
+                results[path] = None
+                continue
+            secret = self._read_secret(reference)
+            results[path] = secret
+        return results
+
+    def _secret_store_available(self) -> bool:
+        try:
+            return bool(self._secret_store.available())
+        except Exception:
+            return False
+
+    def _read_secret(self, reference: str) -> str:
+        secret: str | None = None
+        failed = False
+        try:
+            if not self._secret_store.available():
+                failed = True
+            else:
+                secret = self._secret_store.get(reference)
+                if secret is None:
+                    failed = True
+        except Exception:
+            failed = True
+        if failed or secret is None:
+            raise SettingsServiceError("KEYCHAIN_UNAVAILABLE")
+        return secret
 
     @staticmethod
     def _proposed_settings(current, validated) -> PersistedSettings:
@@ -480,6 +651,7 @@ __all__ = [
     "SessionStatus",
     "SettingsService",
     "SettingsServiceError",
+    "VersionedSettingsDraft",
     "VoiceSummary",
     "create_settings_service",
 ]

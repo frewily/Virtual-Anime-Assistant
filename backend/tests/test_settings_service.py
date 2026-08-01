@@ -11,8 +11,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.config_loader import VoiceCatalog
-from settings.auth import Session
-from settings.auth import PasswordPolicyError
+from settings.auth import AuthError, PasswordPolicyError, Session, SettingsAuthService
 from settings.file_store import SettingsFileError, SettingsFileStore
 from settings.models import SecretMutation
 from settings.paths import SettingsPaths
@@ -124,6 +123,76 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertFalse(service.session_status("unknown").authenticated)
         self.file_store.save = original_save
         self.assertIsNone(self.file_store.load().auth)
+
+    def test_setup_session_failure_rolls_back_persisted_auth(self) -> None:
+        auth = SettingsAuthService()
+        for _ in range(1024):
+            auth.create_session()
+        sessions_before = len(auth._sessions)
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=self.secret_store,
+            auth_service=auth,
+            voice_catalog_loader=catalog,
+            environ={},
+        )
+        original = self.file_store.load()
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            service.setup("long-enough-password")
+
+        self.assertEqual(raised.exception.code, "SETTINGS_AUTH_FAILED")
+        self.assertEqual(self.file_store.load(), original)
+        self.assertEqual(len(auth._sessions), sessions_before)
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_setup_rollback_never_overwrites_a_third_party_update(self) -> None:
+        real_auth = SettingsAuthService()
+        third_party_transaction = SettingsTransactionCoordinator(
+            self.file_store, self.secret_store
+        )
+
+        class ConcurrentUpdateThenFailAuth:
+            def hash_password(inner_self, password: str):
+                return real_auth.hash_password(password)
+
+            def create_session(inner_self):
+                committed = self.file_store.load()
+                changed_llm = committed.llm.model_copy(
+                    update={"model": "third-party-model"}
+                )
+                third_party = committed.model_copy(update={"llm": changed_llm})
+                third_party_transaction.save(committed, third_party, {})
+                raise AuthError("private session failure")
+
+            def get_session(inner_self, token):
+                return None
+
+            def revoke(inner_self, token):
+                return None
+
+            def login(inner_self, client, password, record):
+                return None
+
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=self.secret_store,
+            auth_service=ConcurrentUpdateThenFailAuth(),
+            voice_catalog_loader=catalog,
+            environ={},
+        )
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            service.setup("long-enough-password")
+
+        self.assertEqual(raised.exception.code, "SETTINGS_SETUP_STATE_UNCERTAIN")
+        stored = self.file_store.load()
+        self.assertIsNotNone(stored.auth)
+        self.assertEqual(stored.llm.model, "third-party-model")
+        self.assertNotIn("private", repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
 
     def test_concurrent_setup_has_single_winner(self) -> None:
         other = SettingsService(

@@ -99,6 +99,7 @@ _SERVICE_MESSAGES = {
     "SETTINGS_FILE_INVALID": "设置文件无效，请修复或移走后重试",
     "SETTINGS_RECOVERY_FAILED": "设置恢复失败",
     "SETTINGS_SAVE_FAILED": "设置保存失败",
+    "SETTINGS_SETUP_STATE_UNCERTAIN": "设置初始化状态需要恢复",
     "VOICE_CATALOG_INVALID": "音色目录无效",
 }
 
@@ -227,16 +228,29 @@ class SettingsService:
                 raise SettingsServiceError("SETTINGS_ALREADY_INITIALIZED")
             try:
                 auth_record = self._auth.hash_password(password)
-                proposed = current.model_copy(update={"auth": auth_record})
-                self._transaction.save(current, proposed, {})
-                return self._auth.create_session()
             except (PasswordPolicyError, AuthError):
                 raise
-            except SettingsServiceError:
-                raise
+            except Exception:
+                raise SettingsServiceError("SETTINGS_AUTH_FAILED") from None
+
+            proposed = current.model_copy(update={"auth": auth_record})
+            try:
+                self._transaction.save(current, proposed, {})
             except SettingsTransactionError:
                 raise SettingsServiceError("SETTINGS_SAVE_FAILED") from None
+
+            try:
+                # SettingsAuthService.create_session mutates its registry only after
+                # every fallible token-generation step has completed, so an error
+                # cannot leave a newly inserted session that lacks a returned token.
+                return self._auth.create_session()
             except Exception:
+                try:
+                    self._transaction.save(proposed, current, {})
+                except SettingsTransactionError:
+                    raise SettingsServiceError(
+                        "SETTINGS_SETUP_STATE_UNCERTAIN"
+                    ) from None
                 raise SettingsServiceError("SETTINGS_AUTH_FAILED") from None
 
     def login(self, client: str, password: str) -> Session | None:

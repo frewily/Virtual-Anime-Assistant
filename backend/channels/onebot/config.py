@@ -3,6 +3,7 @@
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 from channels.onebot.models import QQ_MISCONFIGURED
 
@@ -33,46 +34,66 @@ class OneBotSettings:
         environ: Mapping[str, str] | None = None,
     ) -> "OneBotSettings":
         values = os.environ if environ is None else environ
-        raw_enabled = values.get("ASSISTANT_QQ_ENABLED")
         try:
-            enabled = _parse_bool(raw_enabled, default=False)
+            enabled = cast(
+                bool,
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_ENABLED",
+                    values.get("ASSISTANT_QQ_ENABLED"),
+                ),
+            )
         except ValueError:
             return cls(enabled=True, configuration_error=QQ_MISCONFIGURED)
 
         try:
-            access_token = values.get(
-                "ASSISTANT_QQ_ACCESS_TOKEN",
-                "",
-            ).strip()
-            allowed_group_ids = _parse_ids(
-                values.get("ASSISTANT_QQ_ALLOWED_GROUP_IDS", "")
+            access_token = cast(
+                str,
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_ACCESS_TOKEN",
+                    values.get("ASSISTANT_QQ_ACCESS_TOKEN"),
+                ),
             )
-            allowed_user_ids = _parse_ids(
-                values.get("ASSISTANT_QQ_ALLOWED_USER_IDS", "")
+            allowed_group_ids = cast(
+                frozenset[int],
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_ALLOWED_GROUP_IDS",
+                    values.get("ASSISTANT_QQ_ALLOWED_GROUP_IDS"),
+                ),
             )
-            rate_per_minute = _bounded_int(
-                values.get("ASSISTANT_QQ_RATE_PER_MINUTE"),
-                default=10,
-                minimum=1,
-                maximum=120,
+            allowed_user_ids = cast(
+                frozenset[int],
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_ALLOWED_USER_IDS",
+                    values.get("ASSISTANT_QQ_ALLOWED_USER_IDS"),
+                ),
             )
-            rate_burst = _bounded_int(
-                values.get("ASSISTANT_QQ_RATE_BURST"),
-                default=2,
-                minimum=1,
-                maximum=20,
+            rate_per_minute = cast(
+                int,
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_RATE_PER_MINUTE",
+                    values.get("ASSISTANT_QQ_RATE_PER_MINUTE"),
+                ),
             )
-            max_concurrency = _bounded_int(
-                values.get("ASSISTANT_QQ_MAX_CONCURRENCY"),
-                default=4,
-                minimum=1,
-                maximum=32,
+            rate_burst = cast(
+                int,
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_RATE_BURST",
+                    values.get("ASSISTANT_QQ_RATE_BURST"),
+                ),
             )
-            action_timeout_seconds = _bounded_int(
-                values.get("ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS"),
-                default=10,
-                minimum=1,
-                maximum=60,
+            max_concurrency = cast(
+                int,
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_MAX_CONCURRENCY",
+                    values.get("ASSISTANT_QQ_MAX_CONCURRENCY"),
+                ),
+            )
+            action_timeout_seconds = cast(
+                int,
+                parse_onebot_environment_field(
+                    "ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS",
+                    values.get("ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS"),
+                ),
             )
             if rate_burst > rate_per_minute:
                 raise ValueError("rate burst exceeds per-minute rate")
@@ -100,6 +121,40 @@ class OneBotSettings:
             max_concurrency=max_concurrency,
             action_timeout_seconds=action_timeout_seconds,
         )
+
+
+def parse_onebot_environment_field(
+    name: str,
+    raw_value: str | None,
+) -> bool | str | frozenset[int] | int:
+    """Parse one environment field with the same rules used by OneBot runtime."""
+
+    if name == "ASSISTANT_QQ_ENABLED":
+        return _parse_bool(raw_value, default=False)
+    if name == "ASSISTANT_QQ_ACCESS_TOKEN":
+        return (raw_value or "").strip()
+    if name in {
+        "ASSISTANT_QQ_ALLOWED_GROUP_IDS",
+        "ASSISTANT_QQ_ALLOWED_USER_IDS",
+    }:
+        return _parse_ids(raw_value or "")
+
+    integer_fields = {
+        "ASSISTANT_QQ_RATE_PER_MINUTE": (10, 1, 120),
+        "ASSISTANT_QQ_RATE_BURST": (2, 1, 20),
+        "ASSISTANT_QQ_MAX_CONCURRENCY": (4, 1, 32),
+        "ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS": (10, 1, 60),
+    }
+    try:
+        default, minimum, maximum = integer_fields[name]
+    except KeyError:
+        raise ValueError("unknown OneBot environment field") from None
+    return _bounded_int(
+        raw_value,
+        default=default,
+        minimum=minimum,
+        maximum=maximum,
+    )
 
 
 def _parse_bool(raw_value: str | None, *, default: bool) -> bool:

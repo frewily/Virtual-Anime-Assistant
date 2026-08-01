@@ -6,10 +6,13 @@ from enum import Enum
 import os
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 from pydantic.alias_generators import to_camel
 
-from channels.onebot.config import OneBotSettings
+from channels.onebot.config import (
+    OneBotSettings,
+    parse_onebot_environment_field,
+)
 from llm.config import LLMSettings
 from settings.models import PersistedSettings
 from settings.secrets import SecretStore
@@ -36,30 +39,83 @@ class RuntimeSettings:
     tts: TTSRuntimeSettings
 
 
-class FieldPresentation(BaseModel):
+class _PresentationModel(BaseModel):
     model_config = ConfigDict(
         alias_generator=to_camel,
+        extra="forbid",
+        hide_input_in_errors=True,
         populate_by_name=True,
         serialize_by_alias=True,
+        strict=True,
     )
 
-    value: Any | None
+
+class _FieldPresentation(_PresentationModel):
     source: FieldSource
     read_only: bool = False
     environment_variable: str | None = None
-    configured: bool | None = None
+
+
+class ValueFieldPresentation(_FieldPresentation):
+    value: None | bool | int | str | list[int]
+    configured: None = None
     missing: bool = False
 
 
-class SettingsPresentation(BaseModel):
-    model_config = ConfigDict(
-        alias_generator=to_camel,
-        populate_by_name=True,
-        serialize_by_alias=True,
-    )
+class SecretFieldPresentation(_FieldPresentation):
+    value: None = None
+    configured: bool
+    missing: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secret_value(cls, data: object) -> object:
+        if isinstance(data, Mapping) and data.get("value") is not None:
+            raise _redacted_validation_error(
+                cls.__name__,
+                ("value",),
+                "secret presentation values must be null",
+            )
+        return data
+
+
+FieldPresentation = ValueFieldPresentation | SecretFieldPresentation
+_SECRET_FIELD_PATHS = frozenset({"llm.apiKey", "qq.accessToken"})
+
+
+class SettingsPresentation(_PresentationModel):
     fields: dict[str, FieldPresentation]
     keychain_available: bool
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_value_models_for_secret_paths(cls, data: object) -> object:
+        if not isinstance(data, Mapping):
+            return data
+        fields = data.get("fields")
+        if not isinstance(fields, Mapping):
+            return data
+        for path in _SECRET_FIELD_PATHS:
+            field = fields.get(path)
+            if isinstance(field, ValueFieldPresentation) or (
+                isinstance(field, Mapping) and field.get("value") is not None
+            ):
+                raise _redacted_validation_error(
+                    cls.__name__,
+                    ("fields", path, "value"),
+                    "secret paths require secret field presentation",
+                )
+        return data
+
+    @model_validator(mode="after")
+    def validate_field_kinds(self) -> "SettingsPresentation":
+        for path, field in self.fields.items():
+            if path in _SECRET_FIELD_PATHS:
+                if not isinstance(field, SecretFieldPresentation):
+                    raise ValueError("secret paths require secret field presentation")
+            elif not isinstance(field, ValueFieldPresentation):
+                raise ValueError("value paths require value field presentation")
+        return self
 
 
 @dataclass(frozen=True)
@@ -132,6 +188,7 @@ class SettingsResolver:
                 runtime,
                 environment,
                 secrets,
+                qq_environment,
             ),
             keychain_available=keychain_available,
         )
@@ -236,12 +293,7 @@ class SettingsResolver:
         return TTSRuntimeSettings(
             gpt_sovits_url=_nonempty_text(url_name, url, trim_trailing_slashes=True),
             default_voice_id=_nonempty_text(voice_name, voice),
-            audio_max_age_seconds=_bounded_int(
-                age_name,
-                age,
-                minimum=1,
-                maximum=2_592_000,
-            ),
+            audio_max_age_seconds=_parse_int(age_name, age),
         )
 
     @classmethod
@@ -251,6 +303,7 @@ class SettingsResolver:
         runtime: RuntimeSettings,
         environment: Mapping[str, str],
         secrets: Mapping[str, str | None],
+        qq_environment: Mapping[str, str],
     ) -> dict[str, FieldPresentation]:
         fields: dict[str, FieldPresentation] = {}
         cls._add_nonsecret_fields(
@@ -288,15 +341,7 @@ class SettingsResolver:
                 "max_concurrency": "qq.maxConcurrency",
                 "action_timeout_seconds": "qq.actionTimeoutSeconds",
             },
-            {
-                "enabled": runtime.qq.enabled,
-                "allowed_group_ids": sorted(runtime.qq.allowed_group_ids),
-                "allowed_user_ids": sorted(runtime.qq.allowed_user_ids),
-                "rate_per_minute": runtime.qq.rate_per_minute,
-                "rate_burst": runtime.qq.rate_burst,
-                "max_concurrency": runtime.qq.max_concurrency,
-                "action_timeout_seconds": runtime.qq.action_timeout_seconds,
-            },
+            cls._qq_presentation_values(qq_environment),
             persisted.qq.model_fields_set,
             _QQ_ENVIRONMENT_VARIABLES,
             environment,
@@ -336,6 +381,24 @@ class SettingsResolver:
         return fields
 
     @staticmethod
+    def _qq_presentation_values(
+        qq_environment: Mapping[str, str],
+    ) -> dict[str, None | bool | int | str | list[int]]:
+        values: dict[str, None | bool | int | str | list[int]] = {}
+        for model_field, variable in _QQ_ENVIRONMENT_VARIABLES.items():
+            if model_field == "access_token":
+                continue
+            raw_value = qq_environment.get(variable)
+            try:
+                value = parse_onebot_environment_field(variable, raw_value)
+            except (AttributeError, TypeError, ValueError):
+                value = raw_value
+            if isinstance(value, frozenset):
+                value = sorted(value)
+            values[model_field] = value
+        return values
+
+    @staticmethod
     def _add_nonsecret_fields(
         fields: dict[str, FieldPresentation],
         paths: Mapping[str, str],
@@ -354,7 +417,7 @@ class SettingsResolver:
                 if model_field in persisted_fields
                 else FieldSource.DEFAULT
             )
-            fields[path] = FieldPresentation(
+            fields[path] = ValueFieldPresentation(
                 value=values[model_field],
                 source=source,
                 read_only=environment_override,
@@ -384,7 +447,7 @@ class SettingsResolver:
             configured = False
             source = FieldSource.DEFAULT
             missing = False
-        fields[path] = FieldPresentation(
+        fields[path] = SecretFieldPresentation(
             value=None,
             source=source,
             read_only=environment_override,
@@ -396,6 +459,24 @@ class SettingsResolver:
 
 def _format_bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _redacted_validation_error(
+    model_name: str,
+    location: tuple[str, ...],
+    message: str,
+) -> ValidationError:
+    return ValidationError.from_exception_data(
+        model_name,
+        [
+            {
+                "type": "value_error",
+                "loc": location,
+                "input": None,
+                "ctx": {"error": ValueError(message)},
+            }
+        ],
+    )
 
 
 def _format_ids(identifiers: list[int]) -> str:
@@ -419,17 +500,11 @@ def _nonempty_text(
     return value
 
 
-def _bounded_int(
+def _parse_int(
     name: str,
     raw_value: str,
-    *,
-    minimum: int,
-    maximum: int,
 ) -> int:
     try:
-        value = int(raw_value.strip())
+        return int(raw_value.strip())
     except (AttributeError, TypeError, ValueError):
         raise ValueError(name) from None
-    if not minimum <= value <= maximum:
-        raise ValueError(name)
-    return value

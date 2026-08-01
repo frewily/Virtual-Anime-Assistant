@@ -16,13 +16,14 @@ from settings.secrets import (
     SecretStoreUnavailable,
 )
 from settings.resolver import (
-    FieldPresentation,
     FieldSource,
     ResolvedSettings,
     RuntimeSettings,
+    SecretFieldPresentation,
     SettingsPresentation,
     SettingsResolver,
     TTSRuntimeSettings,
+    ValueFieldPresentation,
 )
 from settings.transactions import (
     SettingsTransactionCoordinator,
@@ -31,13 +32,13 @@ from settings.transactions import (
 
 __all__ = [
     "AuthRecord",
-    "FieldPresentation",
     "FieldSource",
     "LLMSettings",
     "PersistedSettings",
     "QQSettings",
     "ResolvedSettings",
     "RuntimeSettings",
+    "SecretFieldPresentation",
     "SecretMutation",
     "SecretOperation",
     "SecretStore",
@@ -50,4 +51,5 @@ __all__ = [
     "SettingsTransactionError",
     "TTSSettings",
     "TTSRuntimeSettings",
+    "ValueFieldPresentation",
 ]

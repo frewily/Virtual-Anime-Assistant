@@ -4,6 +4,8 @@ import sys
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -14,7 +16,13 @@ from settings.models import (
     QQSettings,
     TTSSettings,
 )
-from settings.resolver import FieldSource, SettingsResolver
+from settings.resolver import (
+    FieldSource,
+    SecretFieldPresentation,
+    SettingsPresentation,
+    SettingsResolver,
+    ValueFieldPresentation,
+)
 
 
 class MemorySecretStore:
@@ -286,6 +294,49 @@ class SettingsResolverTests(unittest.TestCase):
             self.assertFalse(field.configured)
             self.assertFalse(field.missing)
 
+    def test_invalid_qq_field_does_not_replace_other_presentation_values(self) -> None:
+        persisted = PersistedSettings(
+            qq=QQSettings(
+                allowed_group_ids=[123],
+                rate_burst=7,
+            )
+        )
+
+        resolved = SettingsResolver(MemorySecretStore()).resolve(
+            persisted,
+            {"ASSISTANT_QQ_RATE_PER_MINUTE": "not-an-int"},
+        )
+
+        self.assertEqual(resolved.runtime.qq.configuration_error, QQ_MISCONFIGURED)
+        allowed_groups = resolved.presentation.fields["qq.allowedGroupIds"]
+        self.assertEqual(allowed_groups.value, [123])
+        self.assertEqual(allowed_groups.source, FieldSource.PERSISTED)
+        rate_burst = resolved.presentation.fields["qq.rateBurst"]
+        self.assertEqual(rate_burst.value, 7)
+        self.assertEqual(rate_burst.source, FieldSource.PERSISTED)
+        invalid_rate = resolved.presentation.fields["qq.ratePerMinute"]
+        self.assertEqual(invalid_rate.value, "not-an-int")
+        self.assertEqual(invalid_rate.source, FieldSource.ENVIRONMENT)
+        self.assertTrue(invalid_rate.read_only)
+
+    def test_qq_presentation_parses_valid_fields_during_runtime_fallback(self) -> None:
+        resolved = SettingsResolver(MemorySecretStore()).resolve(
+            PersistedSettings(),
+            {
+                "ASSISTANT_QQ_ENABLED": "yes",
+                "ASSISTANT_QQ_ALLOWED_GROUP_IDS": "3,1,3",
+                "ASSISTANT_QQ_RATE_PER_MINUTE": "not-an-int",
+            },
+        )
+
+        self.assertEqual(resolved.runtime.qq.configuration_error, QQ_MISCONFIGURED)
+        enabled = resolved.presentation.fields["qq.enabled"]
+        self.assertIs(enabled.value, True)
+        self.assertEqual(enabled.source, FieldSource.ENVIRONMENT)
+        allowed_groups = resolved.presentation.fields["qq.allowedGroupIds"]
+        self.assertEqual(allowed_groups.value, [1, 3])
+        self.assertEqual(allowed_groups.source, FieldSource.ENVIRONMENT)
+
     def test_missing_references_and_unavailable_keychain_are_reported(self) -> None:
         persisted = PersistedSettings(
             llm=PersistedLLMSettings(api_key_ref="llm-api-key:missing"),
@@ -318,6 +369,12 @@ class SettingsResolverTests(unittest.TestCase):
         faulting_store = MemorySecretStore(fail_get=True)
         faulting = SettingsResolver(faulting_store).resolve(persisted, {})
         self.assertFalse(faulting.presentation.keychain_available)
+        self.assertIsNone(faulting.runtime.llm.api_key)
+        self.assertEqual(faulting.runtime.qq.access_token, "")
+        for name in ("llm.apiKey", "qq.accessToken"):
+            field = faulting.presentation.fields[name]
+            self.assertFalse(field.configured)
+            self.assertTrue(field.missing)
         rendered = repr(faulting) + faulting.presentation.model_dump_json()
         self.assertNotIn("private-keychain-error", rendered)
         self.assertNotIn("llm-api-key:missing", rendered)
@@ -343,8 +400,6 @@ class SettingsResolverTests(unittest.TestCase):
             ("ASSISTANT_GPT_SOVITS_URL", "   "),
             ("ASSISTANT_TTS_DEFAULT_VOICE_ID", "   "),
             ("ASSISTANT_AUDIO_MAX_AGE_SECONDS", private_input),
-            ("ASSISTANT_AUDIO_MAX_AGE_SECONDS", "0"),
-            ("ASSISTANT_AUDIO_MAX_AGE_SECONDS", "2592001"),
         )
         for variable, value in tts_cases:
             with self.subTest(variable=variable, value=value):
@@ -365,6 +420,102 @@ class SettingsResolverTests(unittest.TestCase):
         )
         self.assertEqual(qq.runtime.qq.configuration_error, QQ_MISCONFIGURED)
         self.assertNotIn(private_input, repr(qq.runtime.qq))
+
+    def test_audio_max_age_accepts_any_integer_without_an_artificial_cap(self) -> None:
+        for value in (-1, 0, 2_592_001):
+            with self.subTest(value=value):
+                resolved = SettingsResolver(MemorySecretStore()).resolve(
+                    PersistedSettings(),
+                    {"ASSISTANT_AUDIO_MAX_AGE_SECONDS": str(value)},
+                )
+
+                self.assertEqual(resolved.runtime.tts.audio_max_age_seconds, value)
+
+    def test_secret_presentation_rejects_values_without_leaking_them(self) -> None:
+        secret = "probe-secret"
+
+        with self.assertRaises(ValidationError) as raised:
+            SecretFieldPresentation(
+                value=secret,
+                source=FieldSource.ENVIRONMENT,
+                read_only=True,
+                environment_variable="ASSISTANT_LLM_API_KEY",
+                configured=True,
+            )
+
+        error = raised.exception
+        for rendered in (
+            str(error),
+            repr(error),
+            str(error.errors()),
+            error.json(),
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_entire_presentation_rejects_secret_path_as_value_field(self) -> None:
+        secret = "probe-secret"
+        unsafe_field = ValueFieldPresentation(
+            value=secret,
+            source=FieldSource.ENVIRONMENT,
+            read_only=True,
+            environment_variable="ASSISTANT_LLM_API_KEY",
+        )
+
+        with self.assertRaises(ValidationError) as raised:
+            SettingsPresentation(
+                fields={"llm.apiKey": unsafe_field},
+                keychain_available=True,
+            )
+
+        error = raised.exception
+        for rendered in (
+            str(error),
+            repr(error),
+            str(error.errors()),
+            error.json(),
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_value_presentation_is_strict_json_safe_and_forbids_extra(self) -> None:
+        boolean = ValueFieldPresentation(
+            value=True,
+            source=FieldSource.DEFAULT,
+            read_only=True,
+            environment_variable="ASSISTANT_QQ_ENABLED",
+        )
+        self.assertIs(boolean.value, True)
+        self.assertEqual(
+            set(boolean.model_dump()),
+            {
+                "value",
+                "source",
+                "readOnly",
+                "environmentVariable",
+                "configured",
+                "missing",
+            },
+        )
+        self.assertEqual(
+            ValueFieldPresentation(value=1, source=FieldSource.DEFAULT).value,
+            1,
+        )
+        self.assertEqual(
+            ValueFieldPresentation(
+                value=[2, 1], source=FieldSource.DEFAULT
+            ).value,
+            [2, 1],
+        )
+        with self.assertRaises(ValidationError):
+            ValueFieldPresentation(
+                value=["1"],
+                source=FieldSource.DEFAULT,
+            )
+        with self.assertRaises(ValidationError):
+            ValueFieldPresentation(
+                value=1,
+                source=FieldSource.DEFAULT,
+                unexpected=True,
+            )
 
     def test_loaded_full_document_marks_serialized_defaults_as_persisted(self) -> None:
         loaded = PersistedSettings.model_validate_json(

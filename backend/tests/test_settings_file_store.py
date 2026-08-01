@@ -131,11 +131,16 @@ class SettingsFileStoreTests(unittest.TestCase):
                 transaction_id="save-123",
                 old_refs=["keyring:old"],
                 new_refs=["keyring:new"],
+                target_refs=["keyring:new"],
             )
 
             store.write_journal(journal)
 
             self.assertEqual(store.read_journal(), journal)
+            raw_journal = json.loads(
+                store.paths.journal_file.read_text(encoding="utf-8")
+            )
+            self.assertEqual(raw_journal["targetRefs"], ["keyring:new"])
             store.delete_journal()
             self.assertIsNone(store.read_journal())
             store.delete_journal()
@@ -143,8 +148,9 @@ class SettingsFileStoreTests(unittest.TestCase):
     def test_invalid_journals_raise_settings_file_error(self) -> None:
         invalid_payloads = (
             b"{not json",
-            b'{"schemaVersion":99,"transactionId":"save-123","oldRefs":[],"newRefs":[]}',
-            b'{"schemaVersion":1,"transactionId":"save-123","oldRefs":[],"newRefs":[],"extra":true}',
+            b'{"schemaVersion":99,"transactionId":"save-123","oldRefs":[],"newRefs":[],"targetRefs":[]}',
+            b'{"schemaVersion":1,"transactionId":"save-123","oldRefs":[],"newRefs":[]}',
+            b'{"schemaVersion":1,"transactionId":"save-123","oldRefs":[],"newRefs":[],"targetRefs":[],"extra":true}',
         )
 
         for payload in invalid_payloads:
@@ -161,7 +167,8 @@ class SettingsFileStoreTests(unittest.TestCase):
         secret = "private-sentinel"
         payload = (
             b'{"schemaVersion":1,"transactionId":"save-123",'
-            b'"oldRefs":[],"newRefs":[],"unexpected":"private-sentinel"}'
+            b'"oldRefs":[],"newRefs":[],"targetRefs":[],'
+            b'"unexpected":"private-sentinel"}'
         )
 
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -214,7 +221,12 @@ class SettingsFileStoreTests(unittest.TestCase):
 
             store.save(PersistedSettings())
             store.write_journal(
-                SaveJournal(transaction_id="save-123", old_refs=[], new_refs=[])
+                SaveJournal(
+                    transaction_id="save-123",
+                    old_refs=[],
+                    new_refs=[],
+                    target_refs=[],
+                )
             )
 
             self.assertEqual(

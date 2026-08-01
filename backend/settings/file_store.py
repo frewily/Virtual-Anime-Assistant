@@ -22,6 +22,7 @@ class SaveJournal(PersistedModel):
     transaction_id: str
     old_refs: list[str]
     new_refs: list[str]
+    target_refs: list[str]
 
 
 class SettingsFileStore:

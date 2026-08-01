@@ -348,6 +348,28 @@ class SettingsService:
     def logout(self, token: str | None) -> None:
         self._auth.revoke(token)
 
+    def authorize(
+        self,
+        token: str | None,
+        csrf_token: str | None = None,
+        *,
+        require_csrf: bool = False,
+    ) -> tuple[bool, bool]:
+        """Validate a live session and, when requested, its CSRF token."""
+
+        try:
+            session = self._auth.get_session(token)
+        except Exception:
+            return False, False
+        if session is None:
+            return False, False
+        if not require_csrf:
+            return True, True
+        try:
+            return True, self._auth.validate_csrf(session, csrf_token)
+        except Exception:
+            return True, False
+
     def get_config(self) -> SettingsPresentation:
         return self._resolve(self._load_settings()).presentation
 

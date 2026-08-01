@@ -1,10 +1,14 @@
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from api.avatar import router as avatar_router
 from api.chat import router as chat_router
@@ -26,7 +30,16 @@ from agent.monitor import run as run_window_monitor
 from core.runtime import AssistantRuntime
 from core.tts import AUDIO_DIR
 from domain.tools import ToolEvent
+from settings.auth import LoginRateLimited, PasswordPolicyError
 from settings.resolver import RuntimeSettings
+from settings.routes import SettingsHttpError, router as settings_router
+from settings.security import SettingsSecurityMiddleware
+from settings.service import (
+    SettingsService,
+    SettingsServiceError,
+    create_settings_service,
+)
+from settings.validation import SettingsValidationError
 
 
 logger = logging.getLogger(__name__)
@@ -128,10 +141,84 @@ async def lifespan(app: FastAPI):
 def create_app(
     runtime_instance: AssistantRuntime | None = None,
     runtime_settings_factory: Callable[[], RuntimeSettings] | None = None,
+    settings_service: SettingsService | None = None,
+    settings_service_factory: Callable[
+        [], SettingsService
+    ] = create_settings_service,
 ) -> FastAPI:
     app = FastAPI(title="Desktop Assistant API", version="1.0.0", lifespan=lifespan)
     app.state.runtime = runtime_instance
     app.state.runtime_settings_factory = runtime_settings_factory
+    app.state.settings_service = settings_service
+    app.state.settings_service_factory = settings_service_factory
+    app.state.settings_service_lock = threading.Lock()
+
+    @app.exception_handler(SettingsHttpError)
+    async def handle_settings_http_error(request: Request, exc: SettingsHttpError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    @app.exception_handler(SettingsValidationError)
+    async def handle_settings_validation_error(
+        request: Request, exc: SettingsValidationError
+    ):
+        return JSONResponse(status_code=422, content=exc.to_dict())
+
+    @app.exception_handler(SettingsServiceError)
+    async def handle_settings_service_error(
+        request: Request, exc: SettingsServiceError
+    ):
+        status = 409 if exc.code == "SETTINGS_CONFLICT" else 503
+        if exc.code == "SETTINGS_ALREADY_INITIALIZED":
+            status = 409
+        return JSONResponse(status_code=status, content=exc.to_dict())
+
+    @app.exception_handler(LoginRateLimited)
+    async def handle_settings_rate_limit(request: Request, exc: LoginRateLimited):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "SETTINGS_RATE_LIMITED",
+                    "message": "登录尝试过多，请稍后重试",
+                }
+            },
+        )
+
+    @app.exception_handler(PasswordPolicyError)
+    async def handle_settings_password_policy(
+        request: Request, exc: PasswordPolicyError
+    ):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "SETTINGS_PASSWORD_INVALID",
+                    "message": "密码长度必须为 10 到 128 个字符",
+                }
+            },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation(request: Request, exc: RequestValidationError):
+        if not request.url.path.startswith("/api/settings"):
+            return await request_validation_exception_handler(request, exc)
+        fields: dict[str, str] = {}
+        for error in exc.errors():
+            location = [str(part) for part in error.get("loc", ()) if part != "body"]
+            fields[".".join(location) or "request"] = "配置值无效"
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "SETTINGS_VALIDATION_FAILED",
+                    "message": "请检查标记的配置项",
+                    "fields": fields,
+                }
+            },
+        )
 
     app.add_middleware(
         CORSMiddleware,
@@ -149,6 +236,7 @@ def create_app(
     app.include_router(conversations_router, prefix="/api")
     app.include_router(tools_router, prefix="/api")
     app.include_router(qq_status_router, prefix="/api")
+    app.include_router(settings_router, prefix="/api")
     app.include_router(ws_router)
     app.include_router(qq_websocket_router)
     app.mount(
@@ -156,6 +244,8 @@ def create_app(
         StaticFiles(directory=AUDIO_DIR, check_dir=False),
         name="tts-audio",
     )
+
+    app.add_middleware(SettingsSecurityMiddleware)
 
     return app
 

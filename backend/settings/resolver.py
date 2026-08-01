@@ -1,0 +1,435 @@
+"""Resolve persisted, keychain, and environment settings into runtime values."""
+
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from enum import Enum
+import os
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
+
+from channels.onebot.config import OneBotSettings
+from llm.config import LLMSettings
+from settings.models import PersistedSettings
+from settings.secrets import SecretStore
+
+
+class FieldSource(str, Enum):
+    DEFAULT = "default"
+    PERSISTED = "persisted"
+    KEYCHAIN = "keychain"
+    ENVIRONMENT = "environment"
+
+
+@dataclass(frozen=True)
+class TTSRuntimeSettings:
+    gpt_sovits_url: str
+    default_voice_id: str
+    audio_max_age_seconds: int
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    llm: LLMSettings
+    qq: OneBotSettings
+    tts: TTSRuntimeSettings
+
+
+class FieldPresentation(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        serialize_by_alias=True,
+    )
+
+    value: Any | None
+    source: FieldSource
+    read_only: bool = False
+    environment_variable: str | None = None
+    configured: bool | None = None
+    missing: bool = False
+
+
+class SettingsPresentation(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        serialize_by_alias=True,
+    )
+
+    fields: dict[str, FieldPresentation]
+    keychain_available: bool
+
+
+@dataclass(frozen=True)
+class ResolvedSettings:
+    runtime: RuntimeSettings
+    presentation: SettingsPresentation
+
+
+_LLM_ENVIRONMENT_VARIABLES = {
+    "enabled": "ASSISTANT_LLM_ENABLED",
+    "base_url": "ASSISTANT_LLM_BASE_URL",
+    "model": "ASSISTANT_LLM_MODEL",
+    "timeout_seconds": "ASSISTANT_LLM_TIMEOUT_SECONDS",
+    "max_context_messages": "ASSISTANT_LLM_MAX_CONTEXT_MESSAGES",
+    "max_context_chars": "ASSISTANT_LLM_MAX_CONTEXT_CHARS",
+    "tool_calling_enabled": "ASSISTANT_LLM_TOOL_CALLING_ENABLED",
+    "api_key": "ASSISTANT_LLM_API_KEY",
+}
+_QQ_ENVIRONMENT_VARIABLES = {
+    "enabled": "ASSISTANT_QQ_ENABLED",
+    "allowed_group_ids": "ASSISTANT_QQ_ALLOWED_GROUP_IDS",
+    "allowed_user_ids": "ASSISTANT_QQ_ALLOWED_USER_IDS",
+    "rate_per_minute": "ASSISTANT_QQ_RATE_PER_MINUTE",
+    "rate_burst": "ASSISTANT_QQ_RATE_BURST",
+    "max_concurrency": "ASSISTANT_QQ_MAX_CONCURRENCY",
+    "action_timeout_seconds": "ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS",
+    "access_token": "ASSISTANT_QQ_ACCESS_TOKEN",
+}
+_TTS_ENVIRONMENT_VARIABLES = {
+    "gpt_sovits_url": "ASSISTANT_GPT_SOVITS_URL",
+    "default_voice_id": "ASSISTANT_TTS_DEFAULT_VOICE_ID",
+    "audio_max_age_seconds": "ASSISTANT_AUDIO_MAX_AGE_SECONDS",
+}
+
+
+class SettingsResolver:
+    """Apply ``defaults < persisted < keychain < environment`` precedence."""
+
+    def __init__(self, secret_store: SecretStore):
+        self._secret_store = secret_store
+
+    def resolve(
+        self,
+        persisted: PersistedSettings,
+        environ: Mapping[str, str] | None = None,
+    ) -> ResolvedSettings:
+        environment = os.environ if environ is None else environ
+        keychain_available, secrets = self._read_keychain_secrets(persisted)
+
+        llm_environment = self._llm_environment(persisted, secrets["llm.apiKey"])
+        qq_environment = self._qq_environment(persisted, secrets["qq.accessToken"])
+        self._overlay_environment(
+            llm_environment,
+            environment,
+            _LLM_ENVIRONMENT_VARIABLES.values(),
+        )
+        self._overlay_environment(
+            qq_environment,
+            environment,
+            _QQ_ENVIRONMENT_VARIABLES.values(),
+        )
+
+        llm = LLMSettings.from_env(llm_environment)
+        qq = OneBotSettings.from_env(qq_environment)
+        tts = self._resolve_tts(persisted, environment)
+        runtime = RuntimeSettings(llm=llm, qq=qq, tts=tts)
+        presentation = SettingsPresentation(
+            fields=self._presentation_fields(
+                persisted,
+                runtime,
+                environment,
+                secrets,
+            ),
+            keychain_available=keychain_available,
+        )
+        return ResolvedSettings(runtime=runtime, presentation=presentation)
+
+    def _read_keychain_secrets(
+        self, persisted: PersistedSettings
+    ) -> tuple[bool, dict[str, str | None]]:
+        secrets: dict[str, str | None] = {
+            "llm.apiKey": None,
+            "qq.accessToken": None,
+        }
+        try:
+            available = bool(self._secret_store.available())
+        except Exception:
+            return False, secrets
+        if not available:
+            return False, secrets
+
+        references = {
+            "llm.apiKey": persisted.llm.api_key_ref,
+            "qq.accessToken": persisted.qq.access_token_ref,
+        }
+        try:
+            for name, reference in references.items():
+                if reference is not None:
+                    secrets[name] = self._secret_store.get(reference)
+        except Exception:
+            return False, {name: None for name in secrets}
+        return True, secrets
+
+    @staticmethod
+    def _llm_environment(
+        persisted: PersistedSettings, api_key: str | None
+    ) -> dict[str, str]:
+        llm = persisted.llm
+        values = {
+            "ASSISTANT_LLM_ENABLED": _format_bool(llm.enabled),
+            "ASSISTANT_LLM_TIMEOUT_SECONDS": str(llm.timeout_seconds),
+            "ASSISTANT_LLM_MAX_CONTEXT_MESSAGES": str(llm.max_context_messages),
+            "ASSISTANT_LLM_MAX_CONTEXT_CHARS": str(llm.max_context_chars),
+            "ASSISTANT_LLM_TOOL_CALLING_ENABLED": _format_bool(
+                llm.tool_calling_enabled
+            ),
+        }
+        if llm.base_url is not None:
+            values["ASSISTANT_LLM_BASE_URL"] = llm.base_url
+        if llm.model is not None:
+            values["ASSISTANT_LLM_MODEL"] = llm.model
+        if api_key is not None:
+            values["ASSISTANT_LLM_API_KEY"] = api_key
+        return values
+
+    @staticmethod
+    def _qq_environment(
+        persisted: PersistedSettings, access_token: str | None
+    ) -> dict[str, str]:
+        qq = persisted.qq
+        return {
+            "ASSISTANT_QQ_ENABLED": _format_bool(qq.enabled),
+            "ASSISTANT_QQ_ALLOWED_GROUP_IDS": _format_ids(qq.allowed_group_ids),
+            "ASSISTANT_QQ_ALLOWED_USER_IDS": _format_ids(qq.allowed_user_ids),
+            "ASSISTANT_QQ_RATE_PER_MINUTE": str(qq.rate_per_minute),
+            "ASSISTANT_QQ_RATE_BURST": str(qq.rate_burst),
+            "ASSISTANT_QQ_MAX_CONCURRENCY": str(qq.max_concurrency),
+            "ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS": str(
+                qq.action_timeout_seconds
+            ),
+            "ASSISTANT_QQ_ACCESS_TOKEN": access_token or "",
+        }
+
+    @staticmethod
+    def _overlay_environment(
+        target: dict[str, str],
+        environment: Mapping[str, str],
+        variable_names: Iterable[str],
+    ) -> None:
+        for variable_name in variable_names:
+            if variable_name in environment:
+                target[variable_name] = environment[variable_name]
+
+    @staticmethod
+    def _resolve_tts(
+        persisted: PersistedSettings,
+        environment: Mapping[str, str],
+    ) -> TTSRuntimeSettings:
+        tts = persisted.tts
+        url_name = _TTS_ENVIRONMENT_VARIABLES["gpt_sovits_url"]
+        voice_name = _TTS_ENVIRONMENT_VARIABLES["default_voice_id"]
+        age_name = _TTS_ENVIRONMENT_VARIABLES["audio_max_age_seconds"]
+        url = environment[url_name] if url_name in environment else tts.gpt_sovits_url
+        voice = (
+            environment[voice_name]
+            if voice_name in environment
+            else tts.default_voice_id
+        )
+        age = (
+            environment[age_name]
+            if age_name in environment
+            else str(tts.audio_max_age_seconds)
+        )
+        return TTSRuntimeSettings(
+            gpt_sovits_url=_nonempty_text(url_name, url, trim_trailing_slashes=True),
+            default_voice_id=_nonempty_text(voice_name, voice),
+            audio_max_age_seconds=_bounded_int(
+                age_name,
+                age,
+                minimum=1,
+                maximum=2_592_000,
+            ),
+        )
+
+    @classmethod
+    def _presentation_fields(
+        cls,
+        persisted: PersistedSettings,
+        runtime: RuntimeSettings,
+        environment: Mapping[str, str],
+        secrets: Mapping[str, str | None],
+    ) -> dict[str, FieldPresentation]:
+        fields: dict[str, FieldPresentation] = {}
+        cls._add_nonsecret_fields(
+            fields,
+            {
+                "enabled": "llm.enabled",
+                "base_url": "llm.baseUrl",
+                "model": "llm.model",
+                "timeout_seconds": "llm.timeoutSeconds",
+                "max_context_messages": "llm.maxContextMessages",
+                "max_context_chars": "llm.maxContextChars",
+                "tool_calling_enabled": "llm.toolCallingEnabled",
+            },
+            {
+                "enabled": runtime.llm.enabled,
+                "base_url": runtime.llm.base_url,
+                "model": runtime.llm.model,
+                "timeout_seconds": runtime.llm.timeout_seconds,
+                "max_context_messages": runtime.llm.max_context_messages,
+                "max_context_chars": runtime.llm.max_context_chars,
+                "tool_calling_enabled": runtime.llm.tool_calling_enabled,
+            },
+            persisted.llm.model_fields_set,
+            _LLM_ENVIRONMENT_VARIABLES,
+            environment,
+        )
+        cls._add_nonsecret_fields(
+            fields,
+            {
+                "enabled": "qq.enabled",
+                "allowed_group_ids": "qq.allowedGroupIds",
+                "allowed_user_ids": "qq.allowedUserIds",
+                "rate_per_minute": "qq.ratePerMinute",
+                "rate_burst": "qq.rateBurst",
+                "max_concurrency": "qq.maxConcurrency",
+                "action_timeout_seconds": "qq.actionTimeoutSeconds",
+            },
+            {
+                "enabled": runtime.qq.enabled,
+                "allowed_group_ids": sorted(runtime.qq.allowed_group_ids),
+                "allowed_user_ids": sorted(runtime.qq.allowed_user_ids),
+                "rate_per_minute": runtime.qq.rate_per_minute,
+                "rate_burst": runtime.qq.rate_burst,
+                "max_concurrency": runtime.qq.max_concurrency,
+                "action_timeout_seconds": runtime.qq.action_timeout_seconds,
+            },
+            persisted.qq.model_fields_set,
+            _QQ_ENVIRONMENT_VARIABLES,
+            environment,
+        )
+        cls._add_nonsecret_fields(
+            fields,
+            {
+                "gpt_sovits_url": "tts.gptSovitsUrl",
+                "default_voice_id": "tts.defaultVoiceId",
+                "audio_max_age_seconds": "tts.audioMaxAgeSeconds",
+            },
+            {
+                "gpt_sovits_url": runtime.tts.gpt_sovits_url,
+                "default_voice_id": runtime.tts.default_voice_id,
+                "audio_max_age_seconds": runtime.tts.audio_max_age_seconds,
+            },
+            persisted.tts.model_fields_set,
+            _TTS_ENVIRONMENT_VARIABLES,
+            environment,
+        )
+        cls._add_secret_field(
+            fields,
+            path="llm.apiKey",
+            reference=persisted.llm.api_key_ref,
+            secret=secrets["llm.apiKey"],
+            environment_variable=_LLM_ENVIRONMENT_VARIABLES["api_key"],
+            environment=environment,
+        )
+        cls._add_secret_field(
+            fields,
+            path="qq.accessToken",
+            reference=persisted.qq.access_token_ref,
+            secret=secrets["qq.accessToken"],
+            environment_variable=_QQ_ENVIRONMENT_VARIABLES["access_token"],
+            environment=environment,
+        )
+        return fields
+
+    @staticmethod
+    def _add_nonsecret_fields(
+        fields: dict[str, FieldPresentation],
+        paths: Mapping[str, str],
+        values: Mapping[str, Any],
+        persisted_fields: set[str],
+        environment_variables: Mapping[str, str],
+        environment: Mapping[str, str],
+    ) -> None:
+        for model_field, path in paths.items():
+            variable = environment_variables[model_field]
+            environment_override = variable in environment
+            source = (
+                FieldSource.ENVIRONMENT
+                if environment_override
+                else FieldSource.PERSISTED
+                if model_field in persisted_fields
+                else FieldSource.DEFAULT
+            )
+            fields[path] = FieldPresentation(
+                value=values[model_field],
+                source=source,
+                read_only=environment_override,
+                environment_variable=variable,
+            )
+
+    @staticmethod
+    def _add_secret_field(
+        fields: dict[str, FieldPresentation],
+        *,
+        path: str,
+        reference: str | None,
+        secret: str | None,
+        environment_variable: str,
+        environment: Mapping[str, str],
+    ) -> None:
+        environment_override = environment_variable in environment
+        if environment_override:
+            configured = bool(environment[environment_variable].strip())
+            source = FieldSource.ENVIRONMENT
+            missing = False
+        elif reference is not None:
+            configured = bool(secret and secret.strip())
+            source = FieldSource.KEYCHAIN
+            missing = not configured
+        else:
+            configured = False
+            source = FieldSource.DEFAULT
+            missing = False
+        fields[path] = FieldPresentation(
+            value=None,
+            source=source,
+            read_only=environment_override,
+            environment_variable=environment_variable,
+            configured=configured,
+            missing=missing,
+        )
+
+
+def _format_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _format_ids(identifiers: list[int]) -> str:
+    return ",".join(str(identifier) for identifier in sorted(set(identifiers)))
+
+
+def _nonempty_text(
+    name: str,
+    raw_value: str,
+    *,
+    trim_trailing_slashes: bool = False,
+) -> str:
+    try:
+        value = raw_value.strip()
+        if trim_trailing_slashes:
+            value = value.rstrip("/")
+    except (AttributeError, TypeError):
+        raise ValueError(name) from None
+    if not value:
+        raise ValueError(name)
+    return value
+
+
+def _bounded_int(
+    name: str,
+    raw_value: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(raw_value.strip())
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(name) from None
+    if not minimum <= value <= maximum:
+        raise ValueError(name)
+    return value

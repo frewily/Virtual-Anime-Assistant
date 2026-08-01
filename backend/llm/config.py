@@ -1,13 +1,14 @@
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
-def _parse_bool(name: str, default: bool) -> bool:
-    raw_value = os.getenv(name)
+def _parse_bool(values: Mapping[str, str], name: str, default: bool) -> bool:
+    raw_value = values.get(name)
     if raw_value is None:
         return default
 
@@ -16,32 +17,39 @@ def _parse_bool(name: str, default: bool) -> bool:
         return True
     if value in _FALSE_VALUES:
         return False
-    raise ValueError(
-        f"{name} must be one of: 1, true, yes, on, 0, false, no, off"
-    )
+    raise ValueError(name)
 
 
-def _optional_text(name: str, *, trim_trailing_slashes: bool = False) -> str | None:
-    value = os.getenv(name, "").strip()
+def _optional_text(
+    values: Mapping[str, str],
+    name: str,
+    *,
+    trim_trailing_slashes: bool = False,
+) -> str | None:
+    value = values.get(name, "").strip()
     if trim_trailing_slashes:
         value = value.rstrip("/")
     return value or None
 
 
-def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
-    raw_value = os.getenv(name)
+def _bounded_int(
+    values: Mapping[str, str],
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw_value = values.get(name)
     if raw_value is None:
         return default
 
     try:
         value = int(raw_value.strip())
-    except ValueError as error:
-        raise ValueError(
-            f"{name} must be an integer from {minimum} to {maximum}"
-        ) from error
+    except ValueError:
+        raise ValueError(name) from None
 
     if not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be from {minimum} to {maximum}")
+        raise ValueError(name)
     return value
 
 
@@ -49,7 +57,7 @@ def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
 class LLMSettings:
     enabled: bool
     base_url: str | None
-    api_key: str | None
+    api_key: str | None = field(repr=False)
     model: str | None
     timeout_seconds: int
     max_context_messages: int
@@ -57,27 +65,29 @@ class LLMSettings:
     tool_calling_enabled: bool = False
 
     @classmethod
-    def from_env(cls) -> "LLMSettings":
-        enabled = _parse_bool("ASSISTANT_LLM_ENABLED", default=False)
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "LLMSettings":
+        values = os.environ if environ is None else environ
+        enabled = _parse_bool(values, "ASSISTANT_LLM_ENABLED", default=False)
         base_url = _optional_text(
+            values,
             "ASSISTANT_LLM_BASE_URL",
             trim_trailing_slashes=True,
         )
-        api_key = _optional_text("ASSISTANT_LLM_API_KEY")
-        model = _optional_text("ASSISTANT_LLM_MODEL")
+        api_key = _optional_text(values, "ASSISTANT_LLM_API_KEY")
+        model = _optional_text(values, "ASSISTANT_LLM_MODEL")
 
         if enabled and base_url is None:
-            raise ValueError(
-                "ASSISTANT_LLM_BASE_URL is required when ASSISTANT_LLM_ENABLED=true"
-            )
+            raise ValueError("ASSISTANT_LLM_BASE_URL")
         if enabled and model is None:
-            raise ValueError(
-                "ASSISTANT_LLM_MODEL is required when ASSISTANT_LLM_ENABLED=true"
-            )
+            raise ValueError("ASSISTANT_LLM_MODEL")
 
         return cls(
             enabled=enabled,
             tool_calling_enabled=_parse_bool(
+                values,
                 "ASSISTANT_LLM_TOOL_CALLING_ENABLED",
                 default=False,
             ),
@@ -85,18 +95,21 @@ class LLMSettings:
             api_key=api_key,
             model=model,
             timeout_seconds=_bounded_int(
+                values,
                 "ASSISTANT_LLM_TIMEOUT_SECONDS",
                 default=60,
                 minimum=1,
                 maximum=300,
             ),
             max_context_messages=_bounded_int(
+                values,
                 "ASSISTANT_LLM_MAX_CONTEXT_MESSAGES",
                 default=20,
                 minimum=1,
                 maximum=100,
             ),
             max_context_chars=_bounded_int(
+                values,
                 "ASSISTANT_LLM_MAX_CONTEXT_CHARS",
                 default=12000,
                 minimum=4000,

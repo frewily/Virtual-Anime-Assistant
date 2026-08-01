@@ -26,6 +26,19 @@ SECURITY_HEADERS = (
 )
 
 
+def is_settings_path(path: object) -> bool:
+    """Return whether a URL path is inside a settings path segment."""
+
+    if not isinstance(path, str):
+        return False
+    return (
+        path == "/api/settings"
+        or path.startswith("/api/settings/")
+        or path == "/settings"
+        or path.startswith("/settings/")
+    )
+
+
 def _single_header(scope: Scope, name: bytes) -> bytes | None:
     values = [value for key, value in scope.get("headers", ()) if key.lower() == name]
     return values[0] if len(values) == 1 else None
@@ -57,9 +70,7 @@ class SettingsSecurityMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not scope.get("path", "").startswith(
-            ("/api/settings", "/settings")
-        ):
+        if scope["type"] != "http" or not is_settings_path(scope.get("path")):
             await self.app(scope, receive, send)
             return
 
@@ -110,4 +121,5 @@ __all__ = [
     "SETTINGS_SESSION_COOKIE",
     "SettingsSecurityMiddleware",
     "add_security_headers",
+    "is_settings_path",
 ]

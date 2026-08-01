@@ -33,7 +33,7 @@ from domain.tools import ToolEvent
 from settings.auth import LoginRateLimited, PasswordPolicyError
 from settings.resolver import RuntimeSettings
 from settings.routes import SettingsHttpError, router as settings_router
-from settings.security import SettingsSecurityMiddleware
+from settings.security import SettingsSecurityMiddleware, is_settings_path
 from settings.service import (
     SettingsService,
     SettingsServiceError,
@@ -43,6 +43,99 @@ from settings.validation import SettingsValidationError
 
 
 logger = logging.getLogger(__name__)
+
+
+_SETTINGS_FIELD_ALIASES = {
+    "base_url": "baseUrl",
+    "timeout_seconds": "timeoutSeconds",
+    "max_context_messages": "maxContextMessages",
+    "max_context_chars": "maxContextChars",
+    "tool_calling_enabled": "toolCallingEnabled",
+    "api_key": "apiKey",
+    "allowed_group_ids": "allowedGroupIds",
+    "allowed_user_ids": "allowedUserIds",
+    "rate_per_minute": "ratePerMinute",
+    "rate_burst": "rateBurst",
+    "max_concurrency": "maxConcurrency",
+    "action_timeout_seconds": "actionTimeoutSeconds",
+    "access_token": "accessToken",
+    "gpt_sovits_url": "gptSovitsUrl",
+    "default_voice_id": "defaultVoiceId",
+    "audio_max_age_seconds": "audioMaxAgeSeconds",
+}
+_DRAFT_FIELDS = frozenset(
+    {
+        "revision",
+        "llm",
+        "llm.enabled",
+        "llm.baseUrl",
+        "llm.model",
+        "llm.timeoutSeconds",
+        "llm.maxContextMessages",
+        "llm.maxContextChars",
+        "llm.toolCallingEnabled",
+        "llm.apiKey",
+        "llm.apiKey.operation",
+        "llm.apiKey.value",
+        "qq",
+        "qq.enabled",
+        "qq.allowedGroupIds",
+        "qq.allowedUserIds",
+        "qq.ratePerMinute",
+        "qq.rateBurst",
+        "qq.maxConcurrency",
+        "qq.actionTimeoutSeconds",
+        "qq.accessToken",
+        "qq.accessToken.operation",
+        "qq.accessToken.value",
+        "tts",
+        "tts.gptSovitsUrl",
+        "tts.defaultVoiceId",
+        "tts.audioMaxAgeSeconds",
+    }
+)
+_REQUEST_FIELDS_BY_ROUTE = {
+    ("POST", "/api/settings/setup"): frozenset({"password"}),
+    ("POST", "/api/settings/login"): frozenset({"password"}),
+    ("PUT", "/api/settings/config"): _DRAFT_FIELDS,
+    ("POST", "/api/settings/test/llm"): frozenset(
+        {"baseUrl", "model", "apiKey"}
+    ),
+    ("POST", "/api/settings/test/qq"): frozenset(
+        {
+            "enabled",
+            "allowedGroupIds",
+            "allowedUserIds",
+            "ratePerMinute",
+            "rateBurst",
+            "maxConcurrency",
+            "actionTimeoutSeconds",
+            "accessToken",
+        }
+    ),
+    ("POST", "/api/settings/test/tts"): frozenset({"gptSovitsUrl"}),
+}
+
+
+def _safe_validation_field(request: Request, location: object) -> str:
+    allowed = _REQUEST_FIELDS_BY_ROUTE.get(
+        (request.method.upper(), request.url.path), frozenset()
+    )
+    if not isinstance(location, (tuple, list)):
+        return "request"
+    raw_parts = tuple(location)
+    if raw_parts and raw_parts[0] == "body":
+        raw_parts = raw_parts[1:]
+    normalized: list[str] = []
+    for part in raw_parts:
+        if not isinstance(part, str):
+            break
+        normalized.append(_SETTINGS_FIELD_ALIASES.get(part, part))
+    for size in range(len(normalized), 0, -1):
+        candidate = ".".join(normalized[:size])
+        if candidate in allowed:
+            return candidate
+    return "request"
 
 
 async def broadcast_tool_event(event: ToolEvent) -> None:
@@ -203,12 +296,12 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(request: Request, exc: RequestValidationError):
-        if not request.url.path.startswith("/api/settings"):
+        if not is_settings_path(request.url.path):
             return await request_validation_exception_handler(request, exc)
         fields: dict[str, str] = {}
         for error in exc.errors():
-            location = [str(part) for part in error.get("loc", ()) if part != "body"]
-            fields[".".join(location) or "request"] = "配置值无效"
+            field = _safe_validation_field(request, error.get("loc"))
+            fields[field] = "配置值无效"
         return JSONResponse(
             status_code=422,
             content={

@@ -185,6 +185,26 @@ class SettingsApiTests(unittest.TestCase):
         self.assert_safe_headers(response)
         remote.close()
 
+    def test_security_path_matching_has_segment_boundaries(self) -> None:
+        remote = TestClient(
+            self.app,
+            base_url=BASE_URL,
+            client=("203.0.113.7", 50000),
+        )
+        for path in (
+            "/api/settingsevil",
+            "/settings-evil",
+            "/settings.css",
+        ):
+            with self.subTest(path=path):
+                response = remote.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertNotIn("content-security-policy", response.headers)
+        protected = remote.get("/api/settings/missing")
+        self.assertEqual(protected.status_code, 403)
+        self.assert_safe_headers(protected)
+        remote.close()
+
     def test_host_must_be_one_exact_header(self) -> None:
         bad_hosts = [
             "localhost:8080",
@@ -344,6 +364,56 @@ class SettingsApiTests(unittest.TestCase):
         self.assertNotIn(secret, response.text)
         self.assertIn("llm.enabled", response.json()["error"]["fields"])
         self.assert_safe_headers(response)
+
+    def test_validation_error_fields_only_use_route_schema_whitelists(self) -> None:
+        attack_key = "attacker-controlled-field-name"
+        attack_value = "DO-NOT-ECHO-ATTACK-VALUE"
+        setup = self.client.post(
+            "/api/settings/setup",
+            headers=self._origin(),
+            json={
+                "password": "long-enough-password",
+                attack_key: attack_value,
+            },
+        )
+        self.assertEqual(setup.status_code, 422)
+        self.assertEqual(set(setup.json()["error"]["fields"]), {"request"})
+        self.assertNotIn(attack_key, setup.text)
+        self.assertNotIn(attack_value, setup.text)
+
+        headers = self._authenticated()
+        payload = draft_payload()
+        payload["llm"][attack_key] = attack_value
+        config = self.client.put(
+            "/api/settings/config", headers=headers, json=payload
+        )
+        self.assertEqual(config.status_code, 422)
+        self.assertEqual(set(config.json()["error"]["fields"]), {"llm"})
+        self.assertNotIn(attack_key, config.text)
+        self.assertNotIn(attack_value, config.text)
+
+        probe = self.client.post(
+            "/api/settings/test/qq",
+            headers=headers,
+            json={"enabled": False, attack_key: attack_value},
+        )
+        self.assertEqual(probe.status_code, 422)
+        self.assertEqual(set(probe.json()["error"]["fields"]), {"request"})
+        self.assertNotIn(attack_key, probe.text)
+        self.assertNotIn(attack_value, probe.text)
+
+        indexed = draft_payload()
+        indexed["qq"]["allowedGroupIds"] = [attack_value]
+        response = self.client.put(
+            "/api/settings/config", headers=headers, json=indexed
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            set(response.json()["error"]["fields"]),
+            {"qq.allowedGroupIds"},
+        )
+        self.assertNotIn(".0", response.text)
+        self.assertNotIn(attack_value, response.text)
 
     def test_domain_errors_map_without_private_context(self) -> None:
         headers = self._authenticated()

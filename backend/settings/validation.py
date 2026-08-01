@@ -1,10 +1,11 @@
 """Shared validation and redacted connection probes for settings drafts."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 import json
+import sys
 from types import MappingProxyType
 from typing import Literal, Self
 from urllib.parse import urlsplit
@@ -134,7 +135,7 @@ class ValidatedDraft:
 
     draft: ValidatedSettingsSnapshot
     secret_configured: Mapping[str, bool]
-    _secret_values: Mapping[str, str | None] = field(repr=False)
+    _secret_values: Mapping[str, SecretStr | None] = field(repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -152,7 +153,11 @@ class ValidatedDraft:
         """Return an effective secret for an in-memory probe or save transaction."""
 
         value = self._secret_values.get(field_path)
-        return SecretStr(value) if value is not None else None
+        return (
+            SecretStr(value.get_secret_value())
+            if value is not None
+            else None
+        )
 
 
 class SettingsValidationError(ValueError):
@@ -248,12 +253,14 @@ class _NetworkClassifyingTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         try:
-            return await self._inner.handle_async_request(request)
+            response = await self._inner.handle_async_request(request)
         except httpx.TimeoutException:
             raise
         except (httpx.RequestError, OSError):
             self.unreachable = True
             raise
+        response.stream = _ClassifyingResponseStream(response.stream, self)
+        return response
 
     async def aclose(self) -> None:
         try:
@@ -263,8 +270,38 @@ class _NetworkClassifyingTransport(httpx.AsyncBaseTransport):
             raise
 
 
+class _ClassifyingResponseStream(httpx.AsyncByteStream):
+    def __init__(
+        self,
+        inner: httpx.AsyncByteStream,
+        transport: _NetworkClassifyingTransport,
+    ) -> None:
+        self._inner = inner
+        self._transport = transport
+
+    async def __aiter__(self):
+        try:
+            async for chunk in self._inner:
+                yield chunk
+        except httpx.TimeoutException:
+            raise
+        except (httpx.RequestError, OSError):
+            self._transport.unreachable = True
+            raise
+
+    async def aclose(self) -> None:
+        try:
+            await self._inner.aclose()
+        except httpx.TimeoutException:
+            raise
+        except (httpx.RequestError, OSError):
+            self._transport.unreachable = True
+            raise
+
+
 _FIELD_MESSAGE = "配置值无效"
 _REQUIRED_MESSAGE = "启用时必须配置此项"
+_TTS_NETWORK_TIMEOUT_SECONDS = 8.5
 
 
 class SettingsValidationService:
@@ -372,7 +409,7 @@ class SettingsValidationService:
             secret_configured=secret_configured,
             _secret_values={
                 path: (
-                    secret.get_secret_value()
+                    SecretStr(secret.get_secret_value())
                     if secret is not None
                     else None
                 )
@@ -406,10 +443,13 @@ class SettingsValidationService:
             max_context_chars=4000,
             tool_calling_enabled=False,
         )
-        classified_transport = _NetworkClassifyingTransport(
-            transport if transport is not None else httpx.AsyncHTTPTransport()
-        )
+        classified_transport: _NetworkClassifyingTransport | None = None
         try:
+            classified_transport = _NetworkClassifyingTransport(
+                transport
+                if transport is not None
+                else httpx.AsyncHTTPTransport(trust_env=False)
+            )
             gateway = OpenAICompatibleGateway(
                 settings,
                 transport=classified_transport,
@@ -438,7 +478,8 @@ class SettingsValidationService:
         except ModelServiceError:
             code = (
                 ConnectionTestCode.UNREACHABLE
-                if classified_transport.unreachable
+                if classified_transport is not None
+                and classified_transport.unreachable
                 else ConnectionTestCode.SERVICE_ERROR
             )
             return _result(code)
@@ -513,11 +554,12 @@ class SettingsValidationService:
             origin = base_url.copy_with(path="/", query=None, fragment=None)
 
             async def probe() -> bool:
-                async with httpx.AsyncClient(
-                    timeout=10,
+                client = httpx.AsyncClient(
+                    timeout=_TTS_NETWORK_TIMEOUT_SECONDS,
                     trust_env=False,
                     transport=transport,
-                ) as client:
+                )
+                try:
                     for path in ("/openapi.json", "/"):
                         response = await client.send(
                             client.build_request(
@@ -529,12 +571,17 @@ class SettingsValidationService:
                         try:
                             success = 200 <= response.status_code < 400
                         finally:
-                            await response.aclose()
+                            await _bounded_cleanup(response.aclose())
                         if success:
                             return True
                     return False
+                finally:
+                    await _cleanup_preserving_primary(client.aclose())
 
-            ok = await asyncio.wait_for(probe(), timeout=10)
+            ok = await asyncio.wait_for(
+                probe(),
+                timeout=_TTS_NETWORK_TIMEOUT_SECONDS,
+            )
         except (httpx.TimeoutException, TimeoutError):
             return _result(ConnectionTestCode.TIMED_OUT)
         except (httpx.RequestError, OSError):
@@ -568,6 +615,76 @@ class SettingsValidationService:
 
 def _result(code: ConnectionTestCode) -> ConnectionTestResult:
     return ConnectionTestResult(ok=code is ConnectionTestCode.SUCCESS, code=code)
+
+
+_CLEANUP_TIMEOUT_SECONDS = 0.5
+_CLEANUP_CANCEL_GRACE_SECONDS = 0.1
+
+
+async def _bounded_cleanup(cleanup: Awaitable[None]) -> None:
+    """Finish cleanup despite cancellation, with a hard upper time bound."""
+
+    task = asyncio.ensure_future(cleanup)
+    cancellation: asyncio.CancelledError | None = None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _CLEANUP_TIMEOUT_SECONDS
+
+    while not task.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+
+    if not task.done():
+        task.cancel()
+        grace_deadline = loop.time() + _CLEANUP_CANCEL_GRACE_SECONDS
+        while not task.done() and loop.time() < grace_deadline:
+            try:
+                await asyncio.wait(
+                    {task},
+                    timeout=grace_deadline - loop.time(),
+                )
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+        if not task.done():
+            task.add_done_callback(_consume_cleanup_result)
+        if cancellation is not None:
+            raise cancellation
+        raise TimeoutError("resource cleanup timed out")
+
+    try:
+        task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+
+
+def _consume_cleanup_result(task: asyncio.Future[None]) -> None:
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+async def _cleanup_preserving_primary(cleanup: Awaitable[None]) -> None:
+    primary = sys.exception()
+    try:
+        await _bounded_cleanup(cleanup)
+    except asyncio.CancelledError:
+        if isinstance(primary, asyncio.CancelledError):
+            raise primary
+        raise
+    except Exception:
+        if primary is None:
+            raise
 
 
 def _nonempty(value: str | None) -> bool:

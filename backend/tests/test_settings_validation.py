@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -52,6 +53,61 @@ class CloseTrackingTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         self.close_count += 1
+
+
+class ReadFailureStream(httpx.AsyncByteStream):
+    def __init__(self, request: httpx.Request) -> None:
+        self._request = request
+        self.closed = False
+
+    async def __aiter__(self):
+        raise httpx.ReadError(
+            "private streamed response content",
+            request=self._request,
+        )
+        yield b""
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class BlockingCloseStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+        self.close_completed = False
+
+    async def __aiter__(self):
+        yield b"unused"
+
+    async def aclose(self) -> None:
+        self.close_started.set()
+        await self.allow_close.wait()
+        self.close_completed = True
+
+
+class BlockingCloseTransport(httpx.AsyncBaseTransport):
+    def __init__(self, stream: BlockingCloseStream) -> None:
+        self._stream = stream
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+        self.close_completed = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204, stream=self._stream)
+
+    async def aclose(self) -> None:
+        self.close_started.set()
+        await self.allow_close.wait()
+        self.close_completed = True
+
+
+class RequestAndCloseFailureTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("private request error", request=request)
+
+    async def aclose(self) -> None:
+        raise RuntimeError("private close error")
 
 
 def voice_catalog() -> VoiceCatalog:
@@ -157,6 +213,19 @@ class SettingsValidationTests(unittest.TestCase):
         serialized = validated.draft.model_dump_json(by_alias=True)
         self.assertNotIn("original-key", serialized)
         self.assertIn('"allowedGroupIds":[10001]', serialized)
+        for rendered in (
+            repr(validated._secret_values),
+            repr(validated),
+            repr(validated.draft),
+            str(validated.draft.model_dump(mode="json", by_alias=True)),
+            validated.draft.model_dump_json(by_alias=True),
+        ):
+            self.assertNotIn("original-key", rendered)
+        with self.assertRaises(TypeError) as raised:
+            validated.draft.model_copy(
+                update={"llm": {"apiKey": "original-key"}}
+            )
+        self.assertNotIn("original-key", str(raised.exception))
 
     def test_delete_and_blank_replacement_are_not_effective_secrets(self) -> None:
         for mutation in (
@@ -453,6 +522,45 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("private", serialized)
 
+    async def test_llm_default_transport_ignores_invalid_ca_environment(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"SSL_CERT_FILE": "/definitely/not/a/real/ca.pem"},
+        ):
+            result = await self.service.test_llm(
+                LLMTestRequest(
+                    base_url="http://127.0.0.1:1/v1",
+                    model="model",
+                    api_key="test-key",
+                )
+            )
+
+        self.assertEqual(result.code, ConnectionTestCode.UNREACHABLE)
+
+    async def test_llm_stream_read_failure_is_unreachable_and_closes(self) -> None:
+        streams: list[ReadFailureStream] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            stream = ReadFailureStream(request)
+            streams.append(stream)
+            return httpx.Response(200, stream=stream)
+
+        transport = CloseTrackingTransport(handler)
+        result = await self.service.test_llm(
+            LLMTestRequest(
+                base_url="https://example.test/v1",
+                model="model",
+                api_key="test-key",
+            ),
+            transport=transport,
+        )
+
+        self.assertEqual(result.code, ConnectionTestCode.UNREACHABLE)
+        self.assertEqual(transport.close_count, 1)
+        self.assertEqual(len(streams), 1)
+        self.assertTrue(streams[0].closed)
+        self.assertNotIn("private", result.model_dump_json())
+
     async def test_llm_http_service_error_is_not_reported_as_unreachable(self) -> None:
         result = await self.service.test_llm(
             LLMTestRequest(
@@ -533,6 +641,54 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(stream.closed for stream in streams))
         self.assertFalse(any(stream.iterated for stream in streams))
 
+    async def test_tts_cancellation_waits_for_all_close_layers(self) -> None:
+        stream = BlockingCloseStream()
+        transport = BlockingCloseTransport(stream)
+        task = asyncio.create_task(
+            self.service.test_tts(
+                TTSTestRequest(gpt_sovits_url="http://127.0.0.1:9880"),
+                transport=transport,
+            )
+        )
+
+        await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        stream.allow_close.set()
+        await asyncio.wait_for(transport.close_started.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        transport.allow_close.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        self.assertTrue(stream.close_completed)
+        self.assertTrue(transport.close_completed)
+
+    async def test_tts_cleanup_timeout_is_bounded(self) -> None:
+        stream = BlockingCloseStream()
+        transport = CloseTrackingTransport(
+            lambda _: httpx.Response(204, stream=stream)
+        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        with (
+            patch("settings.validation._CLEANUP_TIMEOUT_SECONDS", 0.02),
+            patch("settings.validation._CLEANUP_CANCEL_GRACE_SECONDS", 0.01),
+        ):
+            result = await self.service.test_tts(
+                TTSTestRequest(gpt_sovits_url="http://127.0.0.1:9880"),
+                transport=transport,
+            )
+
+        elapsed = loop.time() - started
+        self.assertEqual(result.code, ConnectionTestCode.TIMED_OUT)
+        self.assertLess(elapsed, 0.2)
+        self.assertEqual(transport.close_count, 1)
+
     async def test_tts_transport_errors_are_redacted(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError(
@@ -547,6 +703,15 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.code, ConnectionTestCode.UNREACHABLE)
         self.assertNotIn("secret", result.model_dump_json())
+
+    async def test_tts_close_error_does_not_replace_request_error(self) -> None:
+        result = await self.service.test_tts(
+            TTSTestRequest(gpt_sovits_url="https://example.test"),
+            transport=RequestAndCloseFailureTransport(),
+        )
+
+        self.assertEqual(result.code, ConnectionTestCode.UNREACHABLE)
+        self.assertNotIn("private", result.model_dump_json())
 
     async def test_probe_clients_close_injected_transports(self) -> None:
         llm_transport = CloseTrackingTransport(

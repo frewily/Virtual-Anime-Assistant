@@ -1,7 +1,9 @@
 """Tests for layered runtime settings resolution and redacted presentation."""
 
+import json
 import sys
 import unittest
+import warnings
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -452,6 +454,19 @@ class SettingsResolverTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, rendered)
 
+    def test_secret_presentation_is_immutable_after_construction(self) -> None:
+        secret = "probe-secret"
+        field = SecretFieldPresentation(
+            source=FieldSource.DEFAULT,
+            configured=False,
+        )
+
+        with self.assertRaises((ValidationError, TypeError)):
+            field.value = secret
+
+        self.assertNotIn(secret, repr(field))
+        self.assertNotIn(secret, field.model_dump_json())
+
     def test_entire_presentation_rejects_secret_path_as_value_field(self) -> None:
         secret = "probe-secret"
         unsafe_field = ValueFieldPresentation(
@@ -475,6 +490,71 @@ class SettingsResolverTests(unittest.TestCase):
             error.json(),
         ):
             self.assertNotIn(secret, rendered)
+
+    def test_presentation_fields_are_deeply_immutable(self) -> None:
+        secret = "probe-secret"
+        presentation = SettingsPresentation(
+            fields={
+                "llm.apiKey": SecretFieldPresentation(
+                    source=FieldSource.DEFAULT,
+                    configured=False,
+                )
+            },
+            keychain_available=True,
+        )
+        unsafe = ValueFieldPresentation(
+            value=secret,
+            source=FieldSource.DEFAULT,
+        )
+
+        with self.assertRaises(TypeError):
+            presentation.fields["llm.apiKey"] = unsafe
+        with self.assertRaises((ValidationError, TypeError)):
+            presentation.fields = {"llm.apiKey": unsafe}
+
+        self.assertNotIn(secret, repr(presentation))
+        self.assertNotIn(secret, presentation.model_dump_json())
+
+    def test_bypassed_model_copy_is_redacted_by_repr_and_serializers(self) -> None:
+        secret = "probe-secret"
+        presentation = SettingsPresentation(
+            fields={},
+            keychain_available=True,
+        )
+        unsafe_value = ValueFieldPresentation(
+            value=secret,
+            source=FieldSource.ENVIRONMENT,
+            read_only=True,
+            environment_variable="ASSISTANT_LLM_API_KEY",
+        )
+        unsafe_secret = SecretFieldPresentation(
+            source=FieldSource.ENVIRONMENT,
+            read_only=True,
+            environment_variable="ASSISTANT_LLM_API_KEY",
+            configured=True,
+        ).model_copy(update={"value": secret})
+        bypassed = presentation.model_copy(
+            update={
+                "fields": {
+                    "llm.apiKey": unsafe_secret,
+                    "qq.accessToken": unsafe_value,
+                }
+            }
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dumped = bypassed.model_dump()
+            dumped_json = bypassed.model_dump_json()
+
+        self.assertEqual(caught, [])
+        self.assertIsInstance(dumped["fields"], dict)
+        self.assertIsInstance(json.loads(dumped_json)["fields"], dict)
+        for path in ("llm.apiKey", "qq.accessToken"):
+            self.assertIsNone(dumped["fields"][path]["value"])
+            self.assertIsNone(json.loads(dumped_json)["fields"][path]["value"])
+        self.assertNotIn(secret, repr(bypassed))
+        self.assertNotIn(secret, dumped_json)
 
     def test_value_presentation_is_strict_json_safe_and_forbids_extra(self) -> None:
         boolean = ValueFieldPresentation(

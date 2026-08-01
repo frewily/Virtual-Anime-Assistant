@@ -4,9 +4,16 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 import os
+from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    field_serializer,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from channels.onebot.config import (
@@ -43,10 +50,12 @@ class _PresentationModel(BaseModel):
     model_config = ConfigDict(
         alias_generator=to_camel,
         extra="forbid",
+        frozen=True,
         hide_input_in_errors=True,
         populate_by_name=True,
         serialize_by_alias=True,
         strict=True,
+        validate_assignment=True,
     )
 
 
@@ -84,7 +93,7 @@ _SECRET_FIELD_PATHS = frozenset({"llm.apiKey", "qq.accessToken"})
 
 
 class SettingsPresentation(_PresentationModel):
-    fields: dict[str, FieldPresentation]
+    fields: Mapping[str, FieldPresentation]
     keychain_available: bool
 
     @model_validator(mode="before")
@@ -115,7 +124,21 @@ class SettingsPresentation(_PresentationModel):
                     raise ValueError("secret paths require secret field presentation")
             elif not isinstance(field, ValueFieldPresentation):
                 raise ValueError("value paths require value field presentation")
+        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
         return self
+
+    @field_serializer("fields")
+    def serialize_fields(
+        self,
+        fields: Mapping[str, object],
+    ) -> dict[str, dict[str, object]]:
+        return _redacted_field_payloads(fields)
+
+    def __repr_args__(self):
+        return (
+            ("fields", _redacted_field_payloads(self.fields)),
+            ("keychain_available", self.keychain_available),
+        )
 
 
 @dataclass(frozen=True)
@@ -477,6 +500,49 @@ def _redacted_validation_error(
             }
         ],
     )
+
+
+def _redacted_field_payloads(
+    fields: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    payloads: dict[str, dict[str, object]] = {}
+    for path, field in fields.items():
+        if path in _SECRET_FIELD_PATHS:
+            payload = _redacted_secret_payload(field)
+        elif isinstance(field, BaseModel):
+            payload = field.model_dump(by_alias=True)
+        elif isinstance(field, Mapping):
+            payload = dict(field)
+        else:
+            payload = {}
+        payloads[path] = payload
+    return payloads
+
+
+def _redacted_secret_payload(field: object) -> dict[str, object]:
+    if isinstance(field, Mapping):
+        source = field.get("source", FieldSource.DEFAULT)
+        read_only = field.get("readOnly", field.get("read_only", False))
+        environment_variable = field.get(
+            "environmentVariable",
+            field.get("environment_variable"),
+        )
+        configured = field.get("configured")
+        missing = field.get("missing", False)
+    else:
+        source = getattr(field, "source", FieldSource.DEFAULT)
+        read_only = getattr(field, "read_only", False)
+        environment_variable = getattr(field, "environment_variable", None)
+        configured = getattr(field, "configured", None)
+        missing = getattr(field, "missing", False)
+    return {
+        "source": source,
+        "readOnly": read_only,
+        "environmentVariable": environment_variable,
+        "value": None,
+        "configured": configured,
+        "missing": missing,
+    }
 
 
 def _format_ids(identifiers: list[int]) -> str:

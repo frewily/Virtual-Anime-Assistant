@@ -15,7 +15,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from core.config_loader import VoiceCatalog, load_voice_catalog
-from settings.auth import AuthError, PasswordPolicyError, Session, SettingsAuthService
+from settings.auth import (
+    AuthError,
+    LoginRateLimited,
+    PasswordPolicyError,
+    Session,
+    SettingsAuthService,
+)
 from settings.file_store import SettingsFileError, SettingsFileStore
 from settings.models import (
     LLMSettings,
@@ -289,7 +295,7 @@ class SettingsService:
                 raise SettingsServiceError("SETTINGS_ALREADY_INITIALIZED")
             try:
                 auth_record = self._auth.hash_password(password)
-            except (PasswordPolicyError, AuthError):
+            except PasswordPolicyError:
                 raise
             except Exception:
                 auth_record = None
@@ -328,7 +334,16 @@ class SettingsService:
         persisted = self._load_settings()
         if persisted.auth is None:
             return None
-        return self._auth.login(client, password, persisted.auth)
+        login_failed = False
+        try:
+            return self._auth.login(client, password, persisted.auth)
+        except LoginRateLimited:
+            raise
+        except AuthError:
+            login_failed = True
+        if login_failed:
+            raise SettingsServiceError("SETTINGS_AUTH_FAILED")
+        raise AssertionError("unreachable")
 
     def logout(self, token: str | None) -> None:
         self._auth.revoke(token)
@@ -435,8 +450,6 @@ class SettingsService:
         resolution_failed = False
         try:
             return resolver.resolve(persisted, self._environ)
-        except SettingsServiceError:
-            raise
         except Exception:
             resolution_failed = True
         if resolution_failed:

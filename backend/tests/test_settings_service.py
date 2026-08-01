@@ -358,6 +358,30 @@ class SettingsServiceTests(unittest.TestCase):
             SessionStatus(initialized=False, authenticated=False),
         )
 
+    def test_auth_setup_change_invalidates_an_older_draft_revision(self) -> None:
+        stale = self.service.get_draft()
+        self.service.setup("long-enough-password")
+
+        with self.assertRaises(SettingsServiceError) as raised:
+            self.service.save(stale)
+
+        self.assertEqual(raised.exception.code, "SETTINGS_CONFLICT")
+
+    def test_login_auth_failure_is_context_free(self) -> None:
+        self.service.setup("long-enough-password")
+
+        def fail_login(client, password, record):
+            try:
+                raise ValueError("private auth detail")
+            except ValueError:
+                raise AuthError("authentication operation failed") from None
+
+        self.service._auth.login = fail_login
+        with self.assertRaises(SettingsServiceError) as raised:
+            self.service.login("browser", "long-enough-password")
+        self.assertEqual(raised.exception.code, "SETTINGS_AUTH_FAILED")
+        self.assertIsNone(raised.exception.__context__)
+
     def test_config_and_draft_are_secret_free(self) -> None:
         draft = self.service.get_draft()
         draft.llm.enabled = True

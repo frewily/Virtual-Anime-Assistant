@@ -320,18 +320,19 @@ class LoginTests(unittest.TestCase):
         release_verification = threading.Event()
 
         def blocking_verify(password: str, record: AuthRecord) -> bool:
-            verification_started.set()
-            release_verification.wait(timeout=2.0)
+            if password == "blocked-password":
+                verification_started.set()
+                release_verification.wait(timeout=2.0)
             return False
 
         with patch.object(
             self.service, "verify_password", side_effect=blocking_verify
         ):
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=5) as pool:
                 login_future = pool.submit(
                     self.service.login,
                     "blocked-client",
-                    "wrong-password",
+                    "blocked-password",
                     self.record,
                 )
                 self.assertTrue(verification_started.wait(timeout=1.0))
@@ -342,14 +343,27 @@ class LoginTests(unittest.TestCase):
                 revoke_future = pool.submit(
                     self.service.revoke, revoke_session.token
                 )
+                other_login_future = pool.submit(
+                    self.service.login,
+                    "other-client",
+                    "wrong-password",
+                    self.record,
+                )
                 try:
                     _, pending = wait(
-                        (create_future, get_future, revoke_future), timeout=0.5
+                        (
+                            create_future,
+                            get_future,
+                            revoke_future,
+                            other_login_future,
+                        ),
+                        timeout=0.5,
                     )
                     self.assertFalse(pending)
                     self.assertIsNotNone(create_future.result())
                     self.assertIs(get_future.result(), lookup_session)
                     self.assertIsNone(revoke_future.result())
+                    self.assertIsNone(other_login_future.result())
                 finally:
                     release_verification.set()
 
@@ -357,11 +371,6 @@ class LoginTests(unittest.TestCase):
 
     def test_concurrent_failures_record_only_five_attempts(self) -> None:
         attempts = 8
-        all_verifying = threading.Barrier(attempts)
-
-        def concurrent_failure(password: str, record: AuthRecord) -> bool:
-            all_verifying.wait(timeout=2.0)
-            return False
 
         def attempt_login(_: int) -> str:
             try:
@@ -373,14 +382,83 @@ class LoginTests(unittest.TestCase):
             self.assertIsNone(result)
             return "failed"
 
-        with patch.object(
-            self.service, "verify_password", side_effect=concurrent_failure
-        ):
+        with patch.object(self.service, "verify_password", return_value=False):
             with ThreadPoolExecutor(max_workers=attempts) as pool:
                 results = list(pool.map(attempt_login, range(attempts)))
 
         self.assertEqual(results.count("failed"), 5)
         self.assertEqual(results.count("limited"), 3)
+
+    def test_concurrent_client_enters_only_five_expensive_verifications(
+        self,
+    ) -> None:
+        attempts = 32
+        verification_count = 0
+        verification_lock = threading.Lock()
+        five_verifying = threading.Event()
+        release_verification = threading.Event()
+
+        def expensive_failure(password: str, record: AuthRecord) -> bool:
+            nonlocal verification_count
+            with verification_lock:
+                verification_count += 1
+                if verification_count == 5:
+                    five_verifying.set()
+            release_verification.wait(timeout=2.0)
+            return False
+
+        def attempt_login(_: int) -> str:
+            try:
+                result = self.service.login(
+                    "shared-expensive-client", "wrong-password", self.record
+                )
+            except LoginRateLimited:
+                return "limited"
+            self.assertIsNone(result)
+            return "failed"
+
+        with patch.object(
+            self.service, "verify_password", side_effect=expensive_failure
+        ):
+            with ThreadPoolExecutor(max_workers=attempts) as pool:
+                futures = [
+                    pool.submit(attempt_login, index) for index in range(attempts)
+                ]
+                try:
+                    self.assertTrue(five_verifying.wait(timeout=1.0))
+                    completed, pending = wait(futures, timeout=0.5)
+                    with verification_lock:
+                        observed_verifications = verification_count
+                    self.assertEqual(observed_verifications, 5)
+                    self.assertEqual(len(completed), 27)
+                    self.assertEqual(len(pending), 5)
+                finally:
+                    release_verification.set()
+
+                results = [future.result(timeout=1.0) for future in futures]
+
+        self.assertEqual(results.count("failed"), 5)
+        self.assertEqual(results.count("limited"), 27)
+
+    def test_verification_exception_releases_client_reservation(self) -> None:
+        with patch.object(
+            self.service,
+            "verify_password",
+            side_effect=RuntimeError("sanitized test failure"),
+        ):
+            for _ in range(5):
+                with self.assertRaises(RuntimeError):
+                    self.service.login(
+                        "exception-client", "wrong-password", self.record
+                    )
+
+        with patch.object(self.service, "verify_password", return_value=False):
+            self.assertIsNone(
+                self.service.login(
+                    "exception-client", "wrong-password", self.record
+                )
+            )
+        self.assertEqual(self.service._login_reservations, {})
 
     def test_expired_failures_for_all_clients_are_globally_pruned(self) -> None:
         with patch.object(self.service, "verify_password", return_value=False):

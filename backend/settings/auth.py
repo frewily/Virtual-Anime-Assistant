@@ -67,6 +67,7 @@ class SettingsAuthService:
         self._lock = threading.RLock()
         self._sessions: dict[str, Session] = {}
         self._login_failures: dict[str, deque[float]] = {}
+        self._login_reservations: dict[str, int] = {}
 
     def hash_password(self, password: str) -> AuthRecord:
         """Create a persisted scrypt record for a policy-compliant password."""
@@ -138,21 +139,28 @@ class SettingsAuthService:
         with self._lock:
             now = self._clock()
             self._prune_login_failures(now)
-            self._check_login_allowed(client)
+            self._reserve_login_verification(client)
 
-        verified = self.verify_password(password, record)
+        reservation_held = True
+        try:
+            verified = self.verify_password(password, record)
 
-        with self._lock:
-            now = self._clock()
-            self._prune_login_failures(now)
-            self._check_login_allowed(client)
-            if not verified:
-                failures = self._login_failures.setdefault(client, deque())
-                failures.append(now)
-                return None
+            with self._lock:
+                now = self._clock()
+                self._prune_login_failures(now)
+                self._release_login_reservation(client)
+                reservation_held = False
+                if not verified:
+                    failures = self._login_failures.setdefault(client, deque())
+                    failures.append(now)
+                    return None
 
-            self._login_failures.pop(client, None)
-            return self._create_session_locked(now)
+                self._login_failures.pop(client, None)
+                return self._create_session_locked(now)
+        finally:
+            if reservation_held:
+                with self._lock:
+                    self._release_login_reservation(client)
 
     def create_session(self) -> Session:
         """Create and retain a session with independently generated tokens."""
@@ -190,12 +198,31 @@ class SettingsAuthService:
         with self._lock:
             self._sessions.pop(token, None)
 
-    def _check_login_allowed(self, client: str) -> None:
-        failures = self._login_failures.get(client)
-        if failures is not None and len(failures) >= _MAX_FAILURES_PER_WINDOW:
+    def _reserve_login_verification(self, client: str) -> None:
+        failure_count = len(self._login_failures.get(client, ()))
+        reservation_count = self._login_reservations.get(client, 0)
+        if failure_count + reservation_count >= _MAX_FAILURES_PER_WINDOW:
             raise LoginRateLimited("login temporarily unavailable")
-        if failures is None and len(self._login_failures) >= _MAX_FAILURE_CLIENTS:
+        if (
+            client not in self._login_failures
+            and client not in self._login_reservations
+            and self._active_login_client_count() >= _MAX_FAILURE_CLIENTS
+        ):
             raise LoginRateLimited("login temporarily unavailable")
+        self._login_reservations[client] = reservation_count + 1
+
+    def _release_login_reservation(self, client: str) -> None:
+        remaining = self._login_reservations.get(client, 0) - 1
+        if remaining > 0:
+            self._login_reservations[client] = remaining
+        else:
+            self._login_reservations.pop(client, None)
+
+    def _active_login_client_count(self) -> int:
+        return len(self._login_failures) + sum(
+            client not in self._login_failures
+            for client in self._login_reservations
+        )
 
     def _prune_login_failures(self, now: float) -> None:
         cutoff = now - _FAILURE_WINDOW_SECONDS

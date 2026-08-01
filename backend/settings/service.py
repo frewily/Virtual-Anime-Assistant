@@ -244,6 +244,14 @@ class SettingsService:
                 # every fallible token-generation step has completed, so an error
                 # cannot leave a newly inserted session that lacks a returned token.
                 return self._auth.create_session()
+            except (KeyboardInterrupt, SystemExit):
+                try:
+                    self._transaction.save(proposed, current, {})
+                except BaseException:
+                    # Preserve the original process-control exception even when the
+                    # best-effort CAS rollback encounters a conflict or I/O failure.
+                    pass
+                raise
             except Exception:
                 try:
                     self._transaction.save(proposed, current, {})

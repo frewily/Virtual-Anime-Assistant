@@ -194,6 +194,103 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertNotIn("private", repr(raised.exception))
         self.assertIsNone(raised.exception.__cause__)
 
+    def test_setup_interrupts_roll_back_auth_and_propagate_unchanged(self) -> None:
+        for interruption in (KeyboardInterrupt, SystemExit):
+            with self.subTest(interruption=interruption.__name__):
+                with tempfile.TemporaryDirectory() as directory:
+                    paths = SettingsPaths.from_root(Path(directory))
+                    file_store = SettingsFileStore(paths)
+                    secret_store = MemorySecretStore()
+                    calls = 0
+
+                    def interrupting_random(size: int) -> bytes:
+                        nonlocal calls
+                        calls += 1
+                        if calls == 1:
+                            return b"s" * size
+                        raise interruption("private interruption")
+
+                    auth = SettingsAuthService(random_bytes=interrupting_random)
+                    service = SettingsService(
+                        paths=paths,
+                        file_store=file_store,
+                        secret_store=secret_store,
+                        auth_service=auth,
+                        voice_catalog_loader=catalog,
+                        environ={},
+                    )
+                    original = file_store.load()
+
+                    with self.assertRaises(interruption) as raised:
+                        service.setup("long-enough-password")
+
+                    self.assertEqual(str(raised.exception), "private interruption")
+                    self.assertEqual(file_store.load(), original)
+                    self.assertEqual(len(auth._sessions), 0)
+
+    def test_setup_interrupt_still_wins_when_rollback_detects_concurrent_update(self) -> None:
+        real_auth = SettingsAuthService()
+        third_party_transaction = SettingsTransactionCoordinator(
+            self.file_store, self.secret_store
+        )
+
+        class CountingTransaction:
+            def __init__(inner_self) -> None:
+                inner_self.delegate = SettingsTransactionCoordinator(
+                    self.file_store, self.secret_store
+                )
+                inner_self.save_calls = 0
+
+            def save(inner_self, current, proposed, replacements):
+                inner_self.save_calls += 1
+                return inner_self.delegate.save(current, proposed, replacements)
+
+            def recover(inner_self):
+                return inner_self.delegate.recover()
+
+        transaction = CountingTransaction()
+
+        class ConcurrentUpdateThenInterruptAuth:
+            def hash_password(inner_self, password: str):
+                return real_auth.hash_password(password)
+
+            def create_session(inner_self):
+                committed = self.file_store.load()
+                changed_llm = committed.llm.model_copy(
+                    update={"model": "third-party-model"}
+                )
+                third_party = committed.model_copy(update={"llm": changed_llm})
+                third_party_transaction.save(committed, third_party, {})
+                raise KeyboardInterrupt("private interruption")
+
+            def get_session(inner_self, token):
+                return None
+
+            def revoke(inner_self, token):
+                return None
+
+            def login(inner_self, client, password, record):
+                return None
+
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=self.secret_store,
+            transaction_coordinator=transaction,
+            auth_service=ConcurrentUpdateThenInterruptAuth(),
+            voice_catalog_loader=catalog,
+            environ={},
+        )
+
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            service.setup("long-enough-password")
+
+        self.assertEqual(str(raised.exception), "private interruption")
+        self.assertEqual(transaction.save_calls, 2)
+        stored = self.file_store.load()
+        self.assertIsNotNone(stored.auth)
+        self.assertEqual(stored.llm.model, "third-party-model")
+
     def test_concurrent_setup_has_single_winner(self) -> None:
         other = SettingsService(
             paths=self.paths,

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import json
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, Self
 from urllib.parse import urlsplit
 
 import httpx
@@ -73,13 +73,68 @@ class SettingsDraft(_StrictRequestModel):
     tts: TTSSettingsDraft = Field(default_factory=TTSSettingsDraft)
 
 
+class _ValidatedModel(_StrictRequestModel):
+    model_config = ConfigDict(
+        **_StrictRequestModel.model_config,
+        frozen=True,
+    )
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, object] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        if update:
+            raise TypeError("validated settings snapshots cannot be updated")
+        return super().model_copy(deep=True)
+
+
+class ValidatedSecretMutation(_ValidatedModel):
+    operation: SecretOperation
+
+
+class ValidatedLLMSettings(_ValidatedModel):
+    enabled: bool
+    base_url: str | None
+    model: str | None
+    timeout_seconds: int
+    max_context_messages: int
+    max_context_chars: int
+    tool_calling_enabled: bool
+    api_key: ValidatedSecretMutation
+
+
+class ValidatedQQSettings(_ValidatedModel):
+    enabled: bool
+    allowed_group_ids: tuple[int, ...]
+    allowed_user_ids: tuple[int, ...]
+    rate_per_minute: int
+    rate_burst: int
+    max_concurrency: int
+    action_timeout_seconds: int
+    access_token: ValidatedSecretMutation
+
+
+class ValidatedTTSSettings(_ValidatedModel):
+    gpt_sovits_url: str
+    default_voice_id: str
+    audio_max_age_seconds: int
+
+
+class ValidatedSettingsSnapshot(_ValidatedModel):
+    llm: ValidatedLLMSettings
+    qq: ValidatedQQSettings
+    tts: ValidatedTTSSettings
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedDraft:
     """Validated draft plus effective secret presence, without public plaintext."""
 
-    draft: SettingsDraft
+    draft: ValidatedSettingsSnapshot
     secret_configured: Mapping[str, bool]
-    _secret_values: Mapping[str, SecretStr | None] = field(repr=False)
+    _secret_values: Mapping[str, str | None] = field(repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -96,7 +151,8 @@ class ValidatedDraft:
     def effective_secret(self, field_path: str) -> SecretStr | None:
         """Return an effective secret for an in-memory probe or save transaction."""
 
-        return self._secret_values.get(field_path)
+        value = self._secret_values.get(field_path)
+        return SecretStr(value) if value is not None else None
 
 
 class SettingsValidationError(ValueError):
@@ -181,6 +237,30 @@ class QQConnectionTestResult(ConnectionTestResult):
 
 class TTSTestRequest(_StrictRequestModel):
     gpt_sovits_url: str
+
+
+class _NetworkClassifyingTransport(httpx.AsyncBaseTransport):
+    """Track only a safe failure category hidden by the existing gateway."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport):
+        self._inner = inner
+        self.unreachable = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._inner.handle_async_request(request)
+        except httpx.TimeoutException:
+            raise
+        except (httpx.RequestError, OSError):
+            self.unreachable = True
+            raise
+
+    async def aclose(self) -> None:
+        try:
+            await self._inner.aclose()
+        except (httpx.RequestError, OSError):
+            self.unreachable = True
+            raise
 
 
 _FIELD_MESSAGE = "配置值无效"
@@ -288,9 +368,16 @@ class SettingsValidationService:
         if errors:
             raise SettingsValidationError(errors) from None
         return ValidatedDraft(
-            draft=draft.model_copy(deep=True),
+            draft=_validated_snapshot(draft),
             secret_configured=secret_configured,
-            _secret_values=secret_values,
+            _secret_values={
+                path: (
+                    secret.get_secret_value()
+                    if secret is not None
+                    else None
+                )
+                for path, secret in secret_values.items()
+            },
         )
 
     async def test_llm(
@@ -319,8 +406,14 @@ class SettingsValidationService:
             max_context_chars=4000,
             tool_calling_enabled=False,
         )
+        classified_transport = _NetworkClassifyingTransport(
+            transport if transport is not None else httpx.AsyncHTTPTransport()
+        )
         try:
-            gateway = OpenAICompatibleGateway(settings, transport=transport)
+            gateway = OpenAICompatibleGateway(
+                settings,
+                transport=classified_transport,
+            )
             await asyncio.wait_for(
                 gateway.complete(
                     ModelRequest(
@@ -342,10 +435,10 @@ class SettingsValidationService:
             return _result(ConnectionTestCode.TIMED_OUT)
         except ModelProtocolError:
             return _result(ConnectionTestCode.INCOMPATIBLE_RESPONSE)
-        except ModelServiceError as exc:
+        except ModelServiceError:
             code = (
                 ConnectionTestCode.UNREACHABLE
-                if str(exc) == "model service request failed"
+                if classified_transport.unreachable
                 else ConnectionTestCode.SERVICE_ERROR
             )
             return _result(code)
@@ -393,10 +486,8 @@ class SettingsValidationService:
                 code=ConnectionTestCode.VALIDATION_FAILED,
             )
         try:
-            status = (
-                current_status
-                if isinstance(current_status, QQRuntimeStatus)
-                else QQRuntimeStatus.model_validate(current_status)
+            status = QQRuntimeStatus.model_validate(
+                _controlled_status_payload(current_status)
             )
         except (ValidationError, TypeError, ValueError):
             return QQConnectionTestResult(
@@ -428,8 +519,18 @@ class SettingsValidationService:
                     transport=transport,
                 ) as client:
                     for path in ("/openapi.json", "/"):
-                        response = await client.get(origin.copy_with(path=path))
-                        if 200 <= response.status_code < 400:
+                        response = await client.send(
+                            client.build_request(
+                                "GET",
+                                origin.copy_with(path=path),
+                            ),
+                            stream=True,
+                        )
+                        try:
+                            success = 200 <= response.status_code < 400
+                        finally:
+                            await response.aclose()
+                        if success:
                             return True
                     return False
 
@@ -482,7 +583,10 @@ def _valid_qq_token(value: SecretStr | None) -> bool:
 def _is_safe_http_url(value: object) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
-    if "\\" in value or any(ord(character) <= 32 for character in value):
+    if "\\" in value or "?" in value or "#" in value or any(
+        ord(character) <= 32 or ord(character) == 127
+        for character in value
+    ):
         return False
     try:
         parsed = urlsplit(value)
@@ -494,7 +598,68 @@ def _is_safe_http_url(value: object) -> bool:
         and parsed.hostname is not None
         and parsed.username is None
         and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
     )
+
+
+def _validated_snapshot(draft: SettingsDraft) -> ValidatedSettingsSnapshot:
+    return ValidatedSettingsSnapshot(
+        llm=ValidatedLLMSettings(
+            enabled=draft.llm.enabled,
+            base_url=draft.llm.base_url,
+            model=draft.llm.model,
+            timeout_seconds=draft.llm.timeout_seconds,
+            max_context_messages=draft.llm.max_context_messages,
+            max_context_chars=draft.llm.max_context_chars,
+            tool_calling_enabled=draft.llm.tool_calling_enabled,
+            api_key=ValidatedSecretMutation(operation=draft.llm.api_key.operation),
+        ),
+        qq=ValidatedQQSettings(
+            enabled=draft.qq.enabled,
+            allowed_group_ids=tuple(draft.qq.allowed_group_ids),
+            allowed_user_ids=tuple(draft.qq.allowed_user_ids),
+            rate_per_minute=draft.qq.rate_per_minute,
+            rate_burst=draft.qq.rate_burst,
+            max_concurrency=draft.qq.max_concurrency,
+            action_timeout_seconds=draft.qq.action_timeout_seconds,
+            access_token=ValidatedSecretMutation(
+                operation=draft.qq.access_token.operation
+            ),
+        ),
+        tts=ValidatedTTSSettings(
+            gpt_sovits_url=draft.tts.gpt_sovits_url,
+            default_voice_id=draft.tts.default_voice_id,
+            audio_max_age_seconds=draft.tts.audio_max_age_seconds,
+        ),
+    )
+
+
+def _controlled_status_payload(
+    status: QQRuntimeStatus | Mapping[str, object],
+) -> dict[str, object]:
+    if isinstance(status, QQRuntimeStatus):
+        dumped = status.model_dump(mode="python", warnings="none")
+    elif isinstance(status, Mapping):
+        dumped = dict(status)
+    else:
+        raise TypeError("invalid QQ runtime status")
+
+    def field_value(name: str, alias: str) -> object:
+        return dumped.get(name, dumped.get(alias))
+
+    return {
+        "enabled": field_value("enabled", "enabled"),
+        "state": field_value("state", "state"),
+        "allowed_group_count": field_value(
+            "allowed_group_count",
+            "allowedGroupCount",
+        ),
+        "allowed_user_count": field_value(
+            "allowed_user_count",
+            "allowedUserCount",
+        ),
+    }
 
 
 def _bounded(
@@ -535,4 +700,9 @@ __all__ = [
     "TTSSettingsDraft",
     "TTSTestRequest",
     "ValidatedDraft",
+    "ValidatedLLMSettings",
+    "ValidatedQQSettings",
+    "ValidatedSecretMutation",
+    "ValidatedSettingsSnapshot",
+    "ValidatedTTSSettings",
 ]

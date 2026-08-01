@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -25,6 +26,32 @@ from settings.validation import (
     TTSSettingsDraft,
     TTSTestRequest,
 )
+from llm.errors import ModelServiceError
+
+
+class UnreadBodyStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.iterated = False
+        self.closed = False
+
+    async def __aiter__(self):
+        self.iterated = True
+        yield b"x" * (4 * 1024 * 1024)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class CloseTrackingTransport(httpx.AsyncBaseTransport):
+    def __init__(self, handler) -> None:
+        self._handler = handler
+        self.close_count = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return self._handler(request)
+
+    async def aclose(self) -> None:
+        self.close_count += 1
 
 
 def voice_catalog() -> VoiceCatalog:
@@ -91,15 +118,45 @@ class SettingsValidationTests(unittest.TestCase):
         self.assertTrue(validated.secret_configured["llm.apiKey"])
         self.assertNotIn("stored-test-key", repr(validated))
 
-    def test_validated_draft_is_isolated_from_the_mutable_request(self) -> None:
+    def test_validated_draft_is_deeply_immutable(self) -> None:
         draft = valid_draft(
+            llm=LLMSettingsDraft(
+                api_key=SecretMutation(operation="replace", value="original-key")
+            ),
             qq=QQSettingsDraft(allowed_group_ids=[10001]),
         )
 
         validated = self.service.validate(draft, {})
         draft.qq.allowed_group_ids.append(20002)
 
-        self.assertEqual(validated.draft.qq.allowed_group_ids, [10001])
+        self.assertEqual(validated.draft.qq.allowed_group_ids, (10001,))
+        with self.assertRaises((AttributeError, TypeError, ValueError)):
+            validated.draft.qq.enabled = True
+        with self.assertRaises(AttributeError):
+            validated.draft.qq.allowed_group_ids.append(-1)
+        with self.assertRaises(TypeError):
+            validated.draft.qq.model_copy(update={"allowed_group_ids": (-1,)})
+        with self.assertRaises(TypeError):
+            validated.draft.model_copy(
+                update={"tts": {"default_voice_id": "missing"}}
+            )
+        with self.assertRaises(TypeError):
+            validated.secret_configured["llm.apiKey"] = False
+
+        exposed_secret = validated.effective_secret("llm.apiKey")
+        self.assertIsNotNone(exposed_secret)
+        object.__setattr__(exposed_secret, "_secret_value", "changed-key")
+
+        self.assertFalse(validated.draft.qq.enabled)
+        self.assertEqual(validated.draft.qq.allowed_group_ids, (10001,))
+        self.assertEqual(validated.draft.tts.default_voice_id, "character_001")
+        self.assertEqual(
+            validated.effective_secret("llm.apiKey").get_secret_value(),
+            "original-key",
+        )
+        serialized = validated.draft.model_dump_json(by_alias=True)
+        self.assertNotIn("original-key", serialized)
+        self.assertIn('"allowedGroupIds":[10001]', serialized)
 
     def test_delete_and_blank_replacement_are_not_effective_secrets(self) -> None:
         for mutation in (
@@ -161,6 +218,49 @@ class SettingsValidationTests(unittest.TestCase):
                     draft = valid_draft(
                         tts=TTSSettingsDraft(gpt_sovits_url=url)
                     )
+                self.assert_field_errors(draft, {field})
+
+    def test_urls_reject_query_fragment_and_all_control_characters(self) -> None:
+        cases = (
+            (
+                valid_draft(
+                    llm=LLMSettingsDraft(base_url="https://example.test/v1?q=x")
+                ),
+                "llm.baseUrl",
+            ),
+            (
+                valid_draft(
+                    tts=TTSSettingsDraft(
+                        gpt_sovits_url="https://example.test/#fragment"
+                    )
+                ),
+                "tts.gptSovitsUrl",
+            ),
+            (
+                valid_draft(
+                    tts=TTSSettingsDraft(
+                        gpt_sovits_url="https://example.test/\x7fpath"
+                    )
+                ),
+                "tts.gptSovitsUrl",
+            ),
+            (
+                valid_draft(
+                    llm=LLMSettingsDraft(base_url="https://example.test/v1?")
+                ),
+                "llm.baseUrl",
+            ),
+            (
+                valid_draft(
+                    tts=TTSSettingsDraft(
+                        gpt_sovits_url="https://example.test/#"
+                    )
+                ),
+                "tts.gptSovitsUrl",
+            ),
+        )
+        for draft, field in cases:
+            with self.subTest(field=field):
                 self.assert_field_errors(draft, {field})
 
     def test_qq_enabled_requires_token_and_an_allowlist(self) -> None:
@@ -273,6 +373,7 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(request: httpx.Request) -> httpx.Response:
             observed["url"] = str(request.url)
+            observed["path"] = request.url.path
             observed["authorization"] = request.headers.get("authorization")
             observed["payload"] = json.loads(request.content)
             return httpx.Response(
@@ -295,6 +396,7 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.code, ConnectionTestCode.SUCCESS)
         self.assertEqual(observed["url"], "https://example.test/v1/chat/completions")
+        self.assertEqual(observed["path"], "/v1/chat/completions")
         self.assertEqual(observed["authorization"], "Bearer temporary-test-key")
         payload = observed["payload"]
         self.assertEqual(payload["max_tokens"], 1)
@@ -305,7 +407,7 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         test_key = "VERY-PRIVATE-TEST-KEY"
         result = await self.service.test_llm(
             LLMTestRequest(
-                base_url="https://example.test/v1?private=query",
+                base_url="https://example.test/v1",
                 model="tiny-model",
                 api_key=test_key,
             ),
@@ -321,7 +423,6 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.code, ConnectionTestCode.AUTHENTICATION_FAILED)
         serialized = result.model_dump_json(by_alias=True)
         self.assertNotIn(test_key, serialized)
-        self.assertNotIn("query", serialized)
 
     async def test_llm_transport_failures_are_stably_classified(self) -> None:
         async def run(exception: Exception):
@@ -367,6 +468,22 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.code, ConnectionTestCode.SERVICE_ERROR)
         self.assertNotIn("private", result.model_dump_json())
 
+    async def test_llm_service_classification_does_not_parse_error_text(self) -> None:
+        with patch(
+            "settings.validation.OpenAICompatibleGateway.complete",
+            new=AsyncMock(side_effect=ModelServiceError("private localized text")),
+        ):
+            result = await self.service.test_llm(
+                LLMTestRequest(
+                    base_url="https://example.test/v1",
+                    model="model",
+                    api_key="test-key",
+                )
+            )
+
+        self.assertEqual(result.code, ConnectionTestCode.SERVICE_ERROR)
+        self.assertNotIn("private", result.model_dump_json())
+
     async def test_tts_falls_back_from_openapi_404_to_root_204(self) -> None:
         paths: list[str] = []
 
@@ -397,6 +514,25 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(methods_and_paths, [("GET", "/openapi.json")])
 
+    async def test_tts_never_reads_probe_response_bodies(self) -> None:
+        streams: list[UnreadBodyStream] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            stream = UnreadBodyStream()
+            streams.append(stream)
+            status = 404 if request.url.path == "/openapi.json" else 204
+            return httpx.Response(status, stream=stream)
+
+        result = await self.service.test_tts(
+            TTSTestRequest(gpt_sovits_url="http://127.0.0.1:9880"),
+            transport=httpx.MockTransport(handler),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(len(streams), 2)
+        self.assertTrue(all(stream.closed for stream in streams))
+        self.assertFalse(any(stream.iterated for stream in streams))
+
     async def test_tts_transport_errors_are_redacted(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError(
@@ -405,12 +541,37 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         result = await self.service.test_tts(
-            TTSTestRequest(gpt_sovits_url="https://example.test?token=secret"),
+            TTSTestRequest(gpt_sovits_url="https://example.test"),
             transport=httpx.MockTransport(handler),
         )
 
         self.assertEqual(result.code, ConnectionTestCode.UNREACHABLE)
         self.assertNotIn("secret", result.model_dump_json())
+
+    async def test_probe_clients_close_injected_transports(self) -> None:
+        llm_transport = CloseTrackingTransport(
+            lambda _: httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}}]},
+            )
+        )
+        tts_transport = CloseTrackingTransport(lambda _: httpx.Response(204))
+
+        await self.service.test_llm(
+            LLMTestRequest(
+                base_url="https://example.test/v1",
+                model="model",
+                api_key="test-key",
+            ),
+            transport=llm_transport,
+        )
+        await self.service.test_tts(
+            TTSTestRequest(gpt_sovits_url="https://example.test"),
+            transport=tts_transport,
+        )
+
+        self.assertEqual(llm_transport.close_count, 1)
+        self.assertEqual(tts_transport.close_count, 1)
 
     async def test_qq_only_returns_injected_current_runtime_status(self) -> None:
         request = QQTestRequest(
@@ -447,6 +608,39 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.code, ConnectionTestCode.SERVICE_ERROR)
         self.assertNotIn("private", result.model_dump_json())
+
+    async def test_qq_revalidates_forged_runtime_status_instances(self) -> None:
+        valid = QQRuntimeStatus(
+            enabled=True,
+            state="connected",
+            allowed_group_count=1,
+            allowed_user_count=0,
+        )
+        forged_statuses = (
+            QQRuntimeStatus.model_construct(
+                enabled=True,
+                state="private-constructed-state",
+                allowed_group_count=-1,
+                allowed_user_count=0,
+            ),
+            valid.model_copy(
+                update={
+                    "state": "private-copied-state",
+                    "allowed_group_count": -1,
+                }
+            ),
+        )
+
+        for status in forged_statuses:
+            with self.subTest(state=status.state):
+                result = await self.service.test_qq(
+                    QQTestRequest(enabled=False),
+                    status,
+                )
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.code, ConnectionTestCode.SERVICE_ERROR)
+                self.assertNotIn("private", result.model_dump_json())
 
     async def test_cancelled_probes_are_not_swallowed(self) -> None:
         async def blocking(_: httpx.Request) -> httpx.Response:

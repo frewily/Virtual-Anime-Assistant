@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import traceback
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,28 @@ from settings.paths import SettingsPaths
 class SettingsFileStoreTests(unittest.TestCase):
     def make_store(self, root: Path) -> SettingsFileStore:
         return SettingsFileStore(SettingsPaths.from_root(root))
+
+    def assert_error_chain_does_not_contain(
+        self, error: BaseException, secret: str
+    ) -> None:
+        self.assertNotIn(secret, str(error))
+        self.assertNotIn(secret, repr(error))
+        self.assertNotIn(secret, "".join(traceback.format_exception(error)))
+
+        pending = [error]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            self.assertNotIn(secret, str(current))
+            self.assertNotIn(secret, repr(current))
+            pending.extend(
+                candidate
+                for candidate in (current.__cause__, current.__context__)
+                if candidate is not None
+            )
 
     def test_load_from_empty_directory_returns_defaults_without_creating_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -60,6 +83,22 @@ class SettingsFileStoreTests(unittest.TestCase):
 
                 self.assertEqual(store.paths.settings_file.read_bytes(), payload)
 
+    def test_invalid_settings_payload_is_not_retained_in_error_chain(self) -> None:
+        secret = "private-sentinel"
+        payload = (
+            b'{"schemaVersion":1,"llm":{"enabled":true,'
+            b'"unexpected":"private-sentinel"}}'
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self.make_store(Path(temporary_directory))
+            store.paths.settings_file.write_bytes(payload)
+
+            with self.assertRaises(SettingsFileError) as raised:
+                store.load()
+
+            self.assert_error_chain_does_not_contain(raised.exception, secret)
+
     def test_failed_replace_preserves_existing_settings_and_cleans_temp_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             store = self.make_store(Path(temporary_directory))
@@ -72,7 +111,10 @@ class SettingsFileStoreTests(unittest.TestCase):
                     store.save(replacement)
 
             self.assertEqual(store.load(), original)
-            self.assertEqual(list(store.paths.root.glob("settings.json.*")), [])
+            self.assertEqual(
+                sorted(entry.name for entry in store.paths.root.iterdir()),
+                ["settings.json"],
+            )
 
     def test_journal_round_trip_and_delete_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -93,6 +135,7 @@ class SettingsFileStoreTests(unittest.TestCase):
     def test_invalid_journals_raise_settings_file_error(self) -> None:
         invalid_payloads = (
             b"{not json",
+            b'{"schemaVersion":99,"transactionId":"save-123","oldRefs":[],"newRefs":[]}',
             b'{"schemaVersion":1,"transactionId":"save-123","oldRefs":[],"newRefs":[],"extra":true}',
         )
 
@@ -104,6 +147,24 @@ class SettingsFileStoreTests(unittest.TestCase):
                 with self.assertRaises(SettingsFileError):
                     store.read_journal()
 
+                self.assertEqual(store.paths.journal_file.read_bytes(), payload)
+
+    def test_invalid_journal_payload_is_not_retained_in_error_chain(self) -> None:
+        secret = "private-sentinel"
+        payload = (
+            b'{"schemaVersion":1,"transactionId":"save-123",'
+            b'"oldRefs":[],"newRefs":[],"unexpected":"private-sentinel"}'
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self.make_store(Path(temporary_directory))
+            store.paths.journal_file.write_bytes(payload)
+
+            with self.assertRaises(SettingsFileError) as raised:
+                store.read_journal()
+
+            self.assert_error_chain_does_not_contain(raised.exception, secret)
+
     def test_successful_atomic_writes_leave_no_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             store = self.make_store(Path(temporary_directory))
@@ -114,8 +175,8 @@ class SettingsFileStoreTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                [entry for entry in store.paths.root.iterdir() if entry.name.startswith(".")],
-                [],
+                sorted(entry.name for entry in store.paths.root.iterdir()),
+                ["settings.json", "settings.save-journal.json"],
             )
 
 

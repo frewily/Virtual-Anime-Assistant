@@ -105,6 +105,17 @@ class SaveResult(_ResponseModel):
     restart_required: bool
 
 
+class SettingsConfigSnapshot(_ResponseModel):
+    """Presentation and editable draft derived from one persisted snapshot."""
+
+    presentation: SettingsPresentation
+    draft: VersionedSettingsDraft
+
+
+class SettingsSaveSnapshot(SettingsConfigSnapshot):
+    restart_required: bool
+
+
 class VoiceSummary(_ResponseModel):
     id: str
     name: str
@@ -376,6 +387,12 @@ class SettingsService:
     def get_draft(self) -> VersionedSettingsDraft:
         return self._draft_from_persisted(self._load_settings())
 
+    def get_config_snapshot(self) -> SettingsConfigSnapshot:
+        """Return presentation and draft from exactly one disk snapshot."""
+
+        with _LIFECYCLE_LOCK:
+            return self._config_snapshot_from_persisted(self._load_settings())
+
     def get_voices(self) -> list[VoiceSummary]:
         catalog = self._load_voice_catalog()
         summaries: list[VoiceSummary] | None = None
@@ -398,35 +415,22 @@ class SettingsService:
         """Validate and atomically persist a complete browser draft."""
 
         with _LIFECYCLE_LOCK:
-            current = self._load_settings()
-            snapshot = self._snapshot_draft(draft)
-            if (
-                snapshot is None
-                or not self._valid_revision(snapshot.revision)
-                or not hmac.compare_digest(snapshot.revision, self._revision(current))
-            ):
-                raise SettingsServiceError("SETTINGS_CONFLICT")
-            self._reject_environment_mutations(snapshot, current)
+            result, _ = self._save_locked(draft)
+            return result
 
-            catalog = self._load_voice_catalog()
-            validation = SettingsValidationService(catalog)
-            validated = validation.validate(
-                snapshot,
-                self._existing_secrets_for_validation(snapshot, current),
+    def save_with_snapshot(
+        self, draft: VersionedSettingsDraft
+    ) -> SettingsSaveSnapshot:
+        """Save and return a response derived from the committed proposal."""
+
+        with _LIFECYCLE_LOCK:
+            result, proposed = self._save_locked(draft)
+            snapshot = self._config_snapshot_from_persisted(proposed)
+            return SettingsSaveSnapshot(
+                restart_required=result.restart_required,
+                presentation=snapshot.presentation,
+                draft=snapshot.draft,
             )
-            proposed = self._proposed_settings(current, validated.draft)
-            replacements = self._replacement_values(validated)
-            transaction_failed = False
-            try:
-                try:
-                    self._transaction.save(current, proposed, replacements)
-                except SettingsTransactionError:
-                    transaction_failed = True
-            finally:
-                replacements.clear()
-            if transaction_failed:
-                raise SettingsServiceError("SETTINGS_SAVE_FAILED")
-            return SaveResult(restart_required=True)
 
     async def test_llm(
         self,
@@ -464,6 +468,47 @@ class SettingsService:
         if load_failed:
             raise SettingsServiceError("SETTINGS_FILE_INVALID")
         raise AssertionError("unreachable")
+
+    def _save_locked(
+        self, draft: VersionedSettingsDraft
+    ) -> tuple[SaveResult, PersistedSettings]:
+        current = self._load_settings()
+        snapshot = self._snapshot_draft(draft)
+        if (
+            snapshot is None
+            or not self._valid_revision(snapshot.revision)
+            or not hmac.compare_digest(snapshot.revision, self._revision(current))
+        ):
+            raise SettingsServiceError("SETTINGS_CONFLICT")
+        self._reject_environment_mutations(snapshot, current)
+
+        catalog = self._load_voice_catalog()
+        validation = SettingsValidationService(catalog)
+        validated = validation.validate(
+            snapshot,
+            self._existing_secrets_for_validation(snapshot, current),
+        )
+        proposed = self._proposed_settings(current, validated.draft)
+        replacements = self._replacement_values(validated)
+        transaction_failed = False
+        try:
+            try:
+                self._transaction.save(current, proposed, replacements)
+            except SettingsTransactionError:
+                transaction_failed = True
+        finally:
+            replacements.clear()
+        if transaction_failed:
+            raise SettingsServiceError("SETTINGS_SAVE_FAILED")
+        return SaveResult(restart_required=True), proposed
+
+    def _config_snapshot_from_persisted(
+        self, persisted: PersistedSettings
+    ) -> SettingsConfigSnapshot:
+        return SettingsConfigSnapshot(
+            presentation=self._resolve(persisted).presentation,
+            draft=self._draft_from_persisted(persisted),
+        )
 
     def _resolve(self, persisted: PersistedSettings) -> ResolvedSettings:
         return self._resolve_with(self._resolver, persisted)
@@ -705,6 +750,8 @@ def create_settings_service(paths: SettingsPaths | None = None) -> SettingsServi
 
 __all__ = [
     "SaveResult",
+    "SettingsConfigSnapshot",
+    "SettingsSaveSnapshot",
     "SessionStatus",
     "SettingsService",
     "SettingsServiceError",

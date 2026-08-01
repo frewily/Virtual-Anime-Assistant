@@ -70,6 +70,9 @@ class SettingsSecurityMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "websocket" and is_settings_path(scope.get("path")):
+            await send({"type": "websocket.close", "code": 1008})
+            return
         if scope["type"] != "http" or not is_settings_path(scope.get("path")):
             await self.app(scope, receive, send)
             return

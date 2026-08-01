@@ -135,13 +135,19 @@ def logout(
 ):
     service.logout(request.cookies.get(SETTINGS_SESSION_COOKIE))
     response = _response({"ok": True})
-    response.delete_cookie(SETTINGS_SESSION_COOKIE, path="/")
+    response.delete_cookie(
+        SETTINGS_SESSION_COOKIE,
+        path="/",
+        secure=False,
+        httponly=True,
+        samesite="strict",
+    )
     return response
 
 
 @router.get("/config")
 def get_config(service: SettingsService = Depends(_require_auth)):
-    return {"presentation": service.get_config(), "draft": service.get_draft()}
+    return service.get_config_snapshot()
 
 
 @router.put("/config")
@@ -149,12 +155,7 @@ def save_config(
     draft: VersionedSettingsDraft,
     service: SettingsService = Depends(_require_write_auth),
 ):
-    result = service.save(draft)
-    return {
-        "restartRequired": result.restart_required,
-        "presentation": service.get_config(),
-        "draft": service.get_draft(),
-    }
+    return service.save_with_snapshot(draft)
 
 
 @router.get("/voices")

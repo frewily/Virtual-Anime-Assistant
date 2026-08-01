@@ -4,6 +4,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
+import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -13,8 +15,18 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.app import create_app
+from core.config_loader import VoiceCatalog
 from settings.auth import LoginRateLimited, PasswordPolicyError, Session
-from settings.service import SaveResult, SettingsServiceError, VersionedSettingsDraft
+from settings.file_store import SettingsFileStore
+from settings.models import PersistedSettings
+from settings.paths import SettingsPaths
+from settings.resolver import SettingsResolver
+from settings.security import SettingsSecurityMiddleware
+from settings.service import (
+    SaveResult,
+    SettingsServiceError,
+    VersionedSettingsDraft,
+)
 from settings.validation import (
     ConnectionTestCode,
     ConnectionTestResult,
@@ -119,9 +131,21 @@ class FakeSettingsService:
     def get_draft(self):
         return self.draft
 
+    def get_config_snapshot(self):
+        self.calls.append(("get_config_snapshot", None))
+        return {"presentation": self.presentation, "draft": self.draft}
+
     def save(self, draft):
         self.calls.append(("save", draft))
         return SaveResult(restart_required=True)
+
+    def save_with_snapshot(self, draft):
+        self.calls.append(("save_with_snapshot", draft))
+        return {
+            "restartRequired": True,
+            "presentation": self.presentation,
+            "draft": self.draft,
+        }
 
     def get_voices(self):
         return [{"id": "character_001", "name": "默认音色", "description": "温柔"}]
@@ -279,7 +303,12 @@ class SettingsApiTests(unittest.TestCase):
         )
         self.assertEqual(logout.status_code, 200)
         self.assertIn(f"{COOKIE_NAME}=", logout.headers["set-cookie"])
-        self.assertIn("Path=/", logout.headers["set-cookie"])
+        logout_cookie = logout.headers["set-cookie"]
+        self.assertIn("Path=/", logout_cookie)
+        self.assertIn("HttpOnly", logout_cookie)
+        self.assertIn("SameSite=strict", logout_cookie)
+        self.assertNotIn("Domain=", logout_cookie)
+        self.assertNotIn("Secure", logout_cookie)
 
         login = self.client.post(
             "/api/settings/login",
@@ -324,6 +353,7 @@ class SettingsApiTests(unittest.TestCase):
         self.assertEqual(fetched.status_code, 200)
         self.assertEqual(fetched.json()["draft"]["revision"], "a" * 64)
         self.assertIsNone(fetched.json()["presentation"]["fields"]["llm.apiKey"]["value"])
+        self.assertEqual(self.service.calls[-1][0], "get_config_snapshot")
 
         saved = self.client.put(
             "/api/settings/config", headers=headers, json=draft_payload()
@@ -331,7 +361,7 @@ class SettingsApiTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200)
         self.assertTrue(saved.json()["restartRequired"])
         self.assertEqual(saved.json()["draft"]["revision"], "a" * 64)
-        self.assertEqual(self.service.calls[-1][0], "save")
+        self.assertEqual(self.service.calls[-1][0], "save_with_snapshot")
 
     def test_voices_and_connection_tests_delegate_under_authentication(self) -> None:
         headers = self._authenticated()
@@ -423,7 +453,7 @@ class SettingsApiTests(unittest.TestCase):
             (SettingsServiceError("KEYCHAIN_UNAVAILABLE"), 503, "KEYCHAIN_UNAVAILABLE"),
         )
         for error, status, code in cases:
-            self.service.save = Mock(side_effect=error)
+            self.service.save_with_snapshot = Mock(side_effect=error)
             response = self.client.put(
                 "/api/settings/config", headers=headers, json=draft_payload()
             )
@@ -433,7 +463,7 @@ class SettingsApiTests(unittest.TestCase):
 
     def test_unexpected_settings_failure_is_sanitized_with_security_headers(self) -> None:
         self._authenticated()
-        self.service.get_config = Mock(
+        self.service.get_config_snapshot = Mock(
             side_effect=RuntimeError("private path and private-token")
         )
 
@@ -526,6 +556,197 @@ class SettingsApiFactoryTests(unittest.TestCase):
         )
         auth.get_session.side_effect = RuntimeError("private-token")
         self.assertEqual(service.authorize("private-token"), (False, False))
+
+
+class SettingsApiAtomicSnapshotTests(unittest.TestCase):
+    @staticmethod
+    def _catalog():
+        return VoiceCatalog(
+            voices=(
+                {
+                    "id": "character_001",
+                    "name": "默认音色",
+                    "description": "温柔",
+                },
+            ),
+            default_voice="character_001",
+            fallback_voice="character_001",
+        )
+
+    def test_real_service_snapshot_never_mixes_concurrent_file_versions(self) -> None:
+        from settings.service import SettingsService
+
+        class NullSecrets:
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return "private-secret-value"
+
+            def set(self, reference, value):
+                raise AssertionError("unexpected secret write")
+
+            def delete(self, reference):
+                raise AssertionError("unexpected secret delete")
+
+        entered = threading.Event()
+        release = threading.Event()
+        delegate = SettingsResolver(NullSecrets())
+
+        class BlockingResolver:
+            def resolve(self, persisted, environ=None):
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise AssertionError("snapshot barrier timed out")
+                return delegate.resolve(persisted, environ)
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            file_store = SettingsFileStore(paths)
+            initial = PersistedSettings(
+                llm={
+                    "model": "model-before",
+                    "apiKeyRef": "private-reference",
+                },
+            )
+            changed = PersistedSettings(
+                llm={"model": "model-after"},
+            )
+            file_store.save(initial)
+            service = SettingsService(
+                paths=paths,
+                file_store=file_store,
+                secret_store=NullSecrets(),
+                resolver=BlockingResolver(),
+                voice_catalog_loader=self._catalog,
+                environ={},
+            )
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(service.get_config_snapshot)
+                self.assertTrue(entered.wait(timeout=5))
+                file_store.save(changed)
+                release.set()
+                snapshot = future.result(timeout=5)
+
+        self.assertEqual(snapshot.draft.llm.model, "model-before")
+        self.assertEqual(
+            snapshot.presentation.fields["llm.model"].value,
+            "model-before",
+        )
+        self.assertEqual(
+            snapshot.draft.revision,
+            SettingsService._revision(initial),
+        )
+        serialized = snapshot.model_dump_json(by_alias=True)
+        self.assertNotIn("private-secret-value", serialized)
+        self.assertNotIn("private-reference", serialized)
+
+    def test_real_service_save_response_uses_committed_proposal_atomically(self) -> None:
+        from settings.service import SettingsService
+
+        class NullSecrets:
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return None
+
+            def set(self, reference, value):
+                raise AssertionError("unexpected secret write")
+
+            def delete(self, reference):
+                return None
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            file_store = SettingsFileStore(paths)
+            secrets = NullSecrets()
+            service = SettingsService(
+                paths=paths,
+                file_store=file_store,
+                secret_store=secrets,
+                voice_catalog_loader=self._catalog,
+                environ={},
+            )
+            draft = service.get_draft()
+            draft.llm.model = "model-submitted"
+            delegate = SettingsResolver(secrets)
+
+            class BlockingResolver:
+                def resolve(self, persisted, environ=None):
+                    entered.set()
+                    if not release.wait(timeout=5):
+                        raise AssertionError("save response barrier timed out")
+                    return delegate.resolve(persisted, environ)
+
+            service._resolver = BlockingResolver()
+            external = PersistedSettings(llm={"model": "model-external"})
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(service.save_with_snapshot, draft)
+                self.assertTrue(entered.wait(timeout=5))
+                file_store.save(external)
+                release.set()
+                response = future.result(timeout=5)
+
+        committed = PersistedSettings(llm={"model": "model-submitted"})
+        self.assertTrue(response.restart_required)
+        self.assertEqual(response.draft.llm.model, "model-submitted")
+        self.assertEqual(
+            response.presentation.fields["llm.model"].value,
+            "model-submitted",
+        )
+        self.assertEqual(
+            response.draft.revision,
+            SettingsService._revision(committed),
+        )
+
+
+class SettingsSecurityAsgiTests(unittest.IsolatedAsyncioTestCase):
+    async def _invoke(self, scope):
+        downstream_scopes = []
+        sent = []
+
+        async def downstream(inner_scope, receive, send):
+            downstream_scopes.append(inner_scope)
+
+        async def receive():
+            return {"type": "websocket.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        middleware = SettingsSecurityMiddleware(downstream)
+        await middleware(scope, receive, send)
+        return downstream_scopes, sent
+
+    async def test_settings_websockets_are_rejected_before_downstream(self) -> None:
+        for client in (("127.0.0.1", 40000), ("203.0.113.7", 40000)):
+            with self.subTest(client=client):
+                downstream, sent = await self._invoke(
+                    {
+                        "type": "websocket",
+                        "path": "/api/settings/live",
+                        "client": client,
+                        "headers": [(b"host", b"127.0.0.1:8080")],
+                    }
+                )
+                self.assertEqual(downstream, [])
+                self.assertEqual(
+                    sent, [{"type": "websocket.close", "code": 1008}]
+                )
+
+    async def test_non_settings_websocket_and_lifespan_pass_through(self) -> None:
+        for scope in (
+            {"type": "websocket", "path": "/ws/qq"},
+            {"type": "lifespan"},
+        ):
+            with self.subTest(scope=scope):
+                downstream, sent = await self._invoke(scope)
+                self.assertEqual(downstream, [scope])
+                self.assertEqual(sent, [])
 
 
 if __name__ == "__main__":

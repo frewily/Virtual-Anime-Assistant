@@ -32,52 +32,53 @@ class SettingsFileStore:
 
     def load(self) -> PersistedSettings:
         try:
-            if not self.paths.settings_file.exists():
-                return PersistedSettings()
-            return PersistedSettings.model_validate_json(
-                self.paths.settings_file.read_bytes()
-            )
-        except (OSError, ValidationError, ValueError):
-            pass
-        raise SettingsFileError("unable to read settings file")
+            payload = self.paths.settings_file.read_bytes()
+        except FileNotFoundError:
+            return PersistedSettings()
+        except OSError:
+            raise SettingsFileError("unable to read settings file") from None
+        try:
+            return PersistedSettings.model_validate_json(payload)
+        except (ValidationError, ValueError):
+            raise SettingsFileError("unable to read settings file") from None
 
     def save(self, settings: PersistedSettings) -> None:
         try:
-            payload = settings.model_dump_json(by_alias=True, indent=2).encode("utf-8") + b"\n"
+            payload = (
+                settings.model_dump_json(by_alias=True, indent=2).encode("utf-8")
+                + b"\n"
+            )
         except (TypeError, ValueError):
-            pass
-        else:
-            self._atomic_write(self.paths.settings_file, payload)
-            return
-        raise SettingsFileError("unable to serialize settings file")
+            raise SettingsFileError("unable to serialize settings file") from None
+        self._atomic_write(self.paths.settings_file, payload)
 
     def read_journal(self) -> SaveJournal | None:
         try:
-            if not self.paths.journal_file.exists():
-                return None
-            return SaveJournal.model_validate_json(self.paths.journal_file.read_bytes())
-        except (OSError, ValidationError, ValueError):
-            pass
-        raise SettingsFileError("unable to read settings save journal")
+            payload = self.paths.journal_file.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise SettingsFileError("unable to read settings save journal") from None
+        try:
+            return SaveJournal.model_validate_json(payload)
+        except (ValidationError, ValueError):
+            raise SettingsFileError("unable to read settings save journal") from None
 
     def write_journal(self, journal: SaveJournal) -> None:
         try:
-            payload = journal.model_dump_json(by_alias=True, indent=2).encode("utf-8") + b"\n"
+            payload = (
+                journal.model_dump_json(by_alias=True, indent=2).encode("utf-8")
+                + b"\n"
+            )
         except (TypeError, ValueError):
-            pass
-        else:
-            self._atomic_write(self.paths.journal_file, payload)
-            return
-        raise SettingsFileError("unable to serialize settings save journal")
+            raise SettingsFileError("unable to serialize settings save journal") from None
+        self._atomic_write(self.paths.journal_file, payload)
 
     def delete_journal(self) -> None:
         try:
             self.paths.journal_file.unlink(missing_ok=True)
         except OSError:
-            pass
-        else:
-            return
-        raise SettingsFileError("unable to delete settings save journal")
+            raise SettingsFileError("unable to delete settings save journal") from None
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
         temporary_path: Path | None = None
@@ -94,14 +95,13 @@ class SettingsFileStore:
             temporary_path = None
             self._fsync_directory(path.parent)
         except Exception:
+            raise SettingsFileError("unable to atomically write settings file") from None
+        finally:
             if temporary_path is not None:
                 try:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-        else:
-            return
-        raise SettingsFileError("unable to atomically write settings file")
 
     @staticmethod
     def _fsync_directory(directory: Path) -> None:

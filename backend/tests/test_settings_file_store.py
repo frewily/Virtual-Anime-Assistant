@@ -26,21 +26,8 @@ class SettingsFileStoreTests(unittest.TestCase):
         self.assertNotIn(secret, str(error))
         self.assertNotIn(secret, repr(error))
         self.assertNotIn(secret, "".join(traceback.format_exception(error)))
-
-        pending = [error]
-        seen: set[int] = set()
-        while pending:
-            current = pending.pop()
-            if id(current) in seen:
-                continue
-            seen.add(id(current))
-            self.assertNotIn(secret, str(current))
-            self.assertNotIn(secret, repr(current))
-            pending.extend(
-                candidate
-                for candidate in (current.__cause__, current.__context__)
-                if candidate is not None
-            )
+        self.assertIsNone(error.__cause__)
+        self.assertTrue(error.__suppress_context__)
 
     def test_load_from_empty_directory_returns_defaults_without_creating_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -99,6 +86,17 @@ class SettingsFileStoreTests(unittest.TestCase):
 
             self.assert_error_chain_does_not_contain(raised.exception, secret)
 
+    def test_load_does_not_treat_permission_error_as_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self.make_store(Path(temporary_directory))
+
+            with (
+                patch.object(Path, "exists", side_effect=AssertionError("exists called")),
+                patch.object(Path, "read_bytes", side_effect=PermissionError),
+                self.assertRaises(SettingsFileError),
+            ):
+                store.load()
+
     def test_failed_replace_preserves_existing_settings_and_cleans_temp_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             store = self.make_store(Path(temporary_directory))
@@ -115,6 +113,16 @@ class SettingsFileStoreTests(unittest.TestCase):
                 sorted(entry.name for entry in store.paths.root.iterdir()),
                 ["settings.json"],
             )
+
+    def test_keyboard_interrupt_cleans_temporary_file_without_wrapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self.make_store(Path(temporary_directory))
+
+            with patch("os.fsync", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    store.save(PersistedSettings())
+
+            self.assertEqual(list(store.paths.root.iterdir()), [])
 
     def test_journal_round_trip_and_delete_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -164,6 +172,41 @@ class SettingsFileStoreTests(unittest.TestCase):
                 store.read_journal()
 
             self.assert_error_chain_does_not_contain(raised.exception, secret)
+
+    def test_read_journal_does_not_treat_permission_error_as_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self.make_store(Path(temporary_directory))
+
+            with (
+                patch.object(Path, "exists", side_effect=AssertionError("exists called")),
+                patch.object(Path, "read_bytes", side_effect=PermissionError),
+                self.assertRaises(SettingsFileError),
+            ):
+                store.read_journal()
+
+    def test_outer_exception_context_is_suppressed(self) -> None:
+        outer_secret = "outer-private-sentinel"
+        file_secret = "file-private-sentinel"
+        payload = (
+            b'{"schemaVersion":1,"llm":{"enabled":true,'
+            b'"unexpected":"file-private-sentinel"}}'
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self.make_store(Path(temporary_directory))
+            store.paths.settings_file.write_bytes(payload)
+
+            try:
+                raise ValueError(outer_secret)
+            except ValueError:
+                with self.assertRaises(SettingsFileError) as raised:
+                    store.load()
+
+            rendered = "".join(traceback.format_exception(raised.exception))
+            self.assertTrue(raised.exception.__suppress_context__)
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertNotIn(outer_secret, rendered)
+            self.assertNotIn(file_secret, rendered)
 
     def test_successful_atomic_writes_leave_no_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -10,7 +10,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from settings.secrets import KeychainSecretStore, SecretStoreUnavailable
+from settings.secrets import (
+    KeychainSecretStore,
+    KeyringBackend,
+    SecretStoreUnavailable,
+)
 
 
 class FakeKeyring:
@@ -55,6 +59,7 @@ class KeychainSecretStoreTests(unittest.TestCase):
 
     def test_round_trip_uses_fixed_service_and_reference_as_account(self) -> None:
         backend = FakeKeyring()
+        self.assertIsInstance(backend, KeyringBackend)
         store = KeychainSecretStore(backend)
         reference = "llm-api-key:version-1"
 

@@ -2,10 +2,11 @@
 
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
 from settings.models import PersistedModel, PersistedSettings
 from settings.paths import SettingsPaths
@@ -13,6 +14,21 @@ from settings.paths import SettingsPaths
 
 class SettingsFileError(RuntimeError):
     """A settings-file operation failed without exposing stored content."""
+
+
+_SECRET_REFERENCE_PATTERN = re.compile(
+    r"(?:llm-api-key|qq-access-token):[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+)
+
+
+def is_safe_secret_reference(reference: object, prefix: str | None = None) -> bool:
+    """Return whether an opaque reference is safe and belongs to an allowed slot."""
+
+    if not isinstance(reference, str):
+        return False
+    if _SECRET_REFERENCE_PATTERN.fullmatch(reference) is None:
+        return False
+    return prefix is None or reference.startswith(f"{prefix}:")
 
 
 class SaveJournal(PersistedModel):
@@ -23,6 +39,37 @@ class SaveJournal(PersistedModel):
     old_refs: list[str]
     new_refs: list[str]
     target_refs: list[str]
+
+    @model_validator(mode="after")
+    def validate_reference_invariants(self) -> "SaveJournal":
+        reference_lists = (self.old_refs, self.new_refs, self.target_refs)
+        if any(len(references) != len(set(references)) for references in reference_lists):
+            raise ValueError("journal references must not contain duplicates")
+        if any(
+            not is_safe_secret_reference(reference)
+            for references in reference_lists
+            for reference in references
+        ):
+            raise ValueError("journal contains an invalid secret reference")
+
+        old_refs = set(self.old_refs)
+        new_refs = set(self.new_refs)
+        target_refs = set(self.target_refs)
+        if old_refs & new_refs or old_refs & target_refs:
+            raise ValueError("journal reference sets overlap")
+        if not new_refs <= target_refs:
+            raise ValueError("new journal references must be targets")
+
+        expected_target_order = sorted(
+            self.target_refs,
+            key=lambda reference: 0 if reference.startswith("llm-api-key:") else 1,
+        )
+        target_prefixes = [reference.split(":", 1)[0] for reference in self.target_refs]
+        if self.target_refs != expected_target_order or len(target_prefixes) != len(
+            set(target_prefixes)
+        ):
+            raise ValueError("target references do not match logical slot order")
+        return self
 
 
 class SettingsFileStore:

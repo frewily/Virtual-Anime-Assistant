@@ -129,9 +129,9 @@ class SettingsFileStoreTests(unittest.TestCase):
             store = self.make_store(Path(temporary_directory))
             journal = SaveJournal(
                 transaction_id="save-123",
-                old_refs=["keyring:old"],
-                new_refs=["keyring:new"],
-                target_refs=["keyring:new"],
+                old_refs=["llm-api-key:old"],
+                new_refs=["llm-api-key:new"],
+                target_refs=["llm-api-key:new"],
             )
 
             store.write_journal(journal)
@@ -140,7 +140,7 @@ class SettingsFileStoreTests(unittest.TestCase):
             raw_journal = json.loads(
                 store.paths.journal_file.read_text(encoding="utf-8")
             )
-            self.assertEqual(raw_journal["targetRefs"], ["keyring:new"])
+            self.assertEqual(raw_journal["targetRefs"], ["llm-api-key:new"])
             store.delete_journal()
             self.assertIsNone(store.read_journal())
             store.delete_journal()

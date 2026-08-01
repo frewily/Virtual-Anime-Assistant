@@ -1,5 +1,12 @@
 """Public settings configuration types."""
 
+from settings.auth import (
+    AuthError,
+    LoginRateLimited,
+    PasswordPolicyError,
+    Session,
+    SettingsAuthService,
+)
 from settings.models import (
     AuthRecord,
     LLMSettings,
@@ -31,9 +38,12 @@ from settings.transactions import (
 )
 
 __all__ = [
+    "AuthError",
     "AuthRecord",
     "FieldSource",
     "LLMSettings",
+    "LoginRateLimited",
+    "PasswordPolicyError",
     "PersistedSettings",
     "QQSettings",
     "ResolvedSettings",
@@ -43,10 +53,12 @@ __all__ = [
     "SecretOperation",
     "SecretStore",
     "SecretStoreUnavailable",
+    "Session",
     "KeychainSecretStore",
     "SettingsPaths",
     "SettingsPresentation",
     "SettingsResolver",
+    "SettingsAuthService",
     "SettingsTransactionCoordinator",
     "SettingsTransactionError",
     "TTSSettings",

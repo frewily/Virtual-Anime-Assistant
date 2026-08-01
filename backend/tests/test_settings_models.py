@@ -27,6 +27,15 @@ class PersistedSettingsTests(unittest.TestCase):
                 {"schemaVersion": 1, "llm": {"apiKey": "plaintext"}}
             )
 
+    def test_stringified_persisted_value_types_are_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            PersistedSettings.model_validate(
+                {
+                    "llm": {"enabled": "yes", "timeoutSeconds": "5"},
+                    "qq": {"allowedGroupIds": ["1001"]},
+                }
+            )
+
 
 class SecretMutationTests(unittest.TestCase):
     def test_replace_requires_value(self) -> None:
@@ -37,6 +46,19 @@ class SecretMutationTests(unittest.TestCase):
         mutation = SecretMutation(operation="replace", value="private-key")
 
         self.assertNotIn("private-key", repr(mutation))
+
+    def test_invalid_secret_mutation_error_does_not_leak_secret(self) -> None:
+        with self.assertRaises(ValidationError) as raised:
+            SecretMutation(operation="retain", value="private-key")
+
+        error = raised.exception
+        for serialized_error in (
+            str(error),
+            repr(error),
+            str(error.errors()),
+            error.json(),
+        ):
+            self.assertNotIn("private-key", serialized_error)
 
 
 class SettingsPathsTests(unittest.TestCase):

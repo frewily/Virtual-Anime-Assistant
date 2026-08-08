@@ -396,6 +396,8 @@ test('a current-session 401 expires the session and clears secret input', async 
     hooks.applySnapshot(snapshot('a'.repeat(64)));
     hooks.state.authenticated = true;
     hooks.state.csrfToken = 'csrf-current';
+    hooks.state.restartPending = true;
+    hooks.markFieldDirty('llm.model');
     ids.get('llm-api-key').value = 'sensitive';
     hooks.state.secrets['llm.apiKey'] = { operation: 'replace', value: 'sensitive' };
 
@@ -405,6 +407,66 @@ test('a current-session 401 expires the session and clears secret input', async 
     assert.equal(hooks.state.csrfToken, null);
     assert.equal(ids.get('llm-api-key').value, '');
     assert.equal(hooks.state.secrets['llm.apiKey'].operation, 'retain');
+    assert.equal(hooks.state.restartPending, true);
+    assert.equal(hooks.state.dirty, true);
+    assert.match(ids.get('auth-message').textContent, /登录已过期/);
     assert.equal(ids.get('auth-panel').hidden, false);
     assert.equal(ids.get('workspace').hidden, true);
+});
+
+test('save 401 followed by reauthentication clears the old saving status', async () => {
+    const saveResponse = deferred();
+    const harness = makeHarness((path, init) => {
+        if (path.endsWith('/config') && init.method === 'PUT') return saveResponse.promise;
+        return response({ authenticated: true, csrfToken: 'csrf-new' });
+    });
+    const { hooks, ids } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.authenticated = true;
+    hooks.state.csrfToken = 'csrf-old';
+
+    const save = hooks.saveSettings({ preventDefault() {} });
+    assert.equal(ids.get('save-status').textContent, '正在安全保存…');
+    saveResponse.resolve(response({}, 401));
+    await save;
+    assert.equal(hooks.state.authenticated, false);
+    await hooks.authenticate('login', 'new-password');
+
+    assert.equal(hooks.state.authenticated, true);
+    assert.equal(ids.get('save-status').textContent, '');
+    assert.equal(hooks.state.dirty, false);
+});
+
+test('stale save catch and finally cannot clear a newer save operation status', async () => {
+    const oldResponse = deferred();
+    const newResponse = deferred();
+    let saves = 0;
+    const harness = makeHarness((path, init) => {
+        if (path.endsWith('/config') && init.method === 'PUT') {
+            saves += 1;
+            return saves === 1 ? oldResponse.promise : newResponse.promise;
+        }
+        return response({ authenticated: true, csrfToken: 'csrf-new' });
+    });
+    const { hooks, ids } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.authenticated = true;
+    hooks.state.csrfToken = 'csrf-old';
+
+    const oldSave = hooks.saveSettings({ preventDefault() {} });
+    hooks.state.reauthPending = true;
+    await hooks.authenticate('login', 'new-password');
+    const newSave = hooks.saveSettings({ preventDefault() {} });
+    assert.equal(ids.get('save-status').textContent, '正在安全保存…');
+    assert.equal(ids.get('save-settings').disabled, true);
+
+    oldResponse.resolve(response({ error: { code: 'SETTINGS_CONFLICT' } }, 409));
+    await oldSave;
+    assert.equal(ids.get('save-status').textContent, '正在安全保存…');
+    assert.equal(ids.get('save-settings').disabled, true);
+
+    newResponse.resolve(response(snapshot('b'.repeat(64))));
+    await newSave;
+    assert.equal(ids.get('save-status').textContent, '保存成功');
+    assert.equal(ids.get('save-settings').disabled, false);
 });

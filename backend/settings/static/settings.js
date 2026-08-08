@@ -44,6 +44,8 @@
     logoutGeneration: 0,
     logoutBusy: false,
     probeGeneration: 0,
+    statusOperationGeneration: 0,
+    transientStatuses: new Map(),
     readOnlyPaths: new Set(),
     secrets: {
       'llm.apiKey': { operation: 'retain', value: null },
@@ -81,6 +83,51 @@
   const controlForPath = (path) => controls().find((node) => node.dataset.path === path) || null;
   const sourceForPath = (path) => Array.from(document.querySelectorAll('[data-source-for]')).find((node) => node.dataset.sourceFor === path) || null;
   const errorForPath = (path) => Array.from(document.querySelectorAll('[data-error-for]')).find((node) => node.dataset.errorFor === path) || null;
+
+  function statusNode(target) {
+    return typeof target === 'string' ? byId(target) : target;
+  }
+
+  function createStatusOwner(sessionGeneration = state.sessionGeneration) {
+    state.statusOperationGeneration += 1;
+    return { sessionGeneration, operationToken: state.statusOperationGeneration };
+  }
+
+  function setTransientStatus(target, message, owner) {
+    const node = statusNode(target);
+    if (!node || !owner || owner.sessionGeneration !== state.sessionGeneration) return false;
+    const current = state.transientStatuses.get(node);
+    if (current && current.operationToken > owner.operationToken) return false;
+    state.transientStatuses.set(node, owner);
+    node.textContent = message;
+    return true;
+  }
+
+  function clearTransientStatus(target, owner = null) {
+    const node = statusNode(target);
+    if (!node) return false;
+    const current = state.transientStatuses.get(node);
+    if (owner && current !== owner) return false;
+    if (!current && owner) return false;
+    state.transientStatuses.delete(node);
+    node.textContent = '';
+    return true;
+  }
+
+  function setPersistentStatus(target, message) {
+    const node = statusNode(target);
+    if (!node) return;
+    state.transientStatuses.delete(node);
+    node.textContent = message;
+  }
+
+  function clearTransientStatusesForGeneration(sessionGeneration) {
+    for (const [node, owner] of state.transientStatuses.entries()) {
+      if (owner.sessionGeneration !== sessionGeneration) continue;
+      state.transientStatuses.delete(node);
+      node.textContent = '';
+    }
+  }
 
   function safeMessage(error, fallback) {
     if (error instanceof FieldInputError) return error.safeMessage;
@@ -127,14 +174,19 @@
     return payload;
   }
 
-  function abortProbes() {
+  function abortProbes(message = '测试已过期') {
     state.probeGeneration += 1;
     for (const record of state.probes.values()) {
       record.controller.abort();
       record.button.disabled = false;
-      if (record.status) record.status.textContent = '测试已过期';
     }
     state.probes.clear();
+    for (const status of document.querySelectorAll('[data-test-status]')) {
+      const owner = state.transientStatuses.get(status);
+      if (!owner) continue;
+      if (message) setTransientStatus(status, message, owner);
+      else clearTransientStatus(status, owner);
+    }
   }
 
   function clearSecretState() {
@@ -148,12 +200,14 @@
   }
 
   function advanceSessionGeneration() {
+    const previousGeneration = state.sessionGeneration;
     state.sessionGeneration += 1;
     state.saveGeneration += 1;
     state.saveBusy = false;
     state.logoutGeneration += 1;
     state.logoutBusy = false;
-    abortProbes();
+    abortProbes('');
+    clearTransientStatusesForGeneration(previousGeneration);
     byId('save-settings').disabled = false;
     byId('logout-button').disabled = false;
     return state.sessionGeneration;
@@ -180,7 +234,7 @@
     byId('auth-description').textContent = initialized
       ? '输入本机设置密码继续。'
       : '第一次使用时，请设置一个只用于本机配置的密码。';
-    byId('auth-message').textContent = message;
+    setPersistentStatus('auth-message', message);
     byId('session-status').textContent = initialized ? '等待登录' : '尚未初始化';
     byId('session-dot').classList.remove('is-on');
     byId('logout-button').hidden = true;
@@ -388,9 +442,11 @@
     state.authAttemptGeneration += 1;
     const attemptGeneration = state.authAttemptGeneration;
     const sessionGeneration = state.sessionGeneration;
+    let authStatusOwner = createStatusOwner(sessionGeneration);
     state.authBusy = true;
     byId('setup-submit').disabled = true;
     byId('login-submit').disabled = true;
+    setTransientStatus('auth-message', '', authStatusOwner);
     let expectedGeneration = sessionGeneration;
     try {
       let session;
@@ -407,6 +463,7 @@
       }
       const activeGeneration = activateSession(session, sessionGeneration);
       expectedGeneration = activeGeneration;
+      authStatusOwner = createStatusOwner(activeGeneration);
       byId('setup-password').value = '';
       byId('setup-confirm').value = '';
       byId('login-password').value = '';
@@ -421,6 +478,12 @@
       if (attemptGeneration !== state.authAttemptGeneration || expectedGeneration !== state.sessionGeneration) {
         throw new StaleRequestError();
       }
+      if (path === 'login') byId('login-password').value = '';
+      setTransientStatus(
+        'auth-message',
+        safeMessage(error, path === 'setup' ? '无法建立密码，请稍后重试。' : '登录失败，请稍后重试。'),
+        authStatusOwner
+      );
       throw error;
     } finally {
       if (attemptGeneration === state.authAttemptGeneration) {
@@ -590,11 +653,12 @@
     state.saveGeneration += 1;
     const saveGeneration = state.saveGeneration;
     const sessionGeneration = state.sessionGeneration;
+    const statusOwner = createStatusOwner(sessionGeneration);
     clearErrors();
     abortProbes();
     const button = byId('save-settings');
     button.disabled = true;
-    byId('save-status').textContent = '正在安全保存…';
+    setTransientStatus('save-status', '正在安全保存…', statusOwner);
     try {
       const draft = collectDraft();
       const context = {
@@ -607,7 +671,7 @@
       if (sessionGeneration !== state.sessionGeneration || !state.authenticated) return;
       state.restartPending = state.restartPending || snapshot.restartRequired === true;
       mergeSnapshot(snapshot, context);
-      byId('save-status').textContent = '保存成功';
+      setTransientStatus('save-status', '保存成功', statusOwner);
     } catch (error) {
       if (sessionGeneration !== state.sessionGeneration) return;
       if (error instanceof StaleRequestError) return;
@@ -618,7 +682,7 @@
       } else if (!(error instanceof ApiError && error.status === 401)) {
         showFieldErrors(error instanceof ApiError ? error.fields : {}, safeMessage(error, '保存失败，请检查配置后重试。'));
       }
-      byId('save-status').textContent = '';
+      clearTransientStatus('save-status', statusOwner);
     } finally {
       if (saveGeneration === state.saveGeneration) {
         state.saveBusy = false;
@@ -633,12 +697,13 @@
     abortProbes();
     const generation = state.probeGeneration;
     const sessionGeneration = state.sessionGeneration;
+    const statusOwner = createStatusOwner(sessionGeneration);
     const revision = state.draft && state.draft.revision;
     const controller = new AbortController();
-    const record = { button, controller, generation, revision, status };
+    const record = { button, controller, generation, revision, status, statusOwner };
     state.probes.set(section, record);
     button.disabled = true;
-    status.textContent = '正在测试，不会保存配置…';
+    setTransientStatus(status, '正在测试，不会保存配置…', statusOwner);
     try {
       const body = collectProbe(section);
       const result = await request(`${API}/test/${section}`, {
@@ -651,14 +716,14 @@
         const states = { disabled: '未启用', misconfigured: '配置异常', disconnected: '未连接', connected: '已连接' };
         message += `；当前运行配置：${states[result.status.state] || '状态未知'}`;
       }
-      status.textContent = message;
+      setTransientStatus(status, message, statusOwner);
     } catch (error) {
       if (state.probes.get(section) !== record || state.probeGeneration !== generation) return;
       if (error instanceof FieldInputError) {
         showFieldErrors({ [error.path]: error.safeMessage }, error.safeMessage);
-        status.textContent = '请修正本节标记的配置';
-      } else if (error && error.name === 'AbortError') status.textContent = '测试已取消';
-      else if (!(error instanceof ApiError && error.status === 401)) status.textContent = safeMessage(error, '测试失败，请稍后重试');
+        setTransientStatus(status, '请修正本节标记的配置', statusOwner);
+      } else if (error && error.name === 'AbortError') setTransientStatus(status, '测试已取消', statusOwner);
+      else if (!(error instanceof ApiError && error.status === 401)) setTransientStatus(status, safeMessage(error, '测试失败，请稍后重试'), statusOwner);
     } finally {
       if (state.probes.get(section) === record && state.probeGeneration === generation) {
         state.probes.delete(section);
@@ -731,6 +796,7 @@
     state.logoutGeneration += 1;
     const logoutGeneration = state.logoutGeneration;
     const sessionGeneration = state.sessionGeneration;
+    const statusOwner = createStatusOwner(sessionGeneration);
     const button = byId('logout-button');
     button.disabled = true;
     abortProbes();
@@ -743,7 +809,7 @@
       if (sessionGeneration !== state.sessionGeneration) return;
       if (error instanceof StaleRequestError) return;
       if (!(error instanceof ApiError && error.status === 401)) {
-        byId('save-status').textContent = safeMessage(error, '退出失败，登录状态和未保存修改仍已保留。');
+        setTransientStatus('save-status', safeMessage(error, '退出失败，登录状态和未保存修改仍已保留。'), statusOwner);
       }
     } finally {
       if (logoutGeneration === state.logoutGeneration) {
@@ -758,16 +824,12 @@
     if (state.authBusy) return;
     const password = byId('setup-password').value;
     if (password !== byId('setup-confirm').value) {
-      byId('auth-message').textContent = '两次输入的密码不一致。';
+      setTransientStatus('auth-message', '两次输入的密码不一致。', createStatusOwner());
       return;
     }
     const attemptGeneration = state.authAttemptGeneration + 1;
     try { await authenticate('setup', password); }
-    catch (error) {
-      if (attemptGeneration === state.authAttemptGeneration && !(error instanceof StaleRequestError)) {
-        byId('auth-message').textContent = safeMessage(error, '无法建立密码，请稍后重试。');
-      }
-    }
+    catch (error) { if (attemptGeneration !== state.authAttemptGeneration || error instanceof StaleRequestError) return; }
   });
 
   byId('login-form').addEventListener('submit', async (event) => {
@@ -777,8 +839,6 @@
     try { await authenticate('login', byId('login-password').value); }
     catch (error) {
       if (attemptGeneration !== state.authAttemptGeneration || error instanceof StaleRequestError) return;
-      byId('login-password').value = '';
-      byId('auth-message').textContent = safeMessage(error, '登录失败，请稍后重试。');
     }
   });
 

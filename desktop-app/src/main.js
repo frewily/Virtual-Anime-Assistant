@@ -1,9 +1,19 @@
-const { app, BrowserWindow, Tray, Menu } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
+const SETTINGS_URL = 'http://127.0.0.1:8080/settings';
+
 let mainWindow;
 let tray;
+
+async function openSettings() {
+    try {
+        await shell.openExternal(SETTINGS_URL);
+    } catch {
+        console.error('[Settings] Unable to open settings page.');
+    }
+}
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -43,6 +53,8 @@ function createTray() {
     const contextMenu = Menu.buildFromTemplate([
         { label: '显示', click: () => mainWindow?.show() },
         { label: '隐藏', click: () => mainWindow?.hide() },
+        { type: 'separator' },
+        { label: '设置', click: openSettings },
         { type: 'separator' },
         { label: '退出', click: () => app.quit() }
     ]);

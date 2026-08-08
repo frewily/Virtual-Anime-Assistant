@@ -114,6 +114,10 @@
 
 实际提交：`dcd64b70`、`e95a6cdb`、`1a67dee6`。TDD、自审与双重审查均通过。
 
+最终整体审查发现默认生产生命周期尚未消费 Web 持久化设置，随后以 `1120622` 修复：默认生命周期惰性创建并复用同一个 `SettingsService`，依次执行 `recover()`、`runtime_settings()`，再把解析结果传给 `AssistantRuntime`。因此模块级 `api.app:app` 也会应用 Web 保存的运行时设置，同时保持显式注入路径和应用工厂的无副作用契约。
+
+恢复路径随后以 `08973d9` 进一步收紧：`recover()` 不再无条件预读设置文件。配置损坏且没有保存日志时，启动继续使用默认值与有效环境变量，不访问系统凭据库，也不修改损坏文件；配置损坏但存在有效保存日志时，恢复失败关闭，并保留日志与秘密引用，等待安全处理。这两个生产接线增量的规格复审与代码质量复审均为 PASS。
+
 ### [x] 任务 6：本地设置鉴权
 
 文件：`backend/settings/auth.py`、`backend/tests/test_settings_auth.py`
@@ -201,7 +205,7 @@
 - 本文件按批准设计、Git 历史与执行记录重建，记录任务、文件、验收条件和实际提交，不伪造已丢失计划的原文。
 - 执行后端全量测试、桌面单元测试、JavaScript 语法检查、桌面完整测试与本机浏览器验收，并记录最终证据。
 
-实际提交链：`8f573a4` 提交 README 与初始计划，`2b3d8ab` 补录验收结果，`6ea424e` 修正规格审查发现的问题。本次质量修复提交无法在自身内容中记录自身 SHA；可以分别运行 `git log -- README.md` 与 `git log -- docs/superpowers/plans/2026-08-01-web-settings-interface.md` 审计完整历史。
+实际提交链：`8f573a4` 提交 README 与初始计划，`2b3d8ab` 补录验收结果，`6ea424e` 修正规格审查发现的问题，`846f447` 修正验证证据。本次最终同步提交无法在自身内容中记录自身 SHA；可以分别运行 `git log -- README.md` 与 `git log -- docs/superpowers/plans/2026-08-01-web-settings-interface.md` 审计完整历史。
 
 ## 6. 命令行验证记录
 
@@ -224,8 +228,8 @@ git status --short --branch
 | 检查 | 结果 | 证据 |
 |---|---|---|
 | Python 编译 | 通过 | `python3 -m compileall -q backend`，退出码 0 |
-| 后端全量测试 | 通过 | 577 项通过，0 项失败，最终复跑耗时 8.155 秒 |
-| Settings 定向测试 | 通过 | 190 项通过，0 项失败，最终复跑耗时 4.883 秒 |
+| 后端全量测试 | 通过 | 582 / 582 项通过，0 项失败，耗时约 8.27 秒 |
+| Settings 定向测试 | 通过 | 190 / 190 项通过，0 项失败，最终复跑耗时 4.944 秒 |
 | Electron 单元测试 | 通过 | `npm run test:unit` 为 35 / 35 项通过，0 项失败 |
 | JavaScript 语法 | 通过 | `settings.js` 与 `main.js` 的 `node --check` 均为退出码 0 |
 | Electron 完整测试 | 通过 | 初次因没有 `node_modules` 而报 `esbuild: command not found`；指定 npm 官方 registry 并在安装时替换 registry host 后，`npm test` 的单元测试阶段 35 / 35 项通过，renderer 构建、主进程与 preload 语法检查全部通过 |

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -702,6 +702,164 @@ class SettingsApiAtomicSnapshotTests(unittest.TestCase):
             response.draft.revision,
             SettingsService._revision(committed),
         )
+
+    def test_snapshot_response_is_deeply_immutable_and_copy_bypass_is_safe(self) -> None:
+        from settings.service import SettingsService
+
+        class NullSecrets:
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return None
+
+            def set(self, reference, value):
+                raise AssertionError
+
+            def delete(self, reference):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            service = SettingsService(
+                paths=paths,
+                file_store=SettingsFileStore(paths),
+                secret_store=NullSecrets(),
+                voice_catalog_loader=self._catalog,
+                environ={},
+            )
+            snapshot = service.get_config_snapshot()
+
+        with self.assertRaises((TypeError, ValidationError)):
+            snapshot.draft.llm.model = "mutated"
+        with self.assertRaises((AttributeError, TypeError)):
+            snapshot.draft.qq.allowed_group_ids.append(123)
+        with self.assertRaises(TypeError):
+            snapshot.model_copy(update={"draft": snapshot.draft})
+        with self.assertRaises(TypeError):
+            snapshot.draft.model_copy(update={"revision": "0" * 64})
+        with self.assertRaises(TypeError):
+            snapshot.draft.llm.model_copy(update={"model": "mutated"})
+
+        for field, malicious in (
+            ("draft", {"apiKey": "LEAK-DRAFT"}),
+            (
+                "presentation",
+                {"fields": {"llm.apiKey": {"value": "LEAK-PRESENTATION"}}},
+            ),
+        ):
+            bypassed = BaseModel.model_copy(snapshot, update={field: malicious})
+            for serializer in (bypassed.model_dump, bypassed.model_dump_json):
+                with self.subTest(field=field, serializer=serializer.__name__):
+                    with self.assertRaises(Exception) as raised:
+                        serializer(by_alias=True)
+                    self.assertNotIn("LEAK", str(raised.exception))
+
+        poisoned_presentation = BaseModel.model_copy(
+            snapshot.presentation,
+            update={
+                "fields": {
+                    "llm.apiKey": {"value": "LEAK-PRESENTATION-COPY"}
+                }
+            },
+        )
+        bypassed = BaseModel.model_copy(
+            snapshot, update={"presentation": poisoned_presentation}
+        )
+        for serializer in (bypassed.model_dump, bypassed.model_dump_json):
+            with self.assertRaises(Exception) as raised:
+                serializer(by_alias=True)
+            self.assertNotIn("LEAK", str(raised.exception))
+
+    def test_real_api_secret_replacements_return_final_revision_and_retain_draft(self) -> None:
+        from settings.service import SettingsService
+
+        class MemorySecrets:
+            def __init__(self):
+                self.values = {}
+
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return self.values.get(reference)
+
+            def set(self, reference, value):
+                self.values[reference] = value
+
+            def delete(self, reference):
+                self.values.pop(reference, None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            file_store = SettingsFileStore(paths)
+            secrets = MemorySecrets()
+            service = SettingsService(
+                paths=paths,
+                file_store=file_store,
+                secret_store=secrets,
+                voice_catalog_loader=self._catalog,
+                environ={},
+            )
+            session = service.setup("long-enough-password")
+            payload = draft_payload()
+            payload["revision"] = service.get_draft().revision
+            llm_secret = "private-llm-api-key"
+            qq_secret = "private-qq-access-token"
+            payload["llm"]["apiKey"] = {
+                "operation": "replace",
+                "value": llm_secret,
+            }
+            payload["qq"]["accessToken"] = {
+                "operation": "replace",
+                "value": qq_secret,
+            }
+            application = create_app(
+                runtime_instance=Mock(), settings_service=service
+            )
+            client = TestClient(
+                application,
+                base_url=BASE_URL,
+                client=("127.0.0.1", 50000),
+            )
+            client.cookies.set(COOKIE_NAME, session.token)
+            headers = {
+                "Origin": ORIGIN,
+                "X-CSRF-Token": session.csrf_token,
+            }
+
+            first = client.put(
+                "/api/settings/config", headers=headers, json=payload
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            body = first.json()
+            final = file_store.load()
+            self.assertTrue(
+                body["presentation"]["fields"]["llm.apiKey"]["configured"]
+            )
+            self.assertTrue(
+                body["presentation"]["fields"]["qq.accessToken"]["configured"]
+            )
+            self.assertEqual(
+                body["draft"]["revision"], SettingsService._revision(final)
+            )
+            self.assertEqual(
+                body["draft"]["llm"]["apiKey"], {"operation": "retain"}
+            )
+            self.assertEqual(
+                body["draft"]["qq"]["accessToken"],
+                {"operation": "retain"},
+            )
+            self.assertNotIn(llm_secret, first.text)
+            self.assertNotIn(qq_secret, first.text)
+            self.assertNotIn(final.llm.api_key_ref, first.text)
+            self.assertNotIn(final.qq.access_token_ref, first.text)
+
+            second = client.put(
+                "/api/settings/config", headers=headers, json=body["draft"]
+            )
+            self.assertEqual(second.status_code, 200, second.text)
+            client.close()
 
 
 class SettingsSecurityAsgiTests(unittest.IsolatedAsyncioTestCase):

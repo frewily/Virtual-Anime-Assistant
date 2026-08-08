@@ -8,10 +8,10 @@ import hmac
 import json
 import os
 import threading
-from typing import Self
+from typing import Literal, Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_serializer
 from pydantic.alias_generators import to_camel
 
 from core.config_loader import VoiceCatalog, load_voice_catalog
@@ -105,11 +105,85 @@ class SaveResult(_ResponseModel):
     restart_required: bool
 
 
+class ResponseSecretMutation(_ResponseModel):
+    operation: Literal[SecretOperation.RETAIN] = SecretOperation.RETAIN
+
+
+class ResponseLLMSettingsDraft(_ResponseModel):
+    enabled: bool
+    base_url: str | None
+    model: str | None
+    timeout_seconds: int
+    max_context_messages: int
+    max_context_chars: int
+    tool_calling_enabled: bool
+    api_key: ResponseSecretMutation
+
+
+class ResponseQQSettingsDraft(_ResponseModel):
+    enabled: bool
+    allowed_group_ids: tuple[int, ...]
+    allowed_user_ids: tuple[int, ...]
+    rate_per_minute: int
+    rate_burst: int
+    max_concurrency: int
+    action_timeout_seconds: int
+    access_token: ResponseSecretMutation
+
+
+class ResponseTTSSettingsDraft(_ResponseModel):
+    gpt_sovits_url: str
+    default_voice_id: str
+    audio_max_age_seconds: int
+
+
+class SettingsResponseDraft(_ResponseModel):
+    revision: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    llm: ResponseLLMSettingsDraft
+    qq: ResponseQQSettingsDraft
+    tts: ResponseTTSSettingsDraft
+
+
 class SettingsConfigSnapshot(_ResponseModel):
-    """Presentation and editable draft derived from one persisted snapshot."""
+    """Safe presentation and browser draft from one persisted snapshot."""
 
     presentation: SettingsPresentation
-    draft: VersionedSettingsDraft
+    draft: SettingsResponseDraft
+
+    @field_serializer("presentation")
+    def serialize_presentation(self, value: object) -> dict[str, object]:
+        return self._safe_snapshot_payload(value, SettingsPresentation)
+
+    @field_serializer("draft")
+    def serialize_draft(self, value: object) -> dict[str, object]:
+        return self._safe_snapshot_payload(value, SettingsResponseDraft)
+
+    @staticmethod
+    def _safe_snapshot_payload(
+        value: object, model_type: type[BaseModel]
+    ) -> dict[str, object]:
+        try:
+            payload = (
+                value.model_dump(
+                    mode="python",
+                    by_alias=False,
+                    warnings="none",
+                )
+                if isinstance(value, BaseModel)
+                else value
+            )
+            validated = model_type.model_validate(payload)
+            return validated.model_dump(
+                mode="json",
+                by_alias=True,
+                warnings="none",
+            )
+        except Exception:
+            raise ValueError("invalid settings response snapshot") from None
 
 
 class SettingsSaveSnapshot(SettingsConfigSnapshot):
@@ -491,23 +565,61 @@ class SettingsService:
         proposed = self._proposed_settings(current, validated.draft)
         replacements = self._replacement_values(validated)
         transaction_failed = False
+        final_settings: PersistedSettings | None = None
         try:
             try:
-                self._transaction.save(current, proposed, replacements)
+                final_settings = self._transaction.save(
+                    current, proposed, replacements
+                )
             except SettingsTransactionError:
                 transaction_failed = True
         finally:
             replacements.clear()
-        if transaction_failed:
+        if transaction_failed or not isinstance(
+            final_settings, PersistedSettings
+        ):
             raise SettingsServiceError("SETTINGS_SAVE_FAILED")
-        return SaveResult(restart_required=True), proposed
+        return SaveResult(restart_required=True), final_settings
 
     def _config_snapshot_from_persisted(
         self, persisted: PersistedSettings
     ) -> SettingsConfigSnapshot:
         return SettingsConfigSnapshot(
             presentation=self._resolve(persisted).presentation,
-            draft=self._draft_from_persisted(persisted),
+            draft=self._response_draft_from_persisted(persisted),
+        )
+
+    @classmethod
+    def _response_draft_from_persisted(
+        cls, persisted: PersistedSettings
+    ) -> SettingsResponseDraft:
+        return SettingsResponseDraft(
+            revision=cls._revision(persisted),
+            llm=ResponseLLMSettingsDraft(
+                enabled=persisted.llm.enabled,
+                base_url=persisted.llm.base_url,
+                model=persisted.llm.model,
+                timeout_seconds=persisted.llm.timeout_seconds,
+                max_context_messages=persisted.llm.max_context_messages,
+                max_context_chars=persisted.llm.max_context_chars,
+                tool_calling_enabled=persisted.llm.tool_calling_enabled,
+                api_key=ResponseSecretMutation(),
+            ),
+            qq=ResponseQQSettingsDraft(
+                enabled=persisted.qq.enabled,
+                allowed_group_ids=tuple(persisted.qq.allowed_group_ids),
+                allowed_user_ids=tuple(persisted.qq.allowed_user_ids),
+                rate_per_minute=persisted.qq.rate_per_minute,
+                rate_burst=persisted.qq.rate_burst,
+                max_concurrency=persisted.qq.max_concurrency,
+                action_timeout_seconds=persisted.qq.action_timeout_seconds,
+                access_token=ResponseSecretMutation(),
+            ),
+            tts=ResponseTTSSettingsDraft(
+                gpt_sovits_url=persisted.tts.gpt_sovits_url,
+                default_voice_id=persisted.tts.default_voice_id,
+                audio_max_age_seconds=persisted.tts.audio_max_age_seconds,
+            ),
         )
 
     def _resolve(self, persisted: PersistedSettings) -> ResolvedSettings:
@@ -751,6 +863,7 @@ def create_settings_service(paths: SettingsPaths | None = None) -> SettingsServi
 __all__ = [
     "SaveResult",
     "SettingsConfigSnapshot",
+    "SettingsResponseDraft",
     "SettingsSaveSnapshot",
     "SessionStatus",
     "SettingsService",

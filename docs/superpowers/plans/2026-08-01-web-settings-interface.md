@@ -8,7 +8,7 @@
 - 设计提交：`1a97314`（`docs: 设计本地 Web 配置界面`）
 - 实施分支：`codex/web-settings-interface`
 - 实施范围：LLM、QQ / OneBot、GPT-SoVITS、默认音色与音频保留时间
-- 任务状态：12 / 12 已完成；命令行验证由任务 12 记录，浏览器验收由主控在最终交付前补录
+- 任务状态：12 / 12 已完成；命令行验证与浏览器验收证据均已记录
 
 ## 2. 目标与交付边界
 
@@ -177,6 +177,8 @@
 
 实际提交：`466b2243`、`dc6b2aac`、`94090918`、`80a43511`、`f0866691`。TDD、自审与双重审查均通过。
 
+浏览器验收发现浏览器自动请求 favicon 时返回 404，随后以 `f2b644b` 增量修复：新增本地自包含的 32 × 32 SVG，在 `index.html` 中显式引用 `/settings/favicon.svg`，并只通过现有静态资源白名单提供 GET / HEAD。favicon 实测返回 HTTP 200，HEAD 无响应体，`no-store` 与既有安全响应头保持不变；未知路径和遍历路径继续拒绝。该增量的规格审查与代码质量审查均为 PASS。
+
 ### [x] 任务 11：Electron 固定入口
 
 文件：`desktop-app/src/main.js`、`desktop-app/tests/settings-entry-contract.test.js`
@@ -197,7 +199,7 @@
 - README 说明入口、首次密码、会话、安全边界、凭据库、配置优先级、保存后重启、错误恢复与测试方法。
 - 明确 Linux 凭据库不是首版正式支持目标；不提供真实密钥、Token 或测试密码示例。
 - 本文件按批准设计、Git 历史与执行记录重建，记录任务、文件、验收条件和实际提交，不伪造已丢失计划的原文。
-- 执行后端全量测试、桌面单元测试、JavaScript 语法检查，并尝试桌面完整测试；浏览器验收由主控执行并补录。
+- 执行后端全量测试、桌面单元测试、JavaScript 语法检查、桌面完整测试与本机浏览器验收，并记录最终证据。
 
 实际提交：本文件所在的任务 12 文档提交；提交对象无法在自身内容中记录自身 SHA，可通过 `git log -1 -- README.md docs/superpowers/plans/2026-08-01-web-settings-interface.md` 审计。文档规格与代码质量审查由主控在提交后执行。
 
@@ -231,7 +233,7 @@ git status --short --branch
 
 ## 7. 浏览器验收证据
 
-此关卡由主控在任务 12 文档提交及双重审查之后执行。验收时不得使用远程部署或宽松 Host，需要启动 `127.0.0.1:8080` 本机服务并使用 Playwright 检查：
+主控于 2026-08-08 使用全新临时配置目录启动 `127.0.0.1:8080` 本机服务，并通过 Playwright 完成最终验收。验收未使用远程部署或宽松 Host。
 
 - 首次设密、登录、退出和会话失效后的秘密输入清理；
 - LLM、QQ、TTS 表单、来源标签、环境变量只读状态与凭据库状态；
@@ -242,10 +244,13 @@ git status --short --branch
 
 | 项目 | 最终证据 |
 |---|---|
-| Playwright 场景 | 主控待补录 |
-| 浏览器控制台 | 主控待补录 |
-| 外部资源请求 | 主控待补录 |
-| 截图 | 主控待补录 |
+| 会话与保存 | 首次设密通过；保存返回 `restartRequired` 并显示重启提示；登出后秘密输入已清除；重新登录通过 |
+| 桌面布局 | 垂直页签显示正常 |
+| 移动布局 | 390 × 844 视口显示水平页签；ArrowRight 键盘导航通过；`clientWidth = 390`、`scrollWidth = 390`，无横向溢出 |
+| favicon | `/settings/favicon.svg` 实测 HTTP 200；资源为本地自包含 32 × 32 SVG，不产生外部请求 |
+| 浏览器错误 | `consoleErrors = 0`、`pageErrors = 0` |
+| 外部资源请求 | `externalRequests = 0` |
+| 截图 | 验收产物：`vaa-settings-desktop.png`、`vaa-settings-mobile.png` |
 
 ## 8. 重建说明与已知环境约束
 

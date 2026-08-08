@@ -11,8 +11,10 @@ from pydantic import BaseModel, RootModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import api.app as app_module
 from agent.monitor import ForegroundWindowMonitor
 from api.app import create_app, lifespan
+from api.dependencies import get_settings_service
 from application.assistant import AssistantApplication
 from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
@@ -967,6 +969,9 @@ class RuntimeTests(unittest.TestCase):
     def test_runtime_settings_factory_is_lazy_and_called_once(self):
         bundle = self.runtime_settings_bundle()
         factory = Mock(return_value=bundle)
+        service_factory = Mock(
+            side_effect=AssertionError("service factory must stay lazy")
+        )
         runtime = Mock()
         runtime.application.publisher.subscribe.return_value = Mock()
         runtime.tool_service = None
@@ -976,7 +981,10 @@ class RuntimeTests(unittest.TestCase):
             "api.app.AssistantRuntime",
             return_value=runtime,
         ) as runtime_type:
-            application = create_app(runtime_settings_factory=factory)
+            application = create_app(
+                runtime_settings_factory=factory,
+                settings_service_factory=service_factory,
+            )
             factory.assert_not_called()
 
             async def exercise():
@@ -986,7 +994,132 @@ class RuntimeTests(unittest.TestCase):
             asyncio.run(exercise())
 
         factory.assert_called_once_with()
+        service_factory.assert_not_called()
         runtime_type.assert_called_once_with(runtime_settings=bundle)
+
+    def test_default_lifespan_recovers_settings_before_building_runtime(self):
+        bundle = self.runtime_settings_bundle()
+        events = []
+        service = Mock()
+        service.recover.side_effect = lambda: events.append("recover")
+        service.runtime_settings.side_effect = lambda: (
+            events.append("runtime_settings") or bundle
+        )
+        service_factory = Mock(
+            side_effect=lambda: events.append("service_factory") or service
+        )
+        runtime = Mock()
+        runtime.application.publisher.subscribe.return_value = Mock()
+        runtime.tool_service = None
+        runtime.aclose = AsyncMock()
+
+        def build_runtime(*, runtime_settings):
+            events.append("runtime")
+            self.assertIs(runtime_settings, bundle)
+            return runtime
+
+        with patch("api.app.AssistantRuntime", side_effect=build_runtime):
+            application = create_app(settings_service_factory=service_factory)
+
+            async def exercise():
+                async with lifespan(application):
+                    request = Mock()
+                    request.app = application
+                    self.assertIs(get_settings_service(request), service)
+
+            asyncio.run(exercise())
+
+        self.assertEqual(
+            events,
+            ["service_factory", "recover", "runtime_settings", "runtime"],
+        )
+        service_factory.assert_called_once_with()
+        service.recover.assert_called_once_with()
+        service.runtime_settings.assert_called_once_with()
+        self.assertIs(application.state.settings_service, service)
+
+    def test_global_app_uses_default_settings_service_for_runtime_startup(self):
+        application = app_module.app
+        original_state = (
+            application.state.runtime,
+            application.state.runtime_settings_factory,
+            application.state.settings_service,
+            application.state.settings_service_factory,
+        )
+        bundle = self.runtime_settings_bundle()
+        service = Mock()
+        service.runtime_settings.return_value = bundle
+        service_factory = Mock(return_value=service)
+        runtime = Mock()
+        runtime.application.publisher.subscribe.return_value = Mock()
+        runtime.tool_service = None
+        runtime.aclose = AsyncMock()
+        application.state.runtime = None
+        application.state.runtime_settings_factory = None
+        application.state.settings_service = None
+        application.state.settings_service_factory = service_factory
+
+        try:
+            with patch(
+                "api.app.AssistantRuntime", return_value=runtime
+            ) as runtime_type:
+
+                async def exercise():
+                    async with lifespan(application):
+                        pass
+
+                asyncio.run(exercise())
+
+            service_factory.assert_called_once_with()
+            service.recover.assert_called_once_with()
+            service.runtime_settings.assert_called_once_with()
+            runtime_type.assert_called_once_with(runtime_settings=bundle)
+        finally:
+            (
+                application.state.runtime,
+                application.state.runtime_settings_factory,
+                application.state.settings_service,
+                application.state.settings_service_factory,
+            ) = original_state
+
+    def test_default_settings_failure_prevents_runtime_construction(self):
+        for failing_method in ("recover", "runtime_settings"):
+            with self.subTest(failing_method=failing_method):
+                error = RuntimeError("private startup failure")
+                service = Mock()
+                service.runtime_settings.return_value = (
+                    self.runtime_settings_bundle()
+                )
+                getattr(service, failing_method).side_effect = error
+                application = create_app(
+                    settings_service_factory=Mock(return_value=service)
+                )
+
+                async def exercise():
+                    async with lifespan(application):
+                        pass
+
+                with (
+                    patch(
+                        "api.app.AssistantRuntime",
+                        side_effect=AssertionError(
+                            "runtime must not be constructed after settings failure"
+                        ),
+                    ) as runtime_type,
+                    patch("api.app._start_background_task") as start_task,
+                ):
+                    with self.assertRaises(RuntimeError) as raised:
+                        asyncio.run(exercise())
+
+                self.assertIs(raised.exception, error)
+                service.recover.assert_called_once_with()
+                if failing_method == "recover":
+                    service.runtime_settings.assert_not_called()
+                else:
+                    service.runtime_settings.assert_called_once_with()
+                runtime_type.assert_not_called()
+                start_task.assert_not_called()
+                self.assertIsNone(application.state.runtime)
 
     def test_injected_runtime_does_not_call_settings_factory(self):
         runtime = Mock()
@@ -994,9 +1127,15 @@ class RuntimeTests(unittest.TestCase):
         runtime.tool_service = None
         runtime.aclose = AsyncMock()
         factory = Mock(side_effect=AssertionError("factory must stay lazy"))
+        service = Mock()
+        service_factory = Mock(
+            side_effect=AssertionError("service factory must stay lazy")
+        )
         application = create_app(
             runtime_instance=runtime,
             runtime_settings_factory=factory,
+            settings_service=service,
+            settings_service_factory=service_factory,
         )
 
         async def exercise():
@@ -1006,6 +1145,8 @@ class RuntimeTests(unittest.TestCase):
         asyncio.run(exercise())
 
         factory.assert_not_called()
+        service_factory.assert_not_called()
+        service.recover.assert_not_called()
 
     def test_fresh_import_does_not_instantiate_tts_or_database(self):
         backend = Path(__file__).resolve().parents[1]

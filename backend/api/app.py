@@ -196,7 +196,17 @@ async def lifespan(app: FastAPI):
     if runtime is None:
         runtime_settings_factory = app.state.runtime_settings_factory
         if runtime_settings_factory is None:
-            runtime = AssistantRuntime()
+            settings_service = app.state.settings_service
+            if settings_service is None:
+                with app.state.settings_service_lock:
+                    settings_service = app.state.settings_service
+                    if settings_service is None:
+                        settings_service = app.state.settings_service_factory()
+                        app.state.settings_service = settings_service
+            settings_service.recover()
+            runtime = AssistantRuntime(
+                runtime_settings=settings_service.runtime_settings()
+            )
         else:
             runtime = AssistantRuntime(
                 runtime_settings=runtime_settings_factory()

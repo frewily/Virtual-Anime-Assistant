@@ -201,7 +201,7 @@
 - 本文件按批准设计、Git 历史与执行记录重建，记录任务、文件、验收条件和实际提交，不伪造已丢失计划的原文。
 - 执行后端全量测试、桌面单元测试、JavaScript 语法检查、桌面完整测试与本机浏览器验收，并记录最终证据。
 
-实际提交：本文件所在的任务 12 文档提交；提交对象无法在自身内容中记录自身 SHA，可通过 `git log -1 -- README.md docs/superpowers/plans/2026-08-01-web-settings-interface.md` 审计。文档规格与代码质量审查由主控在提交后执行。
+实际提交链：`8f573a4` 提交 README 与初始计划，`2b3d8ab` 补录验收结果，`6ea424e` 修正规格审查发现的问题。本次质量修复提交无法在自身内容中记录自身 SHA；可以分别运行 `git log -- README.md` 与 `git log -- docs/superpowers/plans/2026-08-01-web-settings-interface.md` 审计完整历史。
 
 ## 6. 命令行验证记录
 
@@ -228,7 +228,7 @@ git status --short --branch
 | Settings 定向测试 | 通过 | 190 项通过，0 项失败，最终复跑耗时 4.883 秒 |
 | Electron 单元测试 | 通过 | `npm run test:unit` 为 35 / 35 项通过，0 项失败 |
 | JavaScript 语法 | 通过 | `settings.js` 与 `main.js` 的 `node --check` 均为退出码 0 |
-| Electron 完整测试 | 通过 | 初次因没有 `node_modules` 而报 `esbuild: command not found`；从 npm 官方源执行锁定安装后，`npm test` 的单元测试阶段 35 / 35 项通过，renderer 构建、主进程与 preload 语法检查全部通过 |
+| Electron 完整测试 | 通过 | 初次因没有 `node_modules` 而报 `esbuild: command not found`；指定 npm 官方 registry 并在安装时替换 registry host 后，`npm test` 的单元测试阶段 35 / 35 项通过，renderer 构建、主进程与 preload 语法检查全部通过 |
 | 文档契约与 Git 检查 | 通过 | 一次性契约脚本、`git diff --check` 均为退出码 0；最终状态在提交前再次检查 |
 
 ## 7. 浏览器验收证据
@@ -243,11 +243,11 @@ git status --short --branch
 | favicon | `/settings/favicon.svg` 实测 HTTP 200；资源为本地自包含 32 × 32 SVG，不产生外部请求 |
 | 浏览器错误 | `consoleErrors = 0`、`pageErrors = 0` |
 | 外部资源请求 | `externalRequests = 0` |
-| 截图 | 验收产物：`vaa-settings-desktop.png`、`vaa-settings-mobile.png` |
+| 截图 | `vaa-settings-desktop.png`、`vaa-settings-mobile.png` 是仓库外的本地验收产物，未纳入版本控制，由本任务最终交付消息展示；仓库本身不能单独复核图片 |
 
 ## 8. 重建说明与已知环境约束
 
 - 原计划从未进入 Git，因此无法从对象数据库逐字恢复；本记录只采用可验证的设计、代码、测试和提交事实。
 - 设计规格示例写的是 Windows `%APPDATA%`，当前实现使用 `platformdirs.user_config_path(..., roaming=False)`，README 按实现记录为 `%LOCALAPPDATA%`。
 - 系统凭据适配器使用通用 `keyring` API，但首版只把 macOS Keychain 和 Windows Credential Manager 作为支持目标；Linux 缺少可用后端时会安全地报告不可用。
-- 工作树初始没有 `desktop-app/node_modules`。`package-lock.json` 与 npm 配置均指向官方仓库；执行 `npm --prefix desktop-app ci --registry=https://registry.npmjs.org --replace-registry-host=always` 安装 410 个锁定包后完成桌面全量测试，未修改锁文件。npm 同时报告 4 个 high severity 依赖审计项，属于现有依赖树的后续维护事项，本任务未擅自执行可能改写版本的 `npm audit fix`。
+- 工作树初始没有 `desktop-app/node_modules`。`package-lock.json` 大部分依赖指向 `registry.npmjs.org`，但 `@pixi/unsafe-eval` 仍指向 `registry.npmmirror.com`；本次在 `desktop-app` 目录执行 `npm install --registry=https://registry.npmjs.org --replace-registry-host=always`，仅在安装时替换 registry host，未据此声称锁文件全部来自官方源。安装后桌面全量测试通过，锁文件未修改。npm 同时报告 4 个 high severity 依赖审计项，属于现有依赖树的后续维护事项，本任务未擅自执行可能改写版本的 `npm audit fix`。

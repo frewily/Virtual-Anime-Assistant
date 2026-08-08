@@ -11,8 +11,17 @@ import threading
 from typing import Literal, Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SecretStr,
+    field_serializer,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
+from pydantic_core import PydanticSerializationError
 
 from core.config_loader import VoiceCatalog, load_voice_catalog
 from settings.auth import (
@@ -153,18 +162,74 @@ class SettingsConfigSnapshot(_ResponseModel):
 
     presentation: SettingsPresentation
     draft: SettingsResponseDraft
+    _integrity_seal: str | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def seal_validated_snapshot(self) -> "SettingsConfigSnapshot":
+        self._integrity_seal = self._calculate_integrity_seal()
+        return self
 
     @field_serializer("presentation")
-    def serialize_presentation(self, value: object) -> dict[str, object]:
-        return self._safe_snapshot_payload(value, SettingsPresentation)
+    def serialize_presentation(self, value: object, info) -> dict[str, object]:
+        self._verify_integrity()
+        return self._safe_snapshot_payload(
+            value,
+            SettingsPresentation,
+            by_alias=bool(info.by_alias),
+        )
 
     @field_serializer("draft")
-    def serialize_draft(self, value: object) -> dict[str, object]:
-        return self._safe_snapshot_payload(value, SettingsResponseDraft)
+    def serialize_draft(self, value: object, info) -> dict[str, object]:
+        self._verify_integrity()
+        return self._safe_snapshot_payload(
+            value,
+            SettingsResponseDraft,
+            by_alias=bool(info.by_alias),
+        )
+
+    def _verify_integrity(self) -> None:
+        expected = self._integrity_seal
+        if not isinstance(expected, str):
+            self._serialization_failure()
+        actual = self._calculate_integrity_seal()
+        if not hmac.compare_digest(expected, actual):
+            self._serialization_failure()
+
+    def _calculate_integrity_seal(self) -> str:
+        payload: dict[str, object] = {
+            "presentation": self._safe_snapshot_payload(
+                self.presentation,
+                SettingsPresentation,
+                by_alias=True,
+            ),
+            "draft": self._safe_snapshot_payload(
+                self.draft,
+                SettingsResponseDraft,
+                by_alias=True,
+            ),
+        }
+        if "restart_required" in type(self).model_fields:
+            restart_required = getattr(self, "restart_required", None)
+            if type(restart_required) is not bool:
+                self._serialization_failure()
+            payload["restartRequired"] = restart_required
+        try:
+            canonical = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except Exception:
+            self._serialization_failure()
+        return hashlib.sha256(canonical).hexdigest()
 
     @staticmethod
     def _safe_snapshot_payload(
-        value: object, model_type: type[BaseModel]
+        value: object,
+        model_type: type[BaseModel],
+        *,
+        by_alias: bool,
     ) -> dict[str, object]:
         try:
             payload = (
@@ -179,11 +244,17 @@ class SettingsConfigSnapshot(_ResponseModel):
             validated = model_type.model_validate(payload)
             return validated.model_dump(
                 mode="json",
-                by_alias=True,
+                by_alias=by_alias,
                 warnings="none",
             )
         except Exception:
-            raise ValueError("invalid settings response snapshot") from None
+            SettingsConfigSnapshot._serialization_failure()
+
+    @staticmethod
+    def _serialization_failure() -> None:
+        raise PydanticSerializationError(
+            "invalid settings response snapshot"
+        ) from None
 
 
 class SettingsSaveSnapshot(SettingsConfigSnapshot):

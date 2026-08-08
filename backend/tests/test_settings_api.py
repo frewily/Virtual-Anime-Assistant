@@ -24,6 +24,8 @@ from settings.resolver import SettingsResolver
 from settings.security import SettingsSecurityMiddleware
 from settings.service import (
     SaveResult,
+    SettingsConfigSnapshot,
+    SettingsSaveSnapshot,
     SettingsServiceError,
     VersionedSettingsDraft,
 )
@@ -770,6 +772,182 @@ class SettingsApiAtomicSnapshotTests(unittest.TestCase):
             with self.assertRaises(Exception) as raised:
                 serializer(by_alias=True)
             self.assertNotIn("LEAK", str(raised.exception))
+
+    def test_structurally_valid_copy_injections_break_snapshot_integrity(self) -> None:
+        from settings.service import SettingsService
+
+        class NullSecrets:
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return None
+
+            def set(self, reference, value):
+                raise AssertionError
+
+            def delete(self, reference):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            service = SettingsService(
+                paths=paths,
+                file_store=SettingsFileStore(paths),
+                secret_store=NullSecrets(),
+                voice_catalog_loader=self._catalog,
+                environ={},
+            )
+            snapshot = service.get_config_snapshot()
+
+        raw_environment = "RAW-SECRET-ENVIRONMENT"
+        secret_field = snapshot.presentation.fields["llm.apiKey"]
+        poisoned_field = BaseModel.model_copy(
+            secret_field,
+            update={"environment_variable": raw_environment},
+        )
+        poisoned_fields = dict(snapshot.presentation.fields)
+        poisoned_fields["llm.apiKey"] = poisoned_field
+        poisoned_presentation = BaseModel.model_copy(
+            snapshot.presentation,
+            update={"fields": poisoned_fields},
+        )
+
+        poisoned_llm = BaseModel.model_copy(
+            snapshot.draft.llm,
+            update={"model": "RAW-SECRET-MODEL"},
+        )
+        poisoned_draft = BaseModel.model_copy(
+            snapshot.draft,
+            update={"revision": "b" * 64, "llm": poisoned_llm},
+        )
+        injected = (
+            BaseModel.model_copy(
+                snapshot, update={"presentation": poisoned_presentation}
+            ),
+            BaseModel.model_copy(snapshot, update={"draft": poisoned_draft}),
+        )
+        for candidate in injected:
+            for serializer in (candidate.model_dump, candidate.model_dump_json):
+                with self.subTest(serializer=serializer.__name__):
+                    with self.assertRaises(Exception) as raised:
+                        serializer(by_alias=True)
+                    rendered = str(raised.exception)
+                    self.assertNotIn("RAW-SECRET", rendered)
+
+        poisoned_secret = BaseModel.model_copy(
+            snapshot.draft.llm.api_key,
+            update={"operation": "replace"},
+        )
+        poisoned_llm = BaseModel.model_copy(
+            snapshot.draft.llm,
+            update={"api_key": poisoned_secret},
+        )
+        poisoned_draft = BaseModel.model_copy(
+            snapshot.draft, update={"llm": poisoned_llm}
+        )
+        candidate = BaseModel.model_copy(
+            snapshot, update={"draft": poisoned_draft}
+        )
+        with self.assertRaises(Exception) as raised:
+            candidate.model_dump_json(by_alias=True)
+        self.assertNotIn("replace", str(raised.exception))
+
+        save_snapshot = SettingsSaveSnapshot(
+            restart_required=True,
+            presentation=snapshot.presentation,
+            draft=snapshot.draft,
+        )
+        poisoned_save = BaseModel.model_copy(
+            save_snapshot, update={"restart_required": False}
+        )
+        with self.assertRaises(Exception) as raised:
+            poisoned_save.model_dump_json(by_alias=True)
+        self.assertNotIn("False", str(raised.exception))
+
+    def test_snapshot_integrity_covers_fastapi_aliases_and_model_construct(self) -> None:
+        from settings.service import SettingsService
+
+        class NullSecrets:
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return None
+
+            def set(self, reference, value):
+                raise AssertionError
+
+            def delete(self, reference):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            service = SettingsService(
+                paths=paths,
+                file_store=SettingsFileStore(paths),
+                secret_store=NullSecrets(),
+                voice_catalog_loader=self._catalog,
+                environ={},
+            )
+            snapshot = service.get_config_snapshot()
+
+        alias_dump = snapshot.model_dump(by_alias=True)
+        python_dump = snapshot.model_dump(by_alias=False)
+        self.assertIn("baseUrl", alias_dump["draft"]["llm"])
+        self.assertIn("base_url", python_dump["draft"]["llm"])
+        self.assertNotIn("baseUrl", python_dump["draft"]["llm"])
+
+        unsealed = SettingsConfigSnapshot.model_construct(
+            presentation=snapshot.presentation,
+            draft=snapshot.draft,
+        )
+        for serializer in (unsealed.model_dump, unsealed.model_dump_json):
+            with self.assertRaises(Exception) as raised:
+                serializer(by_alias=True)
+            self.assertNotIn("RAW", str(raised.exception))
+
+        raw_value = "RAW-SECRET-FASTAPI"
+        secret_field = snapshot.presentation.fields["llm.apiKey"]
+        poisoned_field = BaseModel.model_copy(
+            secret_field,
+            update={"environment_variable": raw_value},
+        )
+        fields = dict(snapshot.presentation.fields)
+        fields["llm.apiKey"] = poisoned_field
+        presentation = BaseModel.model_copy(
+            snapshot.presentation, update={"fields": fields}
+        )
+        poisoned = BaseModel.model_copy(
+            snapshot, update={"presentation": presentation}
+        )
+        fake = FakeSettingsService()
+        session = Session("valid-token", "valid-csrf", 2000.0)
+        fake.initialized = True
+        fake.sessions[session.token] = session
+        application = create_app(runtime_instance=Mock(), settings_service=fake)
+        client = TestClient(
+            application,
+            base_url=BASE_URL,
+            client=("127.0.0.1", 50000),
+        )
+        client.cookies.set(COOKIE_NAME, session.token)
+
+        fake.get_config_snapshot = Mock(return_value=snapshot)
+        normal = client.get("/api/settings/config")
+        self.assertEqual(normal.status_code, 200, normal.text)
+        self.assertIn("baseUrl", normal.json()["draft"]["llm"])
+
+        fake.get_config_snapshot = Mock(return_value=poisoned)
+
+        response = client.get("/api/settings/config")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.json()["error"]["code"], "SETTINGS_INTERNAL_ERROR"
+        )
+        self.assertNotIn(raw_value, response.text)
+        client.close()
 
     def test_real_api_secret_replacements_return_final_revision_and_retain_draft(self) -> None:
         from settings.service import SettingsService

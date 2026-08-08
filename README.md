@@ -14,6 +14,7 @@ Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron
 - 提供可扩展的工具注册表与权限状态机：低风险工具自动执行，高风险工具必须逐次确认，Electron 会展示待确认队列。
 - 使用 SQLite 持久化工具请求、确认状态和脱敏审计事件，并以原子事务处理确认竞争、过期与取消。
 - 通过 OneBot 11 反向 WebSocket 接入 QQ 私聊和群聊文字；私聊无需 `@`，群聊只有在允许群内结构化 `@机器人` 时触发。
+- 提供仅限本机的 Web 配置界面，统一管理 LLM、QQ / OneBot 与 TTS 设置，展示配置来源和环境变量接管状态，并支持脱敏连接测试。
 - 通过明确的记忆命令或管理 API 维护长期记忆，并按来源和用户隔离数据。
 - 支持客户端提供 `messageId` 作为幂等键；重复消息不会再次调用模型，冲突或模型故障只返回安全错误。
 - 默认监听 `127.0.0.1` 回环地址，Electron renderer 不具备 Node.js 权限。
@@ -58,6 +59,29 @@ npm start
 `npm start` 会先通过 esbuild 生成本地 renderer bundle，再启动 Electron。页面不会从远程 CDN 执行脚本。
 
 `npm run setup:live2d-dev` 仅用于恢复本地开发样例。没有执行该命令时，Electron 仍可启动，并显示缺少 Live2D 开发资源的提示。
+
+## Web 配置界面
+
+后端启动后，访问 `http://127.0.0.1:8080/settings`，或点击 Electron 托盘菜单中的「设置」。首次访问需要创建长度为 10～128 个字符的本地管理密码；后续操作使用 30 分钟绝对有效期的内存会话。会话 Cookie 设为 `HttpOnly`、`SameSite=Strict`、`Path=/` 且不指定 `Domain`，所有写操作还需要 CSRF Token。
+
+页面可以管理以下内容：
+
+- OpenAI 兼容 LLM：启用状态、服务地址、模型、API Key、超时、上下文限制和 Tool Calling。
+- QQ / OneBot：启用状态、Access Token、群/用户白名单、速率、突发容量、并发和动作超时。
+- TTS：GPT-SoVITS 地址、默认音色和生成音频保留时间。音色定义仍由 `config/voices.yml` 管理。
+- 连接测试：LLM 会发送最小真实请求；QQ 只做本地草稿校验并读取当前连接状态；TTS 只探测服务，不生成音频。
+
+非敏感值写入平台配置目录下的 `settings.json`。LLM API Key 和 QQ Access Token 通过 Python `keyring` 写入 macOS Keychain 或 Windows Credential Manager，不会写入 `settings.json`；页面只允许以 `retain`、`replace`、`delete`（保留、替换、删除）表达凭据操作，也不会回显已有秘密。首版正式支持 macOS 与 Windows 的系统凭据库；Linux 的凭据存储尚未作为支持目标，凭据库不可用时页面会禁用秘密修改并给出提示。
+
+默认配置文件位置如下：
+
+- macOS：`~/Library/Application Support/Virtual Anime Assistant/settings.json`
+- Windows：`%LOCALAPPDATA%\Virtual Anime Assistant\settings.json`
+- Linux：`$XDG_CONFIG_HOME/Virtual Anime Assistant/settings.json`；未设置 `XDG_CONFIG_HOME` 时通常位于 `~/.config/Virtual Anime Assistant/settings.json`
+
+配置解析优先级为「默认值 < `settings.json` < 系统凭据库 < 环境变量」。环境变量接管的字段会显示为只读，服务端也会拒绝保存对这些字段的修改。保存成功只代表配置已持久化，必须重启后端后才会用于运行时。
+
+如果 `settings.json` 损坏，运行时会使用默认值和有效环境变量继续启动，但设置 API 会拒绝覆盖损坏文件并提示先修复或移走文件。系统凭据库不可用、保存恢复失败或外部服务不可达时，页面只显示稳定、脱敏的错误信息，不会返回地址、密钥或服务响应正文。
 
 ## Live2D 开发模型
 
@@ -116,6 +140,7 @@ export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
 | `ASSISTANT_HOST` | `127.0.0.1` | FastAPI 监听地址；建议保持为回环地址 |
 | `ASSISTANT_PORT` | `8080` | FastAPI 监听端口 |
 | `ASSISTANT_GPT_SOVITS_URL` | `http://127.0.0.1:9880` | GPT-SoVITS 服务地址 |
+| `ASSISTANT_TTS_DEFAULT_VOICE_ID` | `character_001` | 默认音色 ID；必须存在于 `config/voices.yml` |
 | `ASSISTANT_AUDIO_MAX_AGE_SECONDS` | `86400` | 生成音频的最大保留时间 |
 | `ASSISTANT_LLM_ENABLED` | `false` | 是否启用真实大模型；支持 `1/true/yes/on` 和 `0/false/no/off` |
 | `ASSISTANT_LLM_TOOL_CALLING_ENABLED` | `false` | 是否允许模型调用显式授权的低风险只读工具 |
@@ -135,6 +160,8 @@ export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
 | `ASSISTANT_QQ_MAX_CONCURRENCY` | `4` | QQ 渠道全局并发上限，范围为 1～32 |
 | `ASSISTANT_QQ_ACTION_TIMEOUT_SECONDS` | `10` | OneBot 出站动作超时，范围为 1～60 秒 |
 
+以上与 Web 页面重叠的环境变量优先于页面保存值。被环境变量接管的字段会在页面中标记为只读。
+
 > **安全提示：** 记忆、会话等管理 API 当前没有鉴权。CORS 只能约束浏览器，不能阻止非浏览器客户端访问。除非服务位于具备鉴权能力的可信反向代理和网络隔离之后，否则不要把 `ASSISTANT_HOST` 设置为 `0.0.0.0` 或其他非回环地址。
 
 `ASSISTANT_DATA_DIR` 未配置时使用以下目录：
@@ -145,18 +172,15 @@ export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
 
 ### 配置真实模型
 
-在仓库根目录执行以下示例，并将地址、Key 和模型名替换为兼容服务提供的真实值：
+推荐通过 Web 配置界面填写兼容服务地址、API Key 和模型名。如果必须使用环境变量，请先在当前终端中安全地设置 `ASSISTANT_LLM_BASE_URL`、`ASSISTANT_LLM_API_KEY` 和 `ASSISTANT_LLM_MODEL`，避免把真实值写入脚本或 Shell 历史，然后在仓库根目录执行：
 
 ```bash
 export ASSISTANT_LLM_ENABLED=true
-export ASSISTANT_LLM_BASE_URL=https://api.example.com/v1
-export ASSISTANT_LLM_API_KEY=your-api-key
-export ASSISTANT_LLM_MODEL=your-model
 export ASSISTANT_LLM_TOOL_CALLING_ENABLED=false
 python3 backend/main.py
 ```
 
-API Key 只从环境变量读取。不要把真实 Key 写入仓库、配置文件或日志。未配置 `ASSISTANT_LLM_API_KEY` 时不会发送 `Authorization` 请求头，是否可用取决于兼容服务自身。
+API Key 可以来自环境变量或 Web 页面管理的系统凭据库。不要把真实 Key 写入仓库、`settings.json` 或日志。未配置有效 `ASSISTANT_LLM_API_KEY` 且系统凭据库中也没有已保存值时，不会发送 `Authorization` 请求头，是否可用取决于兼容服务自身。
 
 以上示例保留安全默认值，只启用纯文本模型路径。只有 `ASSISTANT_LLM_ENABLED=true` 与 `ASSISTANT_LLM_TOOL_CALLING_ENABLED=true` 同时成立时，后端才会向模型发送本次请求可用的 OpenAI 兼容 `tools`。需要显式启用时，仅修改工具开关：
 
@@ -178,7 +202,7 @@ QQ 渠道默认关闭。启用时必须配置有效 Token，并至少配置 1 �
 - 图片、语音、文件和其他富媒体不会被下载或传给模型。
 - 未授权、未 `@`、重复和超限消息会被静默忽略。
 
-NapCat 作为 WebSocket 客户端连接后端的 `/ws/qq`。共享 Token 只从环境变量读取，并通过 `Authorization: Bearer` 请求头进行常量时间校验。同一时间只允许 1 个机器人账号连接；断线、超时或 QQ 配置错误不会阻止 Electron 和本地聊天继续运行。
+NapCat 作为 WebSocket 客户端连接后端的 `/ws/qq`。共享 Token 可以来自环境变量或 Web 页面管理的系统凭据库，并通过 `Authorization: Bearer` 请求头进行常量时间校验。同一时间只允许 1 个机器人账号连接；断线、超时或 QQ 配置错误不会阻止 Electron 和本地聊天继续运行。
 
 安全状态可以通过以下接口查询：
 
@@ -256,27 +280,40 @@ HTTP 和 WebSocket 聊天请求可以提供长度为 1～200 的 `messageId`。�
 | GET | `/api/tools/requests/{request_id}` | 查询工具请求的安全状态与结果 |
 | POST | `/api/tools/requests/{request_id}/cancel` | 取消待确认或支持安全取消的运行请求 |
 | GET | `/api/qq/status` | 获取不含 Token 和白名单内容的 QQ 渠道状态 |
+| GET | `/api/settings/session` | 获取设置初始化和会话状态 |
+| POST | `/api/settings/setup`、`/api/settings/login`、`/api/settings/logout` | 初始化管理密码、登录或退出 |
+| GET / PUT | `/api/settings/config` | 获取脱敏配置快照或原子保存完整草稿 |
+| GET | `/api/settings/voices` | 获取可选音色摘要 |
+| POST | `/api/settings/test/llm`、`/api/settings/test/qq`、`/api/settings/test/tts` | 使用未保存草稿执行脱敏连接测试 |
 | WS | `/ws/avatar` | 双向角色消息通道 |
 | WS | `/ws/qq` | OneBot 11 反向 WebSocket；需要 Bearer Token 和 `X-Self-ID` |
 
 记忆与会话管理 API 当前仅支持本机 `local-user`：来源固定为 `desktop`，可管理的会话固定为 `desktop:local-user`。其他用户或来源的数据不会由这些端点返回或删除。
+
+`/settings` 和 `/api/settings/*` 具有独立的本机安全边界：客户端地址只允许 `127.0.0.1` 或 `::1`，`Host` 必须精确为 `127.0.0.1:8080`，状态变更请求的 `Origin` 必须精确为 `http://127.0.0.1:8080`；受保护接口还需要密码会话和 CSRF Token。这些限制不代表上方旧有管理 API 已获得相同鉴权，部署时仍须遵守前文的本机监听安全提示。
 
 ## 测试
 
 ```bash
 python3 -m compileall -q backend
 python3 -m unittest discover -s backend/tests -p 'test_*.py' -v
+python3 -m unittest discover -s backend/tests -p 'test_settings_*.py' -v
 npm --prefix desktop-app ci
+npm --prefix desktop-app run test:unit
 npm --prefix desktop-app test
 npm --prefix desktop-app run build:renderer
+node --check backend/settings/static/settings.js
+node --check desktop-app/src/main.js
 ```
 
-完整优化清单与实施状态见 [项目优化实施计划](docs/superpowers/plans/2026-07-22-project-hardening.md)、[工具权限状态机实施计划](docs/superpowers/plans/2026-07-29-tool-permission-state-machine.md)、[OneBot QQ 渠道设计](docs/superpowers/specs/2026-07-29-onebot-qq-channel-design.md) 和 [OneBot QQ 渠道实现计划](docs/superpowers/plans/2026-07-29-onebot-qq-channel.md)。
+浏览器验收需要先启动本机后端，再使用 Playwright 验证首次设密、登录、配置来源、连接测试和保存后的重启提示，同时检查浏览器控制台以及页面没有外部资源请求。
+
+Web 配置的边界与安全契约见 [本地 Web 配置界面设计规格](docs/superpowers/specs/2026-08-01-web-settings-interface-design.md)，实际任务、提交和验证关卡见 [本地 Web 配置界面实施计划与完成记录](docs/superpowers/plans/2026-08-01-web-settings-interface.md)。其他完整优化清单与实施状态见 [项目优化实施计划](docs/superpowers/plans/2026-07-22-project-hardening.md)、[工具权限状态机实施计划](docs/superpowers/plans/2026-07-29-tool-permission-state-machine.md)、[OneBot QQ 渠道设计](docs/superpowers/specs/2026-07-29-onebot-qq-channel-design.md) 和 [OneBot QQ 渠道实现计划](docs/superpowers/plans/2026-07-29-onebot-qq-channel.md)。
 
 ## 项目结构
 
 ```text
-backend/       FastAPI API、统一消息、工具权限、会话编排、模型网关、SQLite、场景、TTS 和平台监控
+backend/       FastAPI API、Web 设置、统一消息、工具权限、会话编排、模型网关、SQLite、场景、TTS 和平台监控
 config/        声线、回复和场景 YAML 配置
 desktop-app/   Electron 主进程、preload 和 renderer
 docs/          架构规格与分阶段实施计划

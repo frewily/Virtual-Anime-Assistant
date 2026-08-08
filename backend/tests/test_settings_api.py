@@ -195,6 +195,41 @@ class SettingsApiTests(unittest.TestCase):
         self.assertIn("object-src 'none'", csp)
         self.assertIn("frame-ancestors 'none'", csp)
 
+    def test_settings_page_and_assets_are_served_with_safe_headers(self) -> None:
+        for path, content_type, marker in (
+            ("/settings", "text/html", 'id="settings-shell"'),
+            ("/settings/", "text/html", 'id="settings-shell"'),
+            ("/settings/settings.css", "text/css", "--paper:"),
+            ("/settings/settings.js", "text/javascript", "clearSecretState"),
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(content_type, response.headers["content-type"])
+                self.assertIn(marker, response.text)
+                self.assert_safe_headers(response)
+
+    def test_settings_static_routes_reject_unknown_traversal_and_remote_clients(self) -> None:
+        for path in (
+            "/settings/missing.js",
+            "/settings/%2e%2e/routes.py",
+            "/settings/nested/settings.js",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assert_safe_headers(response)
+
+        remote = TestClient(
+            self.app, base_url=BASE_URL, client=("203.0.113.7", 50000)
+        )
+        try:
+            response = remote.get("/settings")
+            self.assertEqual(response.status_code, 403)
+            self.assert_safe_headers(response)
+        finally:
+            remote.close()
+
     def test_security_rejects_remote_client_and_does_not_trust_forwarded_headers(self) -> None:
         remote = TestClient(
             self.app,

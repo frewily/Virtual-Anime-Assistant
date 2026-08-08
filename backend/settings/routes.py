@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import ConfigDict, SecretStr
 from starlette.responses import JSONResponse
+from starlette.responses import FileResponse
 
 from api.dependencies import get_runtime, get_settings_service
 from api.qq import get_qq_status
@@ -17,6 +20,26 @@ from settings.validation import LLMTestRequest, QQTestRequest, TTSTestRequest
 
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+static_router = APIRouter(tags=["settings-page"])
+_STATIC_DIRECTORY = Path(__file__).with_name("static")
+_STATIC_ASSETS = {
+    "settings.css": "text/css",
+    "settings.js": "text/javascript",
+}
+
+
+@static_router.get("/settings", include_in_schema=False)
+@static_router.get("/settings/", include_in_schema=False)
+def settings_page():
+    return FileResponse(_STATIC_DIRECTORY / "index.html", media_type="text/html")
+
+
+@static_router.get("/settings/{asset_name}", include_in_schema=False)
+def settings_asset(asset_name: str):
+    media_type = _STATIC_ASSETS.get(asset_name)
+    if media_type is None:
+        raise SettingsHttpError(404, "SETTINGS_ASSET_NOT_FOUND", "页面资源不存在")
+    return FileResponse(_STATIC_DIRECTORY / asset_name, media_type=media_type)
 
 
 class _StrictRequest(RequestModel):
@@ -197,4 +220,4 @@ async def test_tts(
     return await service.test_tts(body)
 
 
-__all__ = ["SettingsHttpError", "router"]
+__all__ = ["SettingsHttpError", "router", "static_router"]

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Virtual Anime Assistant · 设置</title>
+  <link rel="stylesheet" href="/settings/settings.css">
+  <script src="/settings/settings.js" defer></script>
+</head>
+<body>
+  <div class="paper-grain" aria-hidden="true"></div>
+  <main id="settings-shell" class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">LOCAL CONTROL DESK · 本机控制台</p>
+        <h1>助手设置簿</h1>
+        <p class="lede">模型、QQ 与语音服务，都收在这一页里。</p>
+      </div>
+      <div class="session-card">
+        <div class="status-line">
+          <span id="session-dot" class="status-dot" aria-hidden="true"></span>
+          <span id="session-status">正在检查登录状态…</span>
+        </div>
+        <div class="status-line">
+          <span class="key-mark" aria-hidden="true">⌘</span>
+          <span id="keychain-status">系统凭据库：尚未读取</span>
+        </div>
+        <button id="logout-button" class="text-button" type="button" hidden>退出登录</button>
+      </div>
+    </header>
+
+    <section id="auth-panel" class="auth-panel" aria-labelledby="auth-title">
+      <div class="auth-copy">
+        <p class="section-number">00</p>
+        <h2 id="auth-title">先解锁设置簿</h2>
+        <p id="auth-description">设置仅能从本机访问，密码不会离开这台电脑。</p>
+      </div>
+      <form id="setup-form" class="auth-form" hidden>
+        <div class="field">
+          <label for="setup-password">设置密码</label>
+          <input id="setup-password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required>
+          <p class="hint">10–128 个字符</p>
+        </div>
+        <div class="field">
+          <label for="setup-confirm">再次输入</label>
+          <input id="setup-confirm" type="password" minlength="10" maxlength="128" autocomplete="new-password" required>
+        </div>
+        <button class="primary-button" type="submit">建立本机密码</button>
+      </form>
+      <form id="login-form" class="auth-form" hidden>
+        <div class="field">
+          <label for="login-password">设置密码</label>
+          <input id="login-password" type="password" maxlength="128" autocomplete="current-password" required>
+        </div>
+        <button class="primary-button" type="submit">进入设置簿</button>
+      </form>
+      <p id="auth-message" class="message" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="workspace" class="workspace" hidden>
+      <nav class="rail" aria-label="设置分类">
+        <p class="rail-caption">配置章节</p>
+        <div class="tabs" role="tablist" aria-orientation="vertical">
+          <button id="tab-llm" class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-llm" data-tab="llm"><span>01</span>模型</button>
+          <button id="tab-qq" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-qq" tabindex="-1" data-tab="qq"><span>02</span>QQ</button>
+          <button id="tab-tts" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-tts" tabindex="-1" data-tab="tts"><span>03</span>语音</button>
+        </div>
+        <p class="rail-note">所有配置只保存在本机。敏感凭据交给操作系统保管。</p>
+      </nav>
+
+      <div class="content">
+        <div id="error-summary" class="error-summary" role="alert" tabindex="-1" hidden></div>
+        <form id="settings-form" novalidate>
+          <section id="panel-llm" class="panel is-active" role="tabpanel" aria-labelledby="tab-llm" data-panel="llm">
+            <header class="panel-heading"><div><p class="section-number">01 · MODEL</p><h2>对话模型</h2><p>连接任意 OpenAI 兼容服务。</p></div><button class="test-button" type="button" data-test="llm">测试模型连接</button></header>
+            <fieldset>
+              <legend>基础连接</legend>
+              <div class="field switch-field"><div><label for="llm-enabled">启用模型</label><span class="source" data-source-for="llm.enabled"></span><p class="field-error" data-error-for="llm.enabled"></p></div><input id="llm-enabled" type="checkbox" data-path="llm.enabled"></div>
+              <div class="field"><label for="llm-base-url">接口地址</label><span class="source" data-source-for="llm.baseUrl"></span><input id="llm-base-url" type="url" data-path="llm.baseUrl" autocomplete="url"><p class="field-error" data-error-for="llm.baseUrl"></p></div>
+              <div class="field"><label for="llm-model">模型名称</label><span class="source" data-source-for="llm.model"></span><input id="llm-model" type="text" data-path="llm.model" autocomplete="off"><p class="field-error" data-error-for="llm.model"></p></div>
+              <div class="field secret-field"><label for="llm-api-key">API 密钥</label><span class="source" data-source-for="llm.apiKey"></span><div class="secret-row"><input id="llm-api-key" type="password" autocomplete="new-password" data-secret="llm.apiKey" placeholder="留空即保留原密钥"><button type="button" class="replace-button" data-replace="llm.apiKey">替换</button><button type="button" class="delete-button" data-delete="llm.apiKey">删除</button></div><p class="secret-state" data-secret-state="llm.apiKey">当前操作：保留</p><p class="field-error" data-error-for="llm.apiKey"></p></div>
+            </fieldset>
+            <fieldset>
+              <legend>对话边界</legend>
+              <div class="field-grid">
+                <div class="field"><label for="llm-timeout-seconds">超时（秒）</label><span class="source" data-source-for="llm.timeoutSeconds"></span><input id="llm-timeout-seconds" type="number" step="1" data-path="llm.timeoutSeconds"><p class="field-error" data-error-for="llm.timeoutSeconds"></p></div>
+                <div class="field"><label for="llm-max-context-messages">最大消息数</label><span class="source" data-source-for="llm.maxContextMessages"></span><input id="llm-max-context-messages" type="number" step="1" data-path="llm.maxContextMessages"><p class="field-error" data-error-for="llm.maxContextMessages"></p></div>
+                <div class="field"><label for="llm-max-context-chars">最大字符数</label><span class="source" data-source-for="llm.maxContextChars"></span><input id="llm-max-context-chars" type="number" step="1" data-path="llm.maxContextChars"><p class="field-error" data-error-for="llm.maxContextChars"></p></div>
+              </div>
+              <div class="field switch-field"><div><label for="llm-tool-calling-enabled">允许工具调用</label><span class="source" data-source-for="llm.toolCallingEnabled"></span><p class="field-error" data-error-for="llm.toolCallingEnabled"></p></div><input id="llm-tool-calling-enabled" type="checkbox" data-path="llm.toolCallingEnabled"></div>
+            </fieldset>
+            <p class="probe-status" data-test-status="llm" role="status" aria-live="polite"></p>
+          </section>
+
+          <section id="panel-qq" class="panel" role="tabpanel" aria-labelledby="tab-qq" data-panel="qq" hidden>
+            <header class="panel-heading"><div><p class="section-number">02 · ONEBOT</p><h2>QQ / OneBot</h2><p>收紧可访问范围与消息速率。</p></div><button class="test-button" type="button" data-test="qq">校验当前草稿</button></header>
+            <div class="runtime-note">QQ 连接测试仅做本地校验，并显示“当前运行配置”的连接状态。</div>
+            <fieldset>
+              <legend>接入与范围</legend>
+              <div class="field switch-field"><div><label for="qq-enabled">启用 QQ</label><span class="source" data-source-for="qq.enabled"></span><p class="field-error" data-error-for="qq.enabled"></p></div><input id="qq-enabled" type="checkbox" data-path="qq.enabled"></div>
+              <div class="field secret-field"><label for="qq-access-token">OneBot Token</label><span class="source" data-source-for="qq.accessToken"></span><div class="secret-row"><input id="qq-access-token" type="password" autocomplete="new-password" data-secret="qq.accessToken" placeholder="留空即保留原 Token"><button type="button" class="replace-button" data-replace="qq.accessToken">替换</button><button type="button" class="delete-button" data-delete="qq.accessToken">删除</button></div><p class="secret-state" data-secret-state="qq.accessToken">当前操作：保留</p><p class="field-error" data-error-for="qq.accessToken"></p></div>
+              <div class="field"><label for="qq-allowed-group-ids">允许的群号</label><span class="source" data-source-for="qq.allowedGroupIds"></span><input id="qq-allowed-group-ids" type="text" inputmode="numeric" data-path="qq.allowedGroupIds" placeholder="多个群号用逗号分隔"><p class="hint">例如：123456, 987654</p><p class="field-error" data-error-for="qq.allowedGroupIds"></p></div>
+              <div class="field"><label for="qq-allowed-user-ids">允许的用户 QQ</label><span class="source" data-source-for="qq.allowedUserIds"></span><input id="qq-allowed-user-ids" type="text" inputmode="numeric" data-path="qq.allowedUserIds" placeholder="多个 QQ 号用逗号分隔"><p class="field-error" data-error-for="qq.allowedUserIds"></p></div>
+            </fieldset>
+            <fieldset><legend>限流与动作</legend><div class="field-grid two-by-two">
+              <div class="field"><label for="qq-rate-per-minute">每分钟速率</label><span class="source" data-source-for="qq.ratePerMinute"></span><input id="qq-rate-per-minute" type="number" step="1" data-path="qq.ratePerMinute"><p class="field-error" data-error-for="qq.ratePerMinute"></p></div>
+              <div class="field"><label for="qq-rate-burst">突发额度</label><span class="source" data-source-for="qq.rateBurst"></span><input id="qq-rate-burst" type="number" step="1" data-path="qq.rateBurst"><p class="field-error" data-error-for="qq.rateBurst"></p></div>
+              <div class="field"><label for="qq-max-concurrency">最大并发</label><span class="source" data-source-for="qq.maxConcurrency"></span><input id="qq-max-concurrency" type="number" step="1" data-path="qq.maxConcurrency"><p class="field-error" data-error-for="qq.maxConcurrency"></p></div>
+              <div class="field"><label for="qq-action-timeout-seconds">动作超时（秒）</label><span class="source" data-source-for="qq.actionTimeoutSeconds"></span><input id="qq-action-timeout-seconds" type="number" step="1" data-path="qq.actionTimeoutSeconds"><p class="field-error" data-error-for="qq.actionTimeoutSeconds"></p></div>
+            </div></fieldset>
+            <p class="probe-status" data-test-status="qq" role="status" aria-live="polite"></p>
+          </section>
+
+          <section id="panel-tts" class="panel" role="tabpanel" aria-labelledby="tab-tts" data-panel="tts" hidden>
+            <header class="panel-heading"><div><p class="section-number">03 · VOICE</p><h2>语音合成</h2><p>选择 GPT-SoVITS 服务与默认音色。</p></div><button class="test-button" type="button" data-test="tts">测试语音服务</button></header>
+            <fieldset><legend>服务与音色</legend>
+              <div class="field"><label for="tts-gpt-sovits-url">GPT-SoVITS 地址</label><span class="source" data-source-for="tts.gptSovitsUrl"></span><input id="tts-gpt-sovits-url" type="url" data-path="tts.gptSovitsUrl"><p class="field-error" data-error-for="tts.gptSovitsUrl"></p></div>
+              <div class="field"><label for="tts-default-voice-id">默认音色</label><span class="source" data-source-for="tts.defaultVoiceId"></span><select id="tts-default-voice-id" data-path="tts.defaultVoiceId"><option value="">正在读取音色…</option></select><p class="field-error" data-error-for="tts.defaultVoiceId"></p></div>
+              <div class="field"><label for="tts-audio-max-age-seconds">音频保留时间（秒）</label><span class="source" data-source-for="tts.audioMaxAgeSeconds"></span><input id="tts-audio-max-age-seconds" type="number" step="1" data-path="tts.audioMaxAgeSeconds"><p class="field-error" data-error-for="tts.audioMaxAgeSeconds"></p></div>
+            </fieldset>
+            <p class="probe-status" data-test-status="tts" role="status" aria-live="polite"></p>
+          </section>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer id="action-bar" class="action-bar" hidden>
+    <div class="change-state"><span id="dirty-notice">没有未保存的修改</span><span id="restart-notice" hidden>保存成功，需要重启助手后生效</span></div>
+    <p id="save-status" role="status" aria-live="polite"></p>
+    <button id="save-settings" class="primary-button" type="submit" form="settings-form">保存全部设置</button>
+  </footer>
+</body>
+</html>

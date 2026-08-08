@@ -32,7 +32,11 @@ from core.tts import AUDIO_DIR
 from domain.tools import ToolEvent
 from settings.auth import LoginRateLimited, PasswordPolicyError
 from settings.resolver import RuntimeSettings
-from settings.routes import SettingsHttpError, router as settings_router
+from settings.routes import (
+    SettingsHttpError,
+    router as settings_router,
+    static_router as settings_static_router,
+)
 from settings.security import SettingsSecurityMiddleware, is_settings_path
 from settings.service import (
     SettingsService,
@@ -330,6 +334,7 @@ def create_app(
     app.include_router(tools_router, prefix="/api")
     app.include_router(qq_status_router, prefix="/api")
     app.include_router(settings_router, prefix="/api")
+    app.include_router(settings_static_router)
     app.include_router(ws_router)
     app.include_router(qq_websocket_router)
     app.mount(

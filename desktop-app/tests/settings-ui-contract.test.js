@@ -30,9 +30,20 @@ test('settings page is self-contained, semantic, and covers every editable field
     assert.match(html, /aria-live="(?:polite|assertive)"/);
     assert.match(html, /<script src="\/settings\/settings\.js" defer><\/script>/);
     assert.match(html, /<link rel="stylesheet" href="\/settings\/settings\.css">/);
+    assert.match(html, /<link rel="icon" href="\/settings\/favicon\.svg" type="image\/svg\+xml">/);
     assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>/);
     assert.doesNotMatch(html, /<style\b|\son\w+=/);
     assert.doesNotMatch(html, /https?:\/\//);
+});
+
+test('settings favicon is a local self-contained SVG asset', () => {
+    const favicon = read('favicon.svg');
+    assert.match(favicon, /<svg\b[^>]*viewBox="0 0 32 32"/);
+    assert.match(favicon, /<title>Virtual Anime Assistant<\/title>/);
+    assert.doesNotMatch(favicon, /<(?:script|foreignObject)\b/i);
+    assert.doesNotMatch(favicon, /\b(?:href|src)\s*=/i);
+    assert.doesNotMatch(favicon, /url\s*\(|data:/i);
+    assert.doesNotMatch(favicon.replace('http://www.w3.org/2000/svg', ''), /https?:\/\//i);
 });
 
 test('settings controller preserves secrets and uses the secured API contract', () => {

@@ -201,6 +201,7 @@ class SettingsApiTests(unittest.TestCase):
             ("/settings/", "text/html", 'id="settings-shell"'),
             ("/settings/settings.css", "text/css", "--paper:"),
             ("/settings/settings.js", "text/javascript", "clearSecretState"),
+            ("/settings/favicon.svg", "image/svg+xml", "<svg"),
         ):
             with self.subTest(path=path):
                 response = self.client.get(path)
@@ -215,6 +216,7 @@ class SettingsApiTests(unittest.TestCase):
             ("/settings/", "text/html"),
             ("/settings/settings.css", "text/css"),
             ("/settings/settings.js", "text/javascript"),
+            ("/settings/favicon.svg", "image/svg+xml"),
         ):
             with self.subTest(path=path):
                 response = self.client.head(path)

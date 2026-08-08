@@ -28,6 +28,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 static_router = APIRouter(tags=["settings-page"])
 _STATIC_DIRECTORY = Path(__file__).with_name("static")
 _STATIC_ASSETS = {
+    "favicon.svg": "image/svg+xml",
     "settings.css": "text/css",
     "settings.js": "text/javascript",
 }

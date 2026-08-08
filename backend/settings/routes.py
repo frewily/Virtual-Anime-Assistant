@@ -35,11 +35,14 @@ _STATIC_ASSETS = {
 
 @static_router.get("/settings", include_in_schema=False)
 @static_router.get("/settings/", include_in_schema=False)
+@static_router.head("/settings", include_in_schema=False)
+@static_router.head("/settings/", include_in_schema=False)
 def settings_page():
     return FileResponse(_STATIC_DIRECTORY / "index.html", media_type="text/html")
 
 
 @static_router.get("/settings/{asset_name}", include_in_schema=False)
+@static_router.head("/settings/{asset_name}", include_in_schema=False)
 def settings_asset(asset_name: str):
     media_type = _STATIC_ASSETS.get(asset_name)
     if media_type is None:

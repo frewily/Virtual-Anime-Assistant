@@ -37,6 +37,7 @@ test('settings page is self-contained, semantic, and covers every editable field
 
 test('settings controller preserves secrets and uses the secured API contract', () => {
     const source = read('settings.js');
+    const html = read('index.html');
     assert.match(source, /const API = ['"]\/api\/settings['"]/);
     for (const suffix of ['session', 'logout', 'config', 'voices']) {
         assert.match(source, new RegExp(`API\\}\\/${suffix}`));
@@ -50,6 +51,7 @@ test('settings controller preserves secrets and uses the secured API contract', 
     assert.match(source, /X-CSRF-Token/);
     assert.match(source, /method:\s*['"]PUT['"]/);
     assert.match(source, /window\.confirm/);
+    assert.equal((html.match(/data-retain=/g) || []).length, 2);
     assert.match(source, /beforeunload/);
     assert.match(source, /409/);
     assert.match(source, /401/);

@@ -31,8 +31,16 @@
     csrfToken: null,
     draft: null,
     dirty: false,
+    editEpoch: 0,
+    fieldEpochs: new Map(),
+    secretEpochs: new Map(),
     restartPending: false,
     reauthPending: false,
+    sessionGeneration: 0,
+    saveGeneration: 0,
+    saveBusy: false,
+    logoutBusy: false,
+    probeGeneration: 0,
     readOnlyPaths: new Set(),
     secrets: {
       'llm.apiKey': { operation: 'retain', value: null },
@@ -105,9 +113,13 @@
   }
 
   function abortProbes() {
-    for (const controller of state.probes.values()) controller.abort();
+    state.probeGeneration += 1;
+    for (const record of state.probes.values()) {
+      record.controller.abort();
+      record.button.disabled = false;
+      if (record.status) record.status.textContent = '测试已过期';
+    }
     state.probes.clear();
-    for (const button of document.querySelectorAll('[data-test]')) button.disabled = false;
   }
 
   function clearSecretState() {
@@ -121,6 +133,7 @@
   }
 
   function expireSession() {
+    state.sessionGeneration += 1;
     state.authenticated = false;
     state.csrfToken = null;
     state.reauthPending = true;
@@ -174,8 +187,35 @@
   }
 
   function applySnapshot(snapshot) {
+    return mergeSnapshot(snapshot, null);
+  }
+
+  function mergeSnapshot(snapshot, saveContext) {
     if (!snapshot || typeof snapshot !== 'object' || !snapshot.draft || !snapshot.presentation) {
       throw new ApiError(0, 'INVALID_RESPONSE', {});
+    }
+    abortProbes();
+    const requestEpoch = saveContext ? saveContext.editEpoch : Number.POSITIVE_INFINITY;
+    const preservedFields = new Map();
+    const preservedSecrets = new Map();
+    if (saveContext) {
+      for (const control of controls()) {
+        if ((state.fieldEpochs.get(control.dataset.path) || 0) > requestEpoch) {
+          preservedFields.set(control.dataset.path, {
+            checked: control.checked,
+            value: control.value
+          });
+        }
+      }
+      for (const path of SECRET_PATHS) {
+        const captured = saveContext.secretEpochs.get(path) || 0;
+        if ((state.secretEpochs.get(path) || 0) > captured) {
+          preservedSecrets.set(path, {
+            operation: state.secrets[path].operation,
+            value: state.secrets[path].value
+          });
+        }
+      }
     }
     state.draft = snapshot.draft;
     state.readOnlyPaths.clear();
@@ -188,7 +228,13 @@
         ? presentation.value : valueAt(snapshot.draft, control.dataset.path);
       assignControl(control, shownValue);
     }
-    clearSecretState();
+    for (const path of SECRET_PATHS) {
+      const input = Array.from(document.querySelectorAll('[data-secret]')).find((node) => node.dataset.secret === path);
+      const preserved = preservedSecrets.get(path);
+      state.secrets[path] = preserved || { operation: 'retain', value: null };
+      if (input) input.value = preserved && preserved.value ? preserved.value : '';
+      updateSecretState(path);
+    }
     for (const [path, presentation] of Object.entries(fields)) applyPresentation(path, presentation);
     const keychainAvailable = snapshot.presentation.keychainAvailable === true;
     byId('keychain-status').textContent = keychainAvailable
@@ -197,13 +243,31 @@
       for (const path of SECRET_PATHS) {
         const input = Array.from(document.querySelectorAll('[data-secret]')).find((node) => node.dataset.secret === path);
         if (input) input.disabled = true;
-        for (const button of document.querySelectorAll('[data-replace], [data-delete]')) {
-          if (button.dataset.replace === path || button.dataset.delete === path) button.disabled = true;
+        for (const button of document.querySelectorAll('[data-replace], [data-retain], [data-delete]')) {
+          if (button.dataset.replace === path || button.dataset.retain === path || button.dataset.delete === path) button.disabled = true;
         }
       }
     }
+    for (const [path, preserved] of preservedFields.entries()) {
+      if (state.readOnlyPaths.has(path)) continue;
+      const control = controlForPath(path);
+      if (!control) continue;
+      control.checked = preserved.checked;
+      control.value = preserved.value;
+    }
+    if (saveContext) {
+      for (const [path, epoch] of state.fieldEpochs.entries()) {
+        if (epoch <= requestEpoch) state.fieldEpochs.delete(path);
+      }
+      for (const [path, epoch] of state.secretEpochs.entries()) {
+        if (epoch <= (saveContext.secretEpochs.get(path) || 0)) state.secretEpochs.delete(path);
+      }
+    } else {
+      state.fieldEpochs.clear();
+      state.secretEpochs.clear();
+    }
     clearErrors();
-    state.dirty = false;
+    state.dirty = preservedFields.size > 0 || preservedSecrets.size > 0;
     updateDirtyNotice();
     updateRestartNotice();
   }
@@ -230,8 +294,8 @@
         secretInput.placeholder = presentation.missing
           ? '凭据缺失，请替换' : (presentation.configured ? '留空即保留原凭据' : '尚未配置');
       }
-      for (const button of document.querySelectorAll('[data-replace], [data-delete]')) {
-        if (button.dataset.replace === path || button.dataset.delete === path) button.disabled = presentation.readOnly || presentation.source === 'environment';
+      for (const button of document.querySelectorAll('[data-replace], [data-retain], [data-delete]')) {
+        if (button.dataset.replace === path || button.dataset.retain === path || button.dataset.delete === path) button.disabled = presentation.readOnly || presentation.source === 'environment';
       }
       if (unavailable && presentation.missing) {
         const stateNode = Array.from(document.querySelectorAll('[data-secret-state]')).find((node) => node.dataset.secretState === path);
@@ -314,8 +378,8 @@
     return Array.from(new Set(ids));
   }
 
-  function readControl(path) {
-    if (state.readOnlyPaths.has(path)) return valueAt(state.draft, path);
+  function readControl(path, useEffectiveValue = false) {
+    if (!useEffectiveValue && state.readOnlyPaths.has(path)) return valueAt(state.draft, path);
     const control = controlForPath(path);
     if (!control) throw new FieldInputError(path, '缺少配置控件');
     if (control.type === 'checkbox') return control.checked;
@@ -368,6 +432,28 @@
     };
   }
 
+  function collectProbe(section) {
+    if (!state.draft || typeof state.draft.revision !== 'string') throw new ApiError(0, 'INVALID_RESPONSE', {});
+    if (section === 'llm') return {
+      revision: state.draft.revision,
+      baseUrl: readControl('llm.baseUrl', true) || '',
+      model: readControl('llm.model', true) || '',
+      apiKey: secretMutation('llm.apiKey')
+    };
+    if (section === 'qq') return {
+      revision: state.draft.revision,
+      enabled: readControl('qq.enabled', true),
+      allowedGroupIds: readControl('qq.allowedGroupIds', true),
+      allowedUserIds: readControl('qq.allowedUserIds', true),
+      ratePerMinute: readControl('qq.ratePerMinute', true),
+      rateBurst: readControl('qq.rateBurst', true),
+      maxConcurrency: readControl('qq.maxConcurrency', true),
+      actionTimeoutSeconds: readControl('qq.actionTimeoutSeconds', true),
+      accessToken: secretMutation('qq.accessToken')
+    };
+    return { gptSovitsUrl: readControl('tts.gptSovitsUrl', true) };
+  }
+
   function updateSecretState(path) {
     const node = Array.from(document.querySelectorAll('[data-secret-state]')).find((item) => item.dataset.secretState === path);
     if (!node) return;
@@ -375,9 +461,19 @@
     node.textContent = labels[state.secrets[path].operation];
   }
 
-  function markDirty() {
+  function markFieldDirty(path) {
+    state.editEpoch += 1;
+    if (path) {
+      state.fieldEpochs.set(path, state.editEpoch);
+      if (SECRET_PATHS.includes(path)) state.secretEpochs.set(path, state.editEpoch);
+    }
     state.dirty = true;
+    abortProbes();
     updateDirtyNotice();
+  }
+
+  function markDirty() {
+    markFieldDirty(null);
   }
 
   function updateDirtyNotice() {
@@ -415,15 +511,26 @@
 
   async function saveSettings(event) {
     event.preventDefault();
+    if (state.saveBusy) return;
+    state.saveBusy = true;
+    state.saveGeneration += 1;
+    const saveGeneration = state.saveGeneration;
+    const sessionGeneration = state.sessionGeneration;
     clearErrors();
+    abortProbes();
     const button = byId('save-settings');
     button.disabled = true;
     byId('save-status').textContent = '正在安全保存…';
     try {
       const draft = collectDraft();
+      const context = {
+        editEpoch: state.editEpoch,
+        secretEpochs: new Map(state.secretEpochs)
+      };
       const snapshot = await request(`${API}/config`, { method: 'PUT', write: true, body: draft });
+      if (sessionGeneration !== state.sessionGeneration || !state.authenticated) return;
       state.restartPending = state.restartPending || snapshot.restartRequired === true;
-      applySnapshot(snapshot);
+      mergeSnapshot(snapshot, context);
       byId('save-status').textContent = '保存成功';
     } catch (error) {
       if (error instanceof FieldInputError) {
@@ -435,43 +542,30 @@
       }
       byId('save-status').textContent = '';
     } finally {
-      button.disabled = false;
+      if (saveGeneration === state.saveGeneration) {
+        state.saveBusy = false;
+        button.disabled = false;
+      }
     }
-  }
-
-  function probeBody(section, draft) {
-    if (section === 'llm') return {
-      revision: draft.revision,
-      baseUrl: draft.llm.baseUrl || '',
-      model: draft.llm.model || '',
-      apiKey: secretMutation('llm.apiKey')
-    };
-    if (section === 'qq') return {
-      revision: draft.revision,
-      enabled: draft.qq.enabled,
-      allowedGroupIds: draft.qq.allowedGroupIds,
-      allowedUserIds: draft.qq.allowedUserIds,
-      ratePerMinute: draft.qq.ratePerMinute,
-      rateBurst: draft.qq.rateBurst,
-      maxConcurrency: draft.qq.maxConcurrency,
-      actionTimeoutSeconds: draft.qq.actionTimeoutSeconds,
-      accessToken: secretMutation('qq.accessToken')
-    };
-    return { gptSovitsUrl: draft.tts.gptSovitsUrl };
   }
 
   async function runProbe(button) {
     const section = button.dataset.test;
     const status = Array.from(document.querySelectorAll('[data-test-status]')).find((node) => node.dataset.testStatus === section);
+    abortProbes();
+    const generation = state.probeGeneration;
+    const revision = state.draft && state.draft.revision;
     const controller = new AbortController();
-    state.probes.set(section, controller);
+    const record = { button, controller, generation, revision, status };
+    state.probes.set(section, record);
     button.disabled = true;
     status.textContent = '正在测试，不会保存配置…';
     try {
-      const draft = collectDraft();
+      const body = collectProbe(section);
       const result = await request(`${API}/test/${section}`, {
-        method: 'POST', write: true, body: probeBody(section, draft), signal: controller.signal
+        method: 'POST', write: true, body, signal: controller.signal
       });
+      if (state.probes.get(section) !== record || state.probeGeneration !== generation || !state.draft || state.draft.revision !== revision) return;
       let message = result.ok ? '测试成功' : (CODE_MESSAGES[result.code] || '测试未通过，请检查本节配置');
       if (section === 'qq' && result.status && typeof result.status.state === 'string') {
         const states = { disabled: '未启用', misconfigured: '配置异常', disconnected: '未连接', connected: '已连接' };
@@ -479,19 +573,24 @@
       }
       status.textContent = message;
     } catch (error) {
-      if (error && error.name === 'AbortError') status.textContent = '测试已取消';
+      if (state.probes.get(section) !== record || state.probeGeneration !== generation) return;
+      if (error instanceof FieldInputError) {
+        showFieldErrors({ [error.path]: error.safeMessage }, error.safeMessage);
+        status.textContent = '请修正本节标记的配置';
+      } else if (error && error.name === 'AbortError') status.textContent = '测试已取消';
       else if (!(error instanceof ApiError && error.status === 401)) status.textContent = safeMessage(error, '测试失败，请稍后重试');
     } finally {
-      if (state.probes.get(section) === controller) state.probes.delete(section);
-      button.disabled = false;
+      if (state.probes.get(section) === record && state.probeGeneration === generation) {
+        state.probes.delete(section);
+        button.disabled = false;
+      }
     }
   }
 
   function selectTab(name, focus = false) {
     const previous = document.querySelector('.panel.is-active');
     if (previous && previous.dataset.panel !== name) {
-      const controller = state.probes.get(previous.dataset.panel);
-      if (controller) controller.abort();
+      abortProbes();
     }
     for (const tab of document.querySelectorAll('[role="tab"]')) {
       const selected = tab.dataset.tab === name;
@@ -520,6 +619,52 @@
   orientationQuery.addEventListener('change', updateTabOrientation);
   updateTabOrientation();
 
+  function retainSecret(path) {
+    if (state.readOnlyPaths.has(path)) return;
+    const input = Array.from(document.querySelectorAll('[data-secret]')).find((node) => node.dataset.secret === path);
+    if (input) input.value = '';
+    state.secrets[path] = { operation: 'retain', value: null };
+    updateSecretState(path);
+    markFieldDirty(path);
+  }
+
+  function completeLogout() {
+    state.sessionGeneration += 1;
+    state.saveGeneration += 1;
+    state.saveBusy = false;
+    abortProbes();
+    clearSecretState();
+    state.authenticated = false;
+    state.csrfToken = null;
+    state.reauthPending = false;
+    state.draft = null;
+    state.dirty = false;
+    state.fieldEpochs.clear();
+    state.secretEpochs.clear();
+    updateDirtyNotice();
+    showAuth(true, '已经退出登录。');
+  }
+
+  async function performLogout() {
+    if (state.logoutBusy) return;
+    if (state.dirty && !window.confirm('有尚未保存的修改，仍要退出登录吗？')) return;
+    state.logoutBusy = true;
+    const button = byId('logout-button');
+    button.disabled = true;
+    abortProbes();
+    try {
+      await request(`${API}/logout`, { method: 'POST', write: true, body: {} });
+      completeLogout();
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 401)) {
+        byId('save-status').textContent = safeMessage(error, '退出失败，登录状态和未保存修改仍已保留。');
+      }
+    } finally {
+      state.logoutBusy = false;
+      if (state.authenticated) button.disabled = false;
+    }
+  }
+
   byId('setup-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const password = byId('setup-password').value;
@@ -537,27 +682,21 @@
     catch (error) { byId('login-password').value = ''; byId('auth-message').textContent = safeMessage(error, '登录失败，请稍后重试。'); }
   });
 
-  byId('logout-button').addEventListener('click', async () => {
-    abortProbes();
-    try { await request(`${API}/logout`, { method: 'POST', write: true, body: {} }); } catch (_) { /* local state still closes */ }
-    clearSecretState();
-    state.authenticated = false;
-    state.csrfToken = null;
-    state.reauthPending = false;
-    state.draft = null;
-    state.dirty = false;
-    showAuth(true, '已经退出登录。');
-  });
+  byId('logout-button').addEventListener('click', performLogout);
 
   byId('settings-form').addEventListener('submit', saveSettings);
   byId('settings-form').addEventListener('input', (event) => {
     if (event.target.matches('[data-secret]')) {
       const path = event.target.dataset.secret;
       state.secrets[path].value = event.target.value;
+      markFieldDirty(path);
+      return;
     }
-    markDirty();
+    markFieldDirty(event.target.dataset.path || null);
   });
-  byId('settings-form').addEventListener('change', markDirty);
+  byId('settings-form').addEventListener('change', (event) => {
+    markFieldDirty(event.target.dataset.path || null);
+  });
 
   for (const button of document.querySelectorAll('[data-replace]')) {
     button.addEventListener('click', () => {
@@ -567,8 +706,12 @@
       state.secrets[path].value = input.value;
       updateSecretState(path);
       input.focus();
-      markDirty();
+      markFieldDirty(path);
     });
+  }
+
+  for (const button of document.querySelectorAll('[data-retain]')) {
+    button.addEventListener('click', () => retainSecret(button.dataset.retain));
   }
 
   for (const button of document.querySelectorAll('[data-delete]')) {
@@ -580,7 +723,7 @@
       state.secrets[path].operation = 'delete';
       state.secrets[path].value = null;
       updateSecretState(path);
-      markDirty();
+      markFieldDirty(path);
     });
   }
 

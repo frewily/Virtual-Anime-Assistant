@@ -163,9 +163,9 @@ input[aria-invalid="true"], select[aria-invalid="true"] { border-color: var(--br
 .switch-field input { width: 48px; height: 26px; accent-color: var(--brick); }
 .hint, .secret-state { margin: 5px 0 0; color: var(--muted); font-size: .72rem; }
 .field-error { min-height: 1em; margin: 5px 0 0; color: var(--brick-dark); font-size: .75rem; }
-.secret-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
+.secret-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; }
 
-.primary-button, .test-button, .replace-button, .delete-button {
+.primary-button, .test-button, .replace-button, .retain-button, .delete-button {
   padding: 0 18px;
   border-radius: 3px;
   font-weight: 650;
@@ -175,6 +175,7 @@ input[aria-invalid="true"], select[aria-invalid="true"] { border-color: var(--br
 .test-button { border: 1px solid var(--coffee); color: var(--coffee); background: transparent; }
 .test-button:hover { color: var(--paper-light); background: var(--coffee); }
 .replace-button { border: 1px solid var(--jade); color: var(--jade); background: transparent; }
+.retain-button { border: 1px solid var(--coffee); color: var(--coffee); background: transparent; }
 .delete-button { border: 1px solid rgba(165,70,50,.5); color: var(--brick-dark); background: transparent; }
 
 .runtime-note, .error-summary, .probe-status { padding: 12px 14px; border-left: 3px solid var(--jade); background: rgba(40,121,111,.08); color: #285c55; font-size: .82rem; line-height: 1.55; }

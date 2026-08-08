@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 import hashlib
 import hmac
@@ -617,6 +618,25 @@ class SettingsService:
         request: LLMProbeDraft,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> ConnectionTestResult:
+        prepared, catalog = await asyncio.to_thread(
+            self._prepare_llm_probe,
+            request,
+        )
+        api_key = prepared.api_key
+        if api_key is None or not api_key.get_secret_value().strip():
+            return ConnectionTestResult(
+                ok=False,
+                code=ConnectionTestCode.VALIDATION_FAILED,
+            )
+        return await SettingsValidationService(catalog).test_llm(
+            prepared,
+            transport,
+        )
+
+    def _prepare_llm_probe(
+        self,
+        request: LLMProbeDraft,
+    ) -> tuple[LLMTestRequest, VoiceCatalog]:
         with _LIFECYCLE_LOCK:
             current = self._current_probe_settings(request.revision)
             api_key = self._resolve_probe_secret(
@@ -629,20 +649,26 @@ class SettingsService:
                 model=request.model,
                 api_key=api_key,
             )
-        if api_key is None or not api_key.get_secret_value().strip():
-            return ConnectionTestResult(
-                ok=False,
-                code=ConnectionTestCode.VALIDATION_FAILED,
-            )
-        return await SettingsValidationService(
-            self._load_voice_catalog()
-        ).test_llm(prepared, transport)
+            return prepared, self._load_voice_catalog()
 
     async def test_qq(
         self,
         request: QQProbeDraft,
         current_status: QQRuntimeStatus | Mapping[str, object],
     ) -> QQConnectionTestResult:
+        prepared, catalog = await asyncio.to_thread(
+            self._prepare_qq_probe,
+            request,
+        )
+        return await SettingsValidationService(catalog).test_qq(
+            prepared,
+            current_status,
+        )
+
+    def _prepare_qq_probe(
+        self,
+        request: QQProbeDraft,
+    ) -> tuple[QQTestRequest, VoiceCatalog]:
         with _LIFECYCLE_LOCK:
             current = self._current_probe_settings(request.revision)
             access_token = self._resolve_probe_secret(
@@ -660,18 +686,18 @@ class SettingsService:
                 action_timeout_seconds=request.action_timeout_seconds,
                 access_token=access_token,
             )
-        return await SettingsValidationService(
-            self._load_voice_catalog()
-        ).test_qq(prepared, current_status)
+            return prepared, self._load_voice_catalog()
 
     async def test_tts(
         self,
         request: TTSTestRequest,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> ConnectionTestResult:
-        return await SettingsValidationService(
-            self._load_voice_catalog()
-        ).test_tts(request, transport)
+        catalog = await asyncio.to_thread(self._load_voice_catalog)
+        return await SettingsValidationService(catalog).test_tts(
+            request,
+            transport,
+        )
 
     def _load_settings(self) -> PersistedSettings:
         load_failed = False

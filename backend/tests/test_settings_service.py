@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -39,6 +40,7 @@ from settings.validation import (
     SettingsDraft,
     SettingsValidationError,
     SettingsValidationService,
+    TTSTestRequest,
 )
 
 
@@ -343,6 +345,147 @@ class SettingsServiceTests(unittest.TestCase):
                 )
             )
         self.assertEqual(unavailable.exception.code, "KEYCHAIN_UNAVAILABLE")
+
+    def test_probe_preparation_does_not_block_the_event_loop(self) -> None:
+        class SlowSecrets(MemorySecretStore):
+            def available(self) -> bool:
+                time.sleep(0.25)
+                return super().available()
+
+        slow_secrets = SlowSecrets()
+        persisted = self.file_store.load()
+        persisted = persisted.model_copy(
+            update={
+                "llm": persisted.llm.model_copy(
+                    update={"api_key_ref": "slow-ref"}
+                )
+            }
+        )
+        self.file_store.save(persisted)
+        slow_secrets.values["slow-ref"] = "slow-secret"
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=slow_secrets,
+            voice_catalog_loader=catalog,
+            environ={},
+        )
+        request = LLMProbeDraft(
+            revision=service.get_draft().revision,
+            baseUrl="http://127.0.0.1:11434/v1",
+            model="model",
+            apiKey={"operation": "retain"},
+        )
+
+        async def exercise() -> float:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            with patch.object(
+                SettingsValidationService,
+                "test_llm",
+                new=AsyncMock(
+                    return_value=ConnectionTestResult(
+                        ok=True,
+                        code=ConnectionTestCode.SUCCESS,
+                    )
+                ),
+            ):
+                task = asyncio.create_task(service.test_llm(request))
+                await asyncio.sleep(0.05)
+                heartbeat = loop.time() - started
+                await task
+            return heartbeat
+
+        self.assertLess(asyncio.run(exercise()), 0.15)
+
+    def test_qq_and_tts_probe_preparation_do_not_block_the_event_loop(self) -> None:
+        class SlowSecrets(MemorySecretStore):
+            def available(self) -> bool:
+                time.sleep(0.25)
+                return super().available()
+
+        slow_secrets = SlowSecrets()
+        persisted = self.file_store.load()
+        persisted = persisted.model_copy(
+            update={
+                "qq": persisted.qq.model_copy(
+                    update={"access_token_ref": "slow-qq-ref"}
+                )
+            }
+        )
+        self.file_store.save(persisted)
+        slow_secrets.values["slow-qq-ref"] = "slow-qq-secret"
+
+        def slow_catalog() -> VoiceCatalog:
+            time.sleep(0.25)
+            return catalog()
+
+        service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=slow_secrets,
+            voice_catalog_loader=slow_catalog,
+            environ={},
+        )
+        revision = service.get_draft().revision
+
+        async def heartbeat(coroutine) -> float:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            task = asyncio.create_task(coroutine)
+            await asyncio.sleep(0.05)
+            elapsed = loop.time() - started
+            await task
+            return elapsed
+
+        qq = QQProbeDraft(
+            revision=revision,
+            enabled=True,
+            allowedUserIds=[123],
+            accessToken={"operation": "retain"},
+        )
+        status = {
+            "enabled": True,
+            "state": "connected",
+            "allowedGroupCount": 0,
+            "allowedUserCount": 1,
+        }
+        with patch.object(
+            SettingsValidationService,
+            "test_qq",
+            new=AsyncMock(
+                return_value=QQConnectionTestResult(
+                    ok=True,
+                    code=ConnectionTestCode.SUCCESS,
+                )
+            ),
+        ):
+            self.assertLess(
+                asyncio.run(heartbeat(service.test_qq(qq, status))),
+                0.15,
+            )
+        with patch.object(
+            SettingsValidationService,
+            "test_tts",
+            new=AsyncMock(
+                return_value=ConnectionTestResult(
+                    ok=True,
+                    code=ConnectionTestCode.SUCCESS,
+                )
+            ),
+        ):
+            self.assertLess(
+                asyncio.run(
+                    heartbeat(
+                        service.test_tts(
+                            TTSTestRequest(
+                                gptSovitsUrl="http://127.0.0.1:9880"
+                            )
+                        )
+                    )
+                ),
+                0.15,
+            )
 
     def test_setup_reuses_auth_password_policy(self) -> None:
         with self.assertRaises(PasswordPolicyError):

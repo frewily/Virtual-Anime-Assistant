@@ -209,6 +209,20 @@ class SettingsApiTests(unittest.TestCase):
                 self.assertIn(marker, response.text)
                 self.assert_safe_headers(response)
 
+    def test_settings_page_and_assets_support_head_without_a_body(self) -> None:
+        for path, content_type in (
+            ("/settings", "text/html"),
+            ("/settings/", "text/html"),
+            ("/settings/settings.css", "text/css"),
+            ("/settings/settings.js", "text/javascript"),
+        ):
+            with self.subTest(path=path):
+                response = self.client.head(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(content_type, response.headers["content-type"])
+                self.assertEqual(response.content, b"")
+                self.assert_safe_headers(response)
+
     def test_settings_static_routes_reject_unknown_traversal_and_remote_clients(self) -> None:
         for path in (
             "/settings/missing.js",

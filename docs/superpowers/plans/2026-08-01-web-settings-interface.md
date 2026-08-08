@@ -226,21 +226,14 @@ git status --short --branch
 | Python 编译 | 通过 | `python3 -m compileall -q backend`，退出码 0 |
 | 后端全量测试 | 通过 | 577 项通过，0 项失败，最终复跑耗时 8.155 秒 |
 | Settings 定向测试 | 通过 | 190 项通过，0 项失败，最终复跑耗时 4.883 秒 |
-| Electron 单元测试 | 通过 | 34 项通过，0 项失败 |
+| Electron 单元测试 | 通过 | `npm run test:unit` 为 35 / 35 项通过，0 项失败 |
 | JavaScript 语法 | 通过 | `settings.js` 与 `main.js` 的 `node --check` 均为退出码 0 |
-| Electron 完整测试 | 通过 | 初次因没有 `node_modules` 而报 `esbuild: command not found`；从 npm 官方源执行锁定安装后，34 项单元测试、renderer 构建、主进程与 preload 语法检查全部通过 |
+| Electron 完整测试 | 通过 | 初次因没有 `node_modules` 而报 `esbuild: command not found`；从 npm 官方源执行锁定安装后，`npm test` 的单元测试阶段 35 / 35 项通过，renderer 构建、主进程与 preload 语法检查全部通过 |
 | 文档契约与 Git 检查 | 通过 | 一次性契约脚本、`git diff --check` 均为退出码 0；最终状态在提交前再次检查 |
 
 ## 7. 浏览器验收证据
 
-主控于 2026-08-08 使用全新临时配置目录启动 `127.0.0.1:8080` 本机服务，并通过 Playwright 完成最终验收。验收未使用远程部署或宽松 Host。
-
-- 首次设密、登录、退出和会话失效后的秘密输入清理；
-- LLM、QQ、TTS 表单、来源标签、环境变量只读状态与凭据库状态；
-- 3 类连接测试及脱敏错误；
-- 保存成功后的「重启后生效」提示；
-- 窄屏布局、浏览器控制台无未处理错误、页面没有外部资源请求；
-- 截图文件路径、执行时间与关键观察结果。
+主控于 2026-08-08 使用全新临时配置目录启动 `127.0.0.1:8080` 本机服务，并通过 Playwright 完成下表所列场景。验收未使用远程部署或宽松 Host；表外场景不属于本轮浏览器验收结论。
 
 | 项目 | 最终证据 |
 |---|---|

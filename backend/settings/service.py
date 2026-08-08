@@ -437,7 +437,6 @@ class SettingsService:
         """Recover an interrupted cross-store transaction."""
 
         with _LIFECYCLE_LOCK:
-            self._load_settings()
             recovery_failed = False
             try:
                 self._transaction.recover()

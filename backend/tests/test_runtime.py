@@ -25,7 +25,10 @@ from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
 from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
+from settings.file_store import SaveJournal, SettingsFileStore
+from settings.paths import SettingsPaths
 from settings.resolver import RuntimeSettings, TTSRuntimeSettings
+from settings.service import SettingsService, SettingsServiceError
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolDefinition, ToolRegistry
 from tools.service import ToolExecutionService
@@ -1120,6 +1123,87 @@ class RuntimeTests(unittest.TestCase):
                 runtime_type.assert_not_called()
                 start_task.assert_not_called()
                 self.assertIsNone(application.state.runtime)
+
+    def test_default_lifespan_uses_fallback_for_corrupt_file_without_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            paths.root.mkdir(parents=True, exist_ok=True)
+            corrupt = b'{"private":"corruption"}'
+            paths.settings_file.write_bytes(corrupt)
+            secret_store = Mock()
+            for method in ("available", "get", "set", "delete"):
+                getattr(secret_store, method).side_effect = AssertionError(
+                    "keyring must not be accessed"
+                )
+            service = SettingsService(
+                paths=paths,
+                secret_store=secret_store,
+                environ={"ASSISTANT_LLM_MODEL": "environment-model"},
+            )
+            runtime = Mock()
+            runtime.application.publisher.subscribe.return_value = Mock()
+            runtime.tool_service = None
+            runtime.aclose = AsyncMock()
+            application = create_app(settings_service=service)
+
+            with patch(
+                "api.app.AssistantRuntime", return_value=runtime
+            ) as runtime_type:
+
+                async def exercise():
+                    async with lifespan(application):
+                        pass
+
+                asyncio.run(exercise())
+
+            runtime_type.assert_called_once()
+            runtime_settings = runtime_type.call_args.kwargs["runtime_settings"]
+            self.assertEqual(runtime_settings.llm.model, "environment-model")
+            self.assertEqual(paths.settings_file.read_bytes(), corrupt)
+            for method in ("available", "get", "set", "delete"):
+                getattr(secret_store, method).assert_not_called()
+
+    def test_corrupt_file_with_journal_blocks_default_lifespan_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            paths.root.mkdir(parents=True, exist_ok=True)
+            corrupt = b'{"private":"corruption"}'
+            paths.settings_file.write_bytes(corrupt)
+            file_store = SettingsFileStore(paths)
+            journal = SaveJournal(
+                transaction_id="pending-transaction",
+                old_refs=[],
+                new_refs=["llm-api-key:new"],
+                target_refs=["llm-api-key:new"],
+            )
+            file_store.write_journal(journal)
+            secret_store = Mock()
+            service = SettingsService(
+                paths=paths,
+                file_store=file_store,
+                secret_store=secret_store,
+                environ={},
+            )
+            application = create_app(settings_service=service)
+
+            async def exercise():
+                async with lifespan(application):
+                    pass
+
+            with (
+                patch("api.app.AssistantRuntime") as runtime_type,
+                patch("api.app._start_background_task") as start_task,
+            ):
+                with self.assertRaises(SettingsServiceError) as raised:
+                    asyncio.run(exercise())
+
+            self.assertEqual(raised.exception.code, "SETTINGS_RECOVERY_FAILED")
+            self.assertIsNone(raised.exception.__context__)
+            runtime_type.assert_not_called()
+            start_task.assert_not_called()
+            self.assertEqual(file_store.read_journal(), journal)
+            secret_store.delete.assert_not_called()
+            self.assertNotIn("private", str(raised.exception))
 
     def test_injected_runtime_does_not_call_settings_factory(self):
         runtime = Mock()

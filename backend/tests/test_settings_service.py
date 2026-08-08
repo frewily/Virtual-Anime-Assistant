@@ -1161,7 +1161,7 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "SETTINGS_FILE_INVALID")
         self.assertEqual(self.paths.settings_file.read_bytes(), original)
 
-    def test_recover_delegates_without_hiding_invalid_settings(self) -> None:
+    def test_recover_delegates_without_prevalidating_settings(self) -> None:
         coordinator = Mock(spec=SettingsTransactionCoordinator)
         service = SettingsService(
             paths=self.paths,
@@ -1177,10 +1177,8 @@ class SettingsServiceTests(unittest.TestCase):
         self.paths.root.mkdir(parents=True, exist_ok=True)
         self.paths.settings_file.write_text("private-corruption", encoding="utf-8")
         coordinator.reset_mock()
-        with self.assertRaises(SettingsServiceError) as raised:
-            service.recover()
-        self.assertEqual(raised.exception.code, "SETTINGS_FILE_INVALID")
-        coordinator.recover.assert_not_called()
+        service.recover()
+        coordinator.recover.assert_called_once_with()
 
     def test_voice_summaries_are_safe_frozen_and_defensively_copied(self) -> None:
         first = self.service.get_voices()

@@ -15,8 +15,13 @@ from api.qq import get_qq_status
 from core.runtime import AssistantRuntime
 from settings.models import RequestModel
 from settings.security import SETTINGS_SESSION_COOKIE
-from settings.service import SettingsService, VersionedSettingsDraft
-from settings.validation import LLMTestRequest, QQTestRequest, TTSTestRequest
+from settings.service import (
+    LLMProbeDraft,
+    QQProbeDraft,
+    SettingsService,
+    VersionedSettingsDraft,
+)
+from settings.validation import TTSTestRequest
 
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -188,7 +193,7 @@ def get_voices(service: SettingsService = Depends(_require_auth)):
 
 @router.post("/test/llm")
 async def test_llm(
-    body: LLMTestRequest,
+    body: LLMProbeDraft,
     service: SettingsService = Depends(_require_write_auth),
 ):
     return await service.test_llm(body)
@@ -196,7 +201,7 @@ async def test_llm(
 
 @router.post("/test/qq")
 async def test_qq(
-    body: QQTestRequest,
+    body: QQProbeDraft,
     service: SettingsService = Depends(_require_write_auth),
     runtime: AssistantRuntime = Depends(get_runtime),
 ):

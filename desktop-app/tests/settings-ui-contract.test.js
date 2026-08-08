@@ -56,8 +56,24 @@ test('settings controller preserves secrets and uses the secured API contract', 
     assert.match(source, /clearSecretState/);
     assert.match(source, /restartRequired/);
     assert.match(source, /AbortController/);
+    assert.match(source, /apiKey:\s*secretMutation\('llm\.apiKey'\)/);
+    assert.match(source, /accessToken:\s*secretMutation\('qq\.accessToken'\)/);
     assert.doesNotMatch(source, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new Function/);
     assert.doesNotMatch(source, /localStorage|sessionStorage|console\./);
+});
+
+test('restart state survives edits and responsive tabs expose matching orientation', () => {
+    const source = read('settings.js');
+    const dirtyFunction = source.match(/function markDirty\(\)\s*\{([\s\S]*?)\n\s*\}/);
+
+    assert.match(source, /restartPending:\s*false/);
+    assert.match(source, /state\.restartPending\s*=\s*state\.restartPending\s*\|\|\s*snapshot\.restartRequired/);
+    assert.ok(dirtyFunction);
+    assert.doesNotMatch(dirtyFunction[1], /restart-notice|restartPending/);
+    assert.match(source, /matchMedia\(['"]\(max-width:\s*760px\)['"]\)/);
+    assert.match(source, /aria-orientation/);
+    assert.match(source, /orientationQuery\.addEventListener\(['"]change['"]/);
+    assert.match(source, /orientation === 'horizontal'/);
 });
 
 test('settings styles are warm, responsive, accessible, and motion-aware', () => {

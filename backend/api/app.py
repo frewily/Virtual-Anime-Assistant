@@ -103,10 +103,18 @@ _REQUEST_FIELDS_BY_ROUTE = {
     ("POST", "/api/settings/login"): frozenset({"password"}),
     ("PUT", "/api/settings/config"): _DRAFT_FIELDS,
     ("POST", "/api/settings/test/llm"): frozenset(
-        {"baseUrl", "model", "apiKey"}
+        {
+            "revision",
+            "baseUrl",
+            "model",
+            "apiKey",
+            "apiKey.operation",
+            "apiKey.value",
+        }
     ),
     ("POST", "/api/settings/test/qq"): frozenset(
         {
+            "revision",
             "enabled",
             "allowedGroupIds",
             "allowedUserIds",
@@ -115,6 +123,8 @@ _REQUEST_FIELDS_BY_ROUTE = {
             "maxConcurrency",
             "actionTimeoutSeconds",
             "accessToken",
+            "accessToken.operation",
+            "accessToken.value",
         }
     ),
     ("POST", "/api/settings/test/tts"): frozenset({"gptSovitsUrl"}),

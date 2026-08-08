@@ -36,6 +36,7 @@ from settings.models import (
     LLMSettings,
     PersistedSettings,
     QQSettings,
+    SecretMutation,
     SecretOperation,
     TTSSettings,
 )
@@ -53,6 +54,7 @@ from settings.transactions import (
     SettingsTransactionError,
 )
 from settings.validation import (
+    ConnectionTestCode,
     ConnectionTestResult,
     LLMSettingsDraft,
     LLMTestRequest,
@@ -76,6 +78,39 @@ class VersionedSettingsDraft(SettingsDraft):
         max_length=64,
         pattern=r"^[0-9a-f]{64}$",
     )
+
+
+class _ProbeDraft(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        extra="forbid",
+        hide_input_in_errors=True,
+        populate_by_name=True,
+        strict=True,
+    )
+
+    revision: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
+class LLMProbeDraft(_ProbeDraft):
+    base_url: str
+    model: str
+    api_key: SecretMutation = Field(default_factory=SecretMutation)
+
+
+class QQProbeDraft(_ProbeDraft):
+    enabled: bool = False
+    allowed_group_ids: list[int] = Field(default_factory=list)
+    allowed_user_ids: list[int] = Field(default_factory=list)
+    rate_per_minute: int = 10
+    rate_burst: int = 2
+    max_concurrency: int = 4
+    action_timeout_seconds: int = 10
+    access_token: SecretMutation = Field(default_factory=SecretMutation)
 
 
 class _ResponseModel(BaseModel):
@@ -579,21 +614,55 @@ class SettingsService:
 
     async def test_llm(
         self,
-        request: LLMTestRequest,
+        request: LLMProbeDraft,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> ConnectionTestResult:
+        with _LIFECYCLE_LOCK:
+            current = self._current_probe_settings(request.revision)
+            api_key = self._resolve_probe_secret(
+                "llm.apiKey",
+                request.api_key,
+                current.llm.api_key_ref,
+            )
+            prepared = LLMTestRequest(
+                base_url=request.base_url,
+                model=request.model,
+                api_key=api_key,
+            )
+        if api_key is None or not api_key.get_secret_value().strip():
+            return ConnectionTestResult(
+                ok=False,
+                code=ConnectionTestCode.VALIDATION_FAILED,
+            )
         return await SettingsValidationService(
             self._load_voice_catalog()
-        ).test_llm(request, transport)
+        ).test_llm(prepared, transport)
 
     async def test_qq(
         self,
-        request: QQTestRequest,
+        request: QQProbeDraft,
         current_status: QQRuntimeStatus | Mapping[str, object],
     ) -> QQConnectionTestResult:
+        with _LIFECYCLE_LOCK:
+            current = self._current_probe_settings(request.revision)
+            access_token = self._resolve_probe_secret(
+                "qq.accessToken",
+                request.access_token,
+                current.qq.access_token_ref,
+            )
+            prepared = QQTestRequest(
+                enabled=request.enabled,
+                allowed_group_ids=list(request.allowed_group_ids),
+                allowed_user_ids=list(request.allowed_user_ids),
+                rate_per_minute=request.rate_per_minute,
+                rate_burst=request.rate_burst,
+                max_concurrency=request.max_concurrency,
+                action_timeout_seconds=request.action_timeout_seconds,
+                access_token=access_token,
+            )
         return await SettingsValidationService(
             self._load_voice_catalog()
-        ).test_qq(request, current_status)
+        ).test_qq(prepared, current_status)
 
     async def test_tts(
         self,
@@ -613,6 +682,41 @@ class SettingsService:
         if load_failed:
             raise SettingsServiceError("SETTINGS_FILE_INVALID")
         raise AssertionError("unreachable")
+
+    def _current_probe_settings(self, revision: str) -> PersistedSettings:
+        current = self._load_settings()
+        if not hmac.compare_digest(revision, self._revision(current)):
+            raise SettingsServiceError("SETTINGS_CONFLICT")
+        return current
+
+    def _resolve_probe_secret(
+        self,
+        path: str,
+        mutation: SecretMutation,
+        reference: str | None,
+    ) -> SecretStr | None:
+        environment = os.environ if self._environ is None else self._environ
+        environment_variable = _ENVIRONMENT_VARIABLES_BY_PATH[path]
+        if environment_variable in environment:
+            if mutation.operation is not SecretOperation.RETAIN:
+                raise SettingsValidationError(
+                    {path: "环境变量接管的配置不可修改"}
+                ) from None
+            value = environment[environment_variable]
+            return SecretStr(value) if value.strip() else None
+        if mutation.operation is SecretOperation.REPLACE:
+            value = mutation.value
+            return (
+                SecretStr(value.get_secret_value())
+                if value is not None
+                else None
+            )
+        if mutation.operation is SecretOperation.DELETE or reference is None:
+            return None
+        availability = self._secret_store_availability()
+        if availability is not True:
+            raise SettingsServiceError("KEYCHAIN_UNAVAILABLE")
+        return self._read_secret(reference)
 
     def _save_locked(
         self, draft: VersionedSettingsDraft
@@ -932,6 +1036,8 @@ def create_settings_service(paths: SettingsPaths | None = None) -> SettingsServi
 
 
 __all__ = [
+    "LLMProbeDraft",
+    "QQProbeDraft",
     "SaveResult",
     "SettingsConfigSnapshot",
     "SettingsResponseDraft",

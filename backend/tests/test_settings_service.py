@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -17,6 +18,8 @@ from settings.models import SecretMutation
 from settings.paths import SettingsPaths
 from settings.secrets import SecretStoreUnavailable
 from settings.service import (
+    LLMProbeDraft,
+    QQProbeDraft,
     SaveResult,
     SessionStatus,
     SettingsService,
@@ -30,6 +33,9 @@ from settings.transactions import (
     SettingsTransactionError,
 )
 from settings.validation import (
+    ConnectionTestCode,
+    ConnectionTestResult,
+    QQConnectionTestResult,
     SettingsDraft,
     SettingsValidationError,
     SettingsValidationService,
@@ -114,6 +120,229 @@ class SettingsServiceTests(unittest.TestCase):
             self.service.setup("another-long-password")
         self.assertEqual(raised.exception.code, "SETTINGS_ALREADY_INITIALIZED")
         self.assertNotIn("password", repr(raised.exception).lower())
+
+    def test_probe_resolves_retain_replace_delete_and_environment_without_persisting(self) -> None:
+        persisted = self.file_store.load()
+        persisted = persisted.model_copy(
+            update={
+                "llm": persisted.llm.model_copy(
+                    update={"api_key_ref": "llm-ref"}
+                ),
+                "qq": persisted.qq.model_copy(
+                    update={"access_token_ref": "qq-ref"}
+                ),
+            }
+        )
+        self.file_store.save(persisted)
+        self.secret_store.values.update(
+            {"llm-ref": "saved-llm-secret", "qq-ref": "saved-qq-secret"}
+        )
+        revision = self.service.get_draft().revision
+        llm_result = ConnectionTestResult(
+            ok=True, code=ConnectionTestCode.SUCCESS
+        )
+        qq_result = QQConnectionTestResult(
+            ok=True, code=ConnectionTestCode.SUCCESS
+        )
+
+        with (
+            patch.object(
+                SettingsValidationService,
+                "test_llm",
+                new=AsyncMock(return_value=llm_result),
+            ) as llm_probe,
+            patch.object(
+                SettingsValidationService,
+                "test_qq",
+                new=AsyncMock(return_value=qq_result),
+            ) as qq_probe,
+        ):
+            retained = asyncio.run(
+                self.service.test_llm(
+                    LLMProbeDraft(
+                        revision=revision,
+                        baseUrl="http://127.0.0.1:11434/v1",
+                        model="model",
+                        apiKey={"operation": "retain"},
+                    )
+                )
+            )
+            replaced = asyncio.run(
+                self.service.test_qq(
+                    QQProbeDraft(
+                        revision=revision,
+                        enabled=True,
+                        allowedUserIds=[123],
+                        accessToken={
+                            "operation": "replace",
+                            "value": "replacement-token",
+                        },
+                    ),
+                    {
+                        "enabled": True,
+                        "state": "connected",
+                        "allowedGroupCount": 0,
+                        "allowedUserCount": 1,
+                    },
+                )
+            )
+            retained_qq = asyncio.run(
+                self.service.test_qq(
+                    QQProbeDraft(
+                        revision=revision,
+                        enabled=True,
+                        allowedUserIds=[123],
+                        accessToken={"operation": "retain"},
+                    ),
+                    {
+                        "enabled": True,
+                        "state": "connected",
+                        "allowedGroupCount": 0,
+                        "allowedUserCount": 1,
+                    },
+                )
+            )
+
+        self.assertTrue(retained.ok)
+        self.assertTrue(replaced.ok)
+        self.assertTrue(retained_qq.ok)
+        self.assertEqual(
+            llm_probe.await_args.args[0].api_key.get_secret_value(),
+            "saved-llm-secret",
+        )
+        self.assertEqual(
+            qq_probe.await_args.args[0].access_token.get_secret_value(),
+            "saved-qq-secret",
+        )
+        self.assertEqual(
+            qq_probe.await_args_list[0].args[0].access_token.get_secret_value(),
+            "replacement-token",
+        )
+        self.assertEqual(self.file_store.load(), persisted)
+
+        deleted = asyncio.run(
+            self.service.test_llm(
+                LLMProbeDraft(
+                    revision=revision,
+                    baseUrl="http://127.0.0.1:11434/v1",
+                    model="model",
+                    apiKey={"operation": "delete"},
+                )
+            )
+        )
+        self.assertFalse(deleted.ok)
+        self.assertEqual(deleted.code, ConnectionTestCode.VALIDATION_FAILED)
+
+        environment_service = SettingsService(
+            paths=self.paths,
+            file_store=self.file_store,
+            secret_store=self.secret_store,
+            voice_catalog_loader=catalog,
+            environ={"ASSISTANT_LLM_API_KEY": "environment-secret"},
+        )
+        with patch.object(
+            SettingsValidationService,
+            "test_llm",
+            new=AsyncMock(return_value=llm_result),
+        ) as environment_probe:
+            asyncio.run(
+                environment_service.test_llm(
+                    LLMProbeDraft(
+                        revision=revision,
+                        baseUrl="http://127.0.0.1:11434/v1",
+                        model="model",
+                        apiKey={"operation": "retain"},
+                    )
+                )
+            )
+        self.assertEqual(
+            environment_probe.await_args.args[0].api_key.get_secret_value(),
+            "environment-secret",
+        )
+        with self.assertRaises(SettingsValidationError):
+            asyncio.run(
+                environment_service.test_llm(
+                    LLMProbeDraft(
+                        revision=revision,
+                        baseUrl="http://127.0.0.1:11434/v1",
+                        model="model",
+                        apiKey={
+                            "operation": "replace",
+                            "value": "ignored-replacement",
+                        },
+                    )
+                )
+            )
+
+    def test_probe_rejects_stale_revision_and_secret_failures_before_network(self) -> None:
+        request = LLMProbeDraft(
+            revision="0" * 64,
+            baseUrl="http://127.0.0.1:11434/v1",
+            model="model",
+            apiKey={"operation": "retain"},
+        )
+        with patch.object(
+            SettingsValidationService, "test_llm", new=AsyncMock()
+        ) as probe:
+            with self.assertRaises(SettingsServiceError) as stale:
+                asyncio.run(self.service.test_llm(request))
+        self.assertEqual(stale.exception.code, "SETTINGS_CONFLICT")
+        probe.assert_not_awaited()
+        self.assertEqual(self.secret_store.get_calls, 0)
+
+        current = self.service.get_draft()
+        current.llm.api_key = SecretMutation(operation="retain")
+        missing = asyncio.run(
+            self.service.test_llm(
+                LLMProbeDraft(
+                    revision=current.revision,
+                    baseUrl="http://127.0.0.1:11434/v1",
+                    model="model",
+                    apiKey={"operation": "retain"},
+                )
+            )
+        )
+        self.assertEqual(missing.code, ConnectionTestCode.VALIDATION_FAILED)
+
+        persisted = self.file_store.load()
+        self.file_store.save(
+            persisted.model_copy(
+                update={
+                    "llm": persisted.llm.model_copy(
+                        update={"api_key_ref": "missing-ref"}
+                    )
+                }
+            )
+        )
+        missing_reference_revision = self.service.get_draft().revision
+        missing_reference = asyncio.run(
+            self.service.test_llm(
+                LLMProbeDraft(
+                    revision=missing_reference_revision,
+                    baseUrl="http://127.0.0.1:11434/v1",
+                    model="model",
+                    apiKey={"operation": "retain"},
+                )
+            )
+        )
+        self.assertEqual(
+            missing_reference.code,
+            ConnectionTestCode.VALIDATION_FAILED,
+        )
+        self.secret_store.is_available = False
+        unavailable_revision = self.service.get_draft().revision
+        with self.assertRaises(SettingsServiceError) as unavailable:
+            asyncio.run(
+                self.service.test_llm(
+                    LLMProbeDraft(
+                        revision=unavailable_revision,
+                        baseUrl="http://127.0.0.1:11434/v1",
+                        model="model",
+                        apiKey={"operation": "retain"},
+                    )
+                )
+            )
+        self.assertEqual(unavailable.exception.code, "KEYCHAIN_UNAVAILABLE")
 
     def test_setup_reuses_auth_password_policy(self) -> None:
         with self.assertRaises(PasswordPolicyError):

@@ -407,8 +407,26 @@ class SettingsApiTests(unittest.TestCase):
         self.assertEqual(voices.json()[0]["id"], "character_001")
 
         cases = (
-            ("llm", {"baseUrl": "http://127.0.0.1:11434/v1", "model": "m", "apiKey": "private"}),
-            ("qq", {"enabled": False}),
+            (
+                "llm",
+                {
+                    "revision": "a" * 64,
+                    "baseUrl": "http://127.0.0.1:11434/v1",
+                    "model": "m",
+                    "apiKey": {
+                        "operation": "replace",
+                        "value": "private-llm-probe-key",
+                    },
+                },
+            ),
+            (
+                "qq",
+                {
+                    "revision": "a" * 64,
+                    "enabled": False,
+                    "accessToken": {"operation": "delete"},
+                },
+            ),
             ("tts", {"gptSovitsUrl": "http://127.0.0.1:9880"}),
         )
         for name, body in cases:
@@ -418,7 +436,16 @@ class SettingsApiTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.json()["ok"])
+                self.assertNotIn("private-llm-probe-key", response.text)
         self.assertEqual([call[0] for call in self.service.calls[-3:]], ["test_llm", "test_qq", "test_tts"])
+        self.assertEqual(
+            self.service.calls[-3][1].api_key.operation.value,
+            "replace",
+        )
+        self.assertEqual(
+            self.service.calls[-2][1][0].access_token.operation.value,
+            "delete",
+        )
 
     def test_validation_errors_are_stable_and_do_not_echo_malicious_input(self) -> None:
         headers = self._authenticated()
@@ -465,7 +492,10 @@ class SettingsApiTests(unittest.TestCase):
             json={"enabled": False, attack_key: attack_value},
         )
         self.assertEqual(probe.status_code, 422)
-        self.assertEqual(set(probe.json()["error"]["fields"]), {"request"})
+        self.assertEqual(
+            set(probe.json()["error"]["fields"]),
+            {"revision", "request"},
+        )
         self.assertNotIn(attack_key, probe.text)
         self.assertNotIn(attack_value, probe.text)
 

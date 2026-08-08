@@ -31,6 +31,7 @@
     csrfToken: null,
     draft: null,
     dirty: false,
+    restartPending: false,
     reauthPending: false,
     readOnlyPaths: new Set(),
     secrets: {
@@ -204,6 +205,7 @@
     clearErrors();
     state.dirty = false;
     updateDirtyNotice();
+    updateRestartNotice();
   }
 
   function applyPresentation(path, presentation) {
@@ -375,13 +377,16 @@
 
   function markDirty() {
     state.dirty = true;
-    byId('restart-notice').hidden = true;
     updateDirtyNotice();
   }
 
   function updateDirtyNotice() {
     byId('dirty-notice').textContent = state.dirty ? '有未保存的修改' : '没有未保存的修改';
     byId('dirty-notice').classList.toggle('is-dirty', state.dirty);
+  }
+
+  function updateRestartNotice() {
+    byId('restart-notice').hidden = !state.restartPending;
   }
 
   function clearErrors() {
@@ -417,8 +422,8 @@
     try {
       const draft = collectDraft();
       const snapshot = await request(`${API}/config`, { method: 'PUT', write: true, body: draft });
+      state.restartPending = state.restartPending || snapshot.restartRequired === true;
       applySnapshot(snapshot);
-      byId('restart-notice').hidden = !snapshot.restartRequired;
       byId('save-status').textContent = '保存成功';
     } catch (error) {
       if (error instanceof FieldInputError) {
@@ -436,11 +441,13 @@
 
   function probeBody(section, draft) {
     if (section === 'llm') return {
+      revision: draft.revision,
       baseUrl: draft.llm.baseUrl || '',
       model: draft.llm.model || '',
-      apiKey: state.secrets['llm.apiKey'].operation === 'replace' ? state.secrets['llm.apiKey'].value : null
+      apiKey: secretMutation('llm.apiKey')
     };
     if (section === 'qq') return {
+      revision: draft.revision,
       enabled: draft.qq.enabled,
       allowedGroupIds: draft.qq.allowedGroupIds,
       allowedUserIds: draft.qq.allowedUserIds,
@@ -448,7 +455,7 @@
       rateBurst: draft.qq.rateBurst,
       maxConcurrency: draft.qq.maxConcurrency,
       actionTimeoutSeconds: draft.qq.actionTimeoutSeconds,
-      accessToken: state.secrets['qq.accessToken'].operation === 'replace' ? state.secrets['qq.accessToken'].value : null
+      accessToken: secretMutation('qq.accessToken')
     };
     return { gptSovitsUrl: draft.tts.gptSovitsUrl };
   }
@@ -499,6 +506,19 @@
       panel.hidden = !selected;
     }
   }
+
+  const orientationQuery = window.matchMedia('(max-width: 760px)');
+
+  function updateTabOrientation() {
+    const tablist = document.querySelector('[role="tablist"]');
+    tablist.setAttribute(
+      'aria-orientation',
+      orientationQuery.matches ? 'horizontal' : 'vertical'
+    );
+  }
+
+  orientationQuery.addEventListener('change', updateTabOrientation);
+  updateTabOrientation();
 
   byId('setup-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -568,13 +588,16 @@
   for (const tab of document.querySelectorAll('[role="tab"]')) {
     tab.addEventListener('click', () => selectTab(tab.dataset.tab));
     tab.addEventListener('keydown', (event) => {
-      if (!['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+      const orientation = tab.parentElement.getAttribute('aria-orientation');
+      const previousKey = orientation === 'horizontal' ? 'ArrowLeft' : 'ArrowUp';
+      const nextKey = orientation === 'horizontal' ? 'ArrowRight' : 'ArrowDown';
+      if (![previousKey, nextKey, 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
       const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
       let index = tabs.indexOf(tab);
       if (event.key === 'Home') index = 0;
       else if (event.key === 'End') index = tabs.length - 1;
-      else index = (index + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      else index = (index + (event.key === nextKey ? 1 : -1) + tabs.length) % tabs.length;
       selectTab(tabs[index].dataset.tab, true);
     });
   }

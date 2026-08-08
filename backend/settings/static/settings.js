@@ -37,8 +37,11 @@
     restartPending: false,
     reauthPending: false,
     sessionGeneration: 0,
+    authAttemptGeneration: 0,
+    authBusy: false,
     saveGeneration: 0,
     saveBusy: false,
+    logoutGeneration: 0,
     logoutBusy: false,
     probeGeneration: 0,
     readOnlyPaths: new Set(),
@@ -66,6 +69,13 @@
     }
   }
 
+  class StaleRequestError extends Error {
+    constructor() {
+      super('stale settings request');
+      this.name = 'StaleRequestError';
+    }
+  }
+
   const byId = (id) => document.getElementById(id);
   const controls = () => Array.from(document.querySelectorAll('[data-path]'));
   const controlForPath = (path) => controls().find((node) => node.dataset.path === path) || null;
@@ -79,6 +89,9 @@
   }
 
   async function request(path, options = {}) {
+    const sessionGeneration = options.sessionBound
+      ? (Number.isInteger(options.sessionGeneration) ? options.sessionGeneration : state.sessionGeneration)
+      : null;
     const headers = { Accept: 'application/json' };
     const init = {
       method: options.method || 'GET',
@@ -96,13 +109,15 @@
     try {
       response = await fetch(path, init);
     } catch (error) {
+      if (sessionGeneration !== null && sessionGeneration !== state.sessionGeneration) throw new StaleRequestError();
       if (error && error.name === 'AbortError') throw error;
       throw new ApiError(0, 'NETWORK_ERROR', {});
     }
     let payload = {};
     try { payload = await response.json(); } catch (_) { payload = {}; }
+    if (sessionGeneration !== null && sessionGeneration !== state.sessionGeneration) throw new StaleRequestError();
     if (response.status === 401) {
-      expireSession();
+      if (sessionGeneration !== null) expireSession(sessionGeneration);
       throw new ApiError(401, 'SETTINGS_UNAUTHORIZED', {});
     }
     if (!response.ok) {
@@ -132,14 +147,27 @@
     }
   }
 
-  function expireSession() {
+  function advanceSessionGeneration() {
     state.sessionGeneration += 1;
+    state.saveGeneration += 1;
+    state.saveBusy = false;
+    state.logoutGeneration += 1;
+    state.logoutBusy = false;
+    abortProbes();
+    byId('save-settings').disabled = false;
+    byId('logout-button').disabled = false;
+    return state.sessionGeneration;
+  }
+
+  function expireSession(expectedGeneration) {
+    if (expectedGeneration !== state.sessionGeneration) return false;
+    advanceSessionGeneration();
     state.authenticated = false;
     state.csrfToken = null;
     state.reauthPending = true;
-    abortProbes();
     clearSecretState();
     showAuth(true, '登录已过期，非敏感草稿仍为你保留，请重新登录。');
+    return true;
   }
 
   function showAuth(initialized, message = '') {
@@ -316,44 +344,90 @@
     }
   }
 
-  async function loadAuthenticatedData() {
+  async function loadAuthenticatedData(sessionGeneration = state.sessionGeneration) {
     const [snapshot, voices] = await Promise.all([
-      request(`${API}/config`),
-      request(`${API}/voices`)
+      request(`${API}/config`, { sessionBound: true, sessionGeneration }),
+      request(`${API}/voices`, { sessionBound: true, sessionGeneration })
     ]);
+    if (sessionGeneration !== state.sessionGeneration) throw new StaleRequestError();
     addVoiceOptions(voices);
     applySnapshot(snapshot);
     showWorkspace();
   }
 
+  function activateSession(session, expectedGeneration) {
+    if (expectedGeneration !== state.sessionGeneration) throw new StaleRequestError();
+    const generation = advanceSessionGeneration();
+    state.authenticated = true;
+    state.csrfToken = typeof session.csrfToken === 'string' ? session.csrfToken : null;
+    return generation;
+  }
+
   async function initialize() {
+    const sessionGeneration = state.sessionGeneration;
+    let expectedGeneration = sessionGeneration;
     try {
-      const session = await request(`${API}/session`);
+      const session = await request(`${API}/session`, { sessionBound: true, sessionGeneration });
       if (!session || !session.authenticated) {
+        if (sessionGeneration !== state.sessionGeneration) throw new StaleRequestError();
         showAuth(Boolean(session && session.initialized));
         return;
       }
-      state.authenticated = true;
-      state.csrfToken = typeof session.csrfToken === 'string' ? session.csrfToken : null;
-      await loadAuthenticatedData();
-    } catch (_) {
+      const activeGeneration = activateSession(session, sessionGeneration);
+      expectedGeneration = activeGeneration;
+      await loadAuthenticatedData(activeGeneration);
+    } catch (error) {
+      if (expectedGeneration !== state.sessionGeneration) return;
+      if (error instanceof StaleRequestError) return;
+      if (error instanceof ApiError && error.status === 401) return;
       showAuth(true, '设置服务暂时不可用，请稍后刷新。');
     }
   }
 
   async function authenticate(path, password) {
-    const session = await request(`${API}/${path}`, { method: 'POST', body: { password } });
-    state.authenticated = true;
-    state.csrfToken = typeof session.csrfToken === 'string' ? session.csrfToken : null;
-    byId('setup-password').value = '';
-    byId('setup-confirm').value = '';
-    byId('login-password').value = '';
-    if (state.reauthPending && state.draft) {
-      state.reauthPending = false;
-      showWorkspace();
-    } else {
-      state.reauthPending = false;
-      await loadAuthenticatedData();
+    state.authAttemptGeneration += 1;
+    const attemptGeneration = state.authAttemptGeneration;
+    const sessionGeneration = state.sessionGeneration;
+    state.authBusy = true;
+    byId('setup-submit').disabled = true;
+    byId('login-submit').disabled = true;
+    let expectedGeneration = sessionGeneration;
+    try {
+      let session;
+      try {
+        session = await request(`${API}/${path}`, { method: 'POST', body: { password } });
+      } catch (error) {
+        if (attemptGeneration !== state.authAttemptGeneration || sessionGeneration !== state.sessionGeneration) {
+          throw new StaleRequestError();
+        }
+        throw error;
+      }
+      if (attemptGeneration !== state.authAttemptGeneration || sessionGeneration !== state.sessionGeneration) {
+        throw new StaleRequestError();
+      }
+      const activeGeneration = activateSession(session, sessionGeneration);
+      expectedGeneration = activeGeneration;
+      byId('setup-password').value = '';
+      byId('setup-confirm').value = '';
+      byId('login-password').value = '';
+      if (state.reauthPending && state.draft) {
+        state.reauthPending = false;
+        showWorkspace();
+      } else {
+        state.reauthPending = false;
+        await loadAuthenticatedData(activeGeneration);
+      }
+    } catch (error) {
+      if (attemptGeneration !== state.authAttemptGeneration || expectedGeneration !== state.sessionGeneration) {
+        throw new StaleRequestError();
+      }
+      throw error;
+    } finally {
+      if (attemptGeneration === state.authAttemptGeneration) {
+        state.authBusy = false;
+        byId('setup-submit').disabled = false;
+        byId('login-submit').disabled = false;
+      }
     }
   }
 
@@ -527,12 +601,16 @@
         editEpoch: state.editEpoch,
         secretEpochs: new Map(state.secretEpochs)
       };
-      const snapshot = await request(`${API}/config`, { method: 'PUT', write: true, body: draft });
+      const snapshot = await request(`${API}/config`, {
+        method: 'PUT', write: true, body: draft, sessionBound: true, sessionGeneration
+      });
       if (sessionGeneration !== state.sessionGeneration || !state.authenticated) return;
       state.restartPending = state.restartPending || snapshot.restartRequired === true;
       mergeSnapshot(snapshot, context);
       byId('save-status').textContent = '保存成功';
     } catch (error) {
+      if (sessionGeneration !== state.sessionGeneration) return;
+      if (error instanceof StaleRequestError) return;
       if (error instanceof FieldInputError) {
         showFieldErrors({ [error.path]: error.safeMessage }, error.safeMessage);
       } else if (error instanceof ApiError && error.status === 409) {
@@ -554,6 +632,7 @@
     const status = Array.from(document.querySelectorAll('[data-test-status]')).find((node) => node.dataset.testStatus === section);
     abortProbes();
     const generation = state.probeGeneration;
+    const sessionGeneration = state.sessionGeneration;
     const revision = state.draft && state.draft.revision;
     const controller = new AbortController();
     const record = { button, controller, generation, revision, status };
@@ -563,7 +642,8 @@
     try {
       const body = collectProbe(section);
       const result = await request(`${API}/test/${section}`, {
-        method: 'POST', write: true, body, signal: controller.signal
+        method: 'POST', write: true, body, signal: controller.signal,
+        sessionBound: true, sessionGeneration
       });
       if (state.probes.get(section) !== record || state.probeGeneration !== generation || !state.draft || state.draft.revision !== revision) return;
       let message = result.ok ? '测试成功' : (CODE_MESSAGES[result.code] || '测试未通过，请检查本节配置');
@@ -628,11 +708,9 @@
     markFieldDirty(path);
   }
 
-  function completeLogout() {
-    state.sessionGeneration += 1;
-    state.saveGeneration += 1;
-    state.saveBusy = false;
-    abortProbes();
+  function completeLogout(expectedGeneration) {
+    if (expectedGeneration !== state.sessionGeneration) return false;
+    advanceSessionGeneration();
     clearSecretState();
     state.authenticated = false;
     state.csrfToken = null;
@@ -643,43 +721,65 @@
     state.secretEpochs.clear();
     updateDirtyNotice();
     showAuth(true, '已经退出登录。');
+    return true;
   }
 
   async function performLogout() {
     if (state.logoutBusy) return;
     if (state.dirty && !window.confirm('有尚未保存的修改，仍要退出登录吗？')) return;
     state.logoutBusy = true;
+    state.logoutGeneration += 1;
+    const logoutGeneration = state.logoutGeneration;
+    const sessionGeneration = state.sessionGeneration;
     const button = byId('logout-button');
     button.disabled = true;
     abortProbes();
     try {
-      await request(`${API}/logout`, { method: 'POST', write: true, body: {} });
-      completeLogout();
+      await request(`${API}/logout`, {
+        method: 'POST', write: true, body: {}, sessionBound: true, sessionGeneration
+      });
+      completeLogout(sessionGeneration);
     } catch (error) {
+      if (sessionGeneration !== state.sessionGeneration) return;
+      if (error instanceof StaleRequestError) return;
       if (!(error instanceof ApiError && error.status === 401)) {
         byId('save-status').textContent = safeMessage(error, '退出失败，登录状态和未保存修改仍已保留。');
       }
     } finally {
-      state.logoutBusy = false;
-      if (state.authenticated) button.disabled = false;
+      if (logoutGeneration === state.logoutGeneration) {
+        state.logoutBusy = false;
+        if (state.authenticated) button.disabled = false;
+      }
     }
   }
 
   byId('setup-form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (state.authBusy) return;
     const password = byId('setup-password').value;
     if (password !== byId('setup-confirm').value) {
       byId('auth-message').textContent = '两次输入的密码不一致。';
       return;
     }
+    const attemptGeneration = state.authAttemptGeneration + 1;
     try { await authenticate('setup', password); }
-    catch (error) { byId('auth-message').textContent = safeMessage(error, '无法建立密码，请稍后重试。'); }
+    catch (error) {
+      if (attemptGeneration === state.authAttemptGeneration && !(error instanceof StaleRequestError)) {
+        byId('auth-message').textContent = safeMessage(error, '无法建立密码，请稍后重试。');
+      }
+    }
   });
 
   byId('login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (state.authBusy) return;
+    const attemptGeneration = state.authAttemptGeneration + 1;
     try { await authenticate('login', byId('login-password').value); }
-    catch (error) { byId('login-password').value = ''; byId('auth-message').textContent = safeMessage(error, '登录失败，请稍后重试。'); }
+    catch (error) {
+      if (attemptGeneration !== state.authAttemptGeneration || error instanceof StaleRequestError) return;
+      byId('login-password').value = '';
+      byId('auth-message').textContent = safeMessage(error, '登录失败，请稍后重试。');
+    }
   });
 
   byId('logout-button').addEventListener('click', performLogout);

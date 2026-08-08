@@ -46,14 +46,14 @@
           <label for="setup-confirm">再次输入</label>
           <input id="setup-confirm" type="password" minlength="10" maxlength="128" autocomplete="new-password" required>
         </div>
-        <button class="primary-button" type="submit">建立本机密码</button>
+        <button id="setup-submit" class="primary-button" type="submit">建立本机密码</button>
       </form>
       <form id="login-form" class="auth-form" hidden>
         <div class="field">
           <label for="login-password">设置密码</label>
           <input id="login-password" type="password" maxlength="128" autocomplete="current-password" required>
         </div>
-        <button class="primary-button" type="submit">进入设置簿</button>
+        <button id="login-submit" class="primary-button" type="submit">进入设置簿</button>
       </form>
       <p id="auth-message" class="message" role="status" aria-live="polite"></p>
     </section>

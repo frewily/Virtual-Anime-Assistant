@@ -117,7 +117,8 @@ function makeHarness(fetchImpl) {
         '  initialize();',
         `  Object.assign(window.__hooks, {
           state, applySnapshot, collectDraft, collectProbe, markFieldDirty,
-          saveSettings, runProbe, performLogout, retainSecret
+          request, loadAuthenticatedData, authenticate, saveSettings, runProbe,
+          performLogout, retainSecret
         });`
     );
     vm.runInNewContext(source, {
@@ -144,6 +145,12 @@ function snapshot(revision, overrides = {}) {
 
 function response(payload, status = 200) {
     return { status, ok: status >= 200 && status < 300, json: async () => payload };
+}
+
+function deferred() {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
 }
 
 test('save response merges baseline without losing newer model or secret edits', async () => {
@@ -238,4 +245,166 @@ test('failed logout keeps authenticated dirty state and retain clears a secret',
     assert.equal(hooks.state.secrets['llm.apiKey'].operation, 'retain');
     assert.equal(hooks.state.secrets['llm.apiKey'].value, null);
     assert.equal(ids.get('llm-api-key').value, '');
+});
+
+test('stale four-step 401 cannot expire a newer authenticated session', async () => {
+    const oldConfig = deferred();
+    const harness = makeHarness((path) => {
+        if (path.endsWith('/login')) return response({ authenticated: true, csrfToken: 'csrf-new' });
+        return oldConfig.promise;
+    });
+    const { hooks } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.authenticated = true;
+    hooks.state.csrfToken = 'csrf-old';
+
+    const oldRequest = hooks.request('/api/settings/config', { sessionBound: true });
+    hooks.state.reauthPending = true;
+    await hooks.authenticate('login', 'new-password');
+    oldConfig.resolve(response({}, 401));
+    await assert.rejects(oldRequest);
+
+    assert.equal(hooks.state.authenticated, true);
+    assert.equal(hooks.state.csrfToken, 'csrf-new');
+});
+
+test('old config and voices 200 responses cannot overwrite a newly logged-in snapshot', async () => {
+    const oldConfig = deferred();
+    const oldVoices = deferred();
+    const harness = makeHarness((path) => {
+        if (path.endsWith('/config')) return oldConfig.promise;
+        if (path.endsWith('/voices')) return oldVoices.promise;
+        return response({ authenticated: true, csrfToken: 'csrf-new' });
+    });
+    const { hooks } = harness;
+    hooks.applySnapshot(snapshot('n'.repeat(64)));
+    hooks.state.authenticated = true;
+    hooks.state.csrfToken = 'csrf-old';
+
+    const oldLoad = hooks.loadAuthenticatedData();
+    hooks.state.reauthPending = true;
+    await hooks.authenticate('login', 'new-password');
+    oldConfig.resolve(response(snapshot('o'.repeat(64))));
+    oldVoices.resolve(response([{ id: 'old', name: 'Old' }]));
+    await oldLoad.catch(() => {});
+
+    assert.equal(hooks.state.draft.revision, 'n'.repeat(64));
+    assert.equal(hooks.state.csrfToken, 'csrf-new');
+});
+
+test('reversed double-login responses only allow the latest attempt to activate', async () => {
+    const first = deferred();
+    const second = deferred();
+    const harness = makeHarness((_path, init) => {
+        const password = JSON.parse(init.body).password;
+        if (password === 'first-password') return first.promise;
+        if (password === 'second-password') return second.promise;
+        return response(snapshot('z'.repeat(64)));
+    });
+    const { hooks } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.reauthPending = true;
+
+    const older = hooks.authenticate('login', 'first-password');
+    const newer = hooks.authenticate('login', 'second-password');
+    second.resolve(response({ authenticated: true, csrfToken: 'csrf-second' }));
+    await newer;
+    first.resolve(response({ authenticated: true, csrfToken: 'csrf-first' }));
+    await older.catch(() => {});
+
+    assert.equal(hooks.state.authenticated, true);
+    assert.equal(hooks.state.csrfToken, 'csrf-second');
+});
+
+test('login UI disables both auth actions and ignores duplicate submission', async () => {
+    const login = deferred();
+    let loginRequests = 0;
+    const harness = makeHarness((path) => {
+        if (path.endsWith('/login')) {
+            loginRequests += 1;
+            return login.promise;
+        }
+        return response({});
+    });
+    const { hooks, ids } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.reauthPending = true;
+    ids.get('login-password').value = 'new-password';
+
+    const first = ids.get('login-form').dispatch('submit');
+    const duplicate = ids.get('login-form').dispatch('submit');
+    assert.equal(loginRequests, 1);
+    assert.equal(ids.get('setup-submit').disabled, true);
+    assert.equal(ids.get('login-submit').disabled, true);
+    login.resolve(response({ authenticated: true, csrfToken: 'csrf-new' }));
+    await Promise.all([first, duplicate]);
+
+    assert.equal(ids.get('setup-submit').disabled, false);
+    assert.equal(ids.get('login-submit').disabled, false);
+});
+
+test('a stale 401 cannot clear a secret entered in the new session', async () => {
+    const staleProbe = deferred();
+    const harness = makeHarness((path) => {
+        if (path.endsWith('/test/llm')) return staleProbe.promise;
+        return response({ authenticated: true, csrfToken: 'csrf-new' });
+    });
+    const { hooks, ids } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.authenticated = true;
+    hooks.state.csrfToken = 'csrf-old';
+
+    const oldRequest = hooks.request('/api/settings/test/llm', { method: 'POST', sessionBound: true, body: {} });
+    hooks.state.reauthPending = true;
+    await hooks.authenticate('login', 'new-password');
+    ids.get('llm-api-key').value = 'new-session-secret';
+    hooks.state.secrets['llm.apiKey'] = { operation: 'replace', value: 'new-session-secret' };
+    staleProbe.resolve(response({}, 401));
+    await oldRequest.catch(() => {});
+
+    assert.equal(ids.get('llm-api-key').value, 'new-session-secret');
+    assert.equal(hooks.state.secrets['llm.apiKey'].value, 'new-session-secret');
+    assert.equal(hooks.state.csrfToken, 'csrf-new');
+});
+
+test('a stale logout 5xx cannot write an error into the new session UI', async () => {
+    const oldLogout = deferred();
+    const harness = makeHarness((path) => {
+        if (path.endsWith('/logout')) return oldLogout.promise;
+        return response({ authenticated: true, csrfToken: 'csrf-new' });
+    });
+    const { hooks, ids } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.authenticated = true;
+    hooks.state.csrfToken = 'csrf-old';
+
+    const logout = hooks.performLogout();
+    hooks.state.reauthPending = true;
+    await hooks.authenticate('login', 'new-password');
+    ids.get('save-status').textContent = 'new-session-status';
+    oldLogout.resolve(response({ error: { code: 'SERVICE_ERROR' } }, 503));
+    await logout;
+
+    assert.equal(hooks.state.authenticated, true);
+    assert.equal(hooks.state.csrfToken, 'csrf-new');
+    assert.equal(ids.get('save-status').textContent, 'new-session-status');
+});
+
+test('a current-session 401 expires the session and clears secret input', async () => {
+    const harness = makeHarness(async () => response({}, 401));
+    const { hooks, ids } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+    hooks.state.authenticated = true;
+    hooks.state.csrfToken = 'csrf-current';
+    ids.get('llm-api-key').value = 'sensitive';
+    hooks.state.secrets['llm.apiKey'] = { operation: 'replace', value: 'sensitive' };
+
+    await assert.rejects(hooks.request('/api/settings/config', { sessionBound: true }));
+
+    assert.equal(hooks.state.authenticated, false);
+    assert.equal(hooks.state.csrfToken, null);
+    assert.equal(ids.get('llm-api-key').value, '');
+    assert.equal(hooks.state.secrets['llm.apiKey'].operation, 'retain');
+    assert.equal(ids.get('auth-panel').hidden, false);
+    assert.equal(ids.get('workspace').hidden, true);
 });

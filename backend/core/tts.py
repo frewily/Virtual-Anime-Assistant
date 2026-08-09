@@ -1,5 +1,7 @@
+from copy import deepcopy
 import logging
 import os
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -7,7 +9,7 @@ from pathlib import Path
 import edge_tts
 import httpx
 
-from core.config_loader import get_default_voice, get_fallback_voice, get_voices
+from core.config_loader import load_voice_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -25,19 +27,48 @@ class TTSService:
         fallback_voice: str | None = None,
         audio_dir: str | Path = AUDIO_DIR,
         gpt_sovits_url: str | None = None,
+        audio_max_age_seconds: int | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
-        self.voices = voices if voices is not None else get_voices()
+        catalog = None
+        if voices is None or default_voice is None or fallback_voice is None:
+            catalog = load_voice_catalog()
+        self.voices = (
+            deepcopy(voices)
+            if voices is not None
+            else catalog.copy_voices()
+        )
         self._voices_by_id = {voice["id"]: voice for voice in self.voices}
-        self.default_voice = default_voice or get_default_voice()
-        self.fallback_voice = fallback_voice or get_fallback_voice()
+        self.default_voice = (
+            default_voice
+            if default_voice is not None
+            else catalog.default_voice
+        )
+        if default_voice is not None and default_voice not in self._voices_by_id:
+            raise ValueError("unknown default voice")
+        self.fallback_voice = (
+            fallback_voice
+            if fallback_voice is not None
+            else catalog.fallback_voice
+        )
         self.audio_dir = Path(audio_dir)
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self.gpt_sovits_url = (
             gpt_sovits_url
-            or os.getenv("ASSISTANT_GPT_SOVITS_URL")
+            if gpt_sovits_url is not None
+            else os.getenv("ASSISTANT_GPT_SOVITS_URL")
             or DEFAULT_GPT_SOVITS_URL
         ).rstrip("/")
+        self.audio_max_age_seconds = (
+            audio_max_age_seconds
+            if audio_max_age_seconds is not None
+            else int(
+                os.getenv(
+                    "ASSISTANT_AUDIO_MAX_AGE_SECONDS",
+                    DEFAULT_AUDIO_MAX_AGE_SECONDS,
+                )
+            )
+        )
         self._transport = transport
         self.cleanup_expired_audio()
 
@@ -100,19 +131,29 @@ class TTSService:
             return None
 
     def cleanup_expired_audio(self, max_age_seconds: int | None = None) -> int:
-        max_age = max_age_seconds or int(
-            os.getenv("ASSISTANT_AUDIO_MAX_AGE_SECONDS", DEFAULT_AUDIO_MAX_AGE_SECONDS)
+        max_age = (
+            max_age_seconds
+            if max_age_seconds is not None
+            else self.audio_max_age_seconds
         )
         cutoff = time.time() - max_age
         removed = 0
-        for filepath in self.audio_dir.iterdir():
-            if filepath.suffix.lower() not in {".mp3", ".wav"}:
-                continue
+        try:
+            entries = list(self.audio_dir.iterdir())
+        except OSError:
+            logger.warning("Audio cleanup skipped: directory unavailable")
+            return 0
+        for filepath in entries:
             try:
-                if filepath.stat().st_mtime < cutoff:
+                if filepath.suffix.lower() not in {".mp3", ".wav"}:
+                    continue
+                metadata = filepath.lstat()
+                if not stat.S_ISREG(metadata.st_mode):
+                    continue
+                if metadata.st_mtime < cutoff:
                     filepath.unlink()
                     removed += 1
-            except FileNotFoundError:
+            except OSError:
                 continue
         return removed
 

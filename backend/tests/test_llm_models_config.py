@@ -26,6 +26,27 @@ from llm.demo import DemoLanguageModelGateway
 
 
 class LLMSettingsTests(unittest.TestCase):
+    def test_from_env_accepts_an_explicit_mapping_without_reading_os_environ(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ASSISTANT_LLM_ENABLED": "true",
+                "ASSISTANT_LLM_BASE_URL": "https://process.example/v1",
+                "ASSISTANT_LLM_MODEL": "process-model",
+            },
+            clear=True,
+        ):
+            settings = LLMSettings.from_env(
+                {
+                    "ASSISTANT_LLM_ENABLED": "false",
+                    "ASSISTANT_LLM_MODEL": "mapping-model",
+                }
+            )
+
+        self.assertFalse(settings.enabled)
+        self.assertIsNone(settings.base_url)
+        self.assertEqual(settings.model, "mapping-model")
+
     def test_programmatic_construction_remains_backward_compatible(self):
         settings = LLMSettings(
             enabled=False,

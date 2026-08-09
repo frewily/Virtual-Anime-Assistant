@@ -1,9 +1,14 @@
 import asyncio
 import logging
+import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from api.avatar import router as avatar_router
 from api.chat import router as chat_router
@@ -25,9 +30,126 @@ from agent.monitor import run as run_window_monitor
 from core.runtime import AssistantRuntime
 from core.tts import AUDIO_DIR
 from domain.tools import ToolEvent
+from settings.auth import LoginRateLimited, PasswordPolicyError
+from settings.resolver import RuntimeSettings
+from settings.routes import (
+    SettingsHttpError,
+    router as settings_router,
+    static_router as settings_static_router,
+)
+from settings.security import SettingsSecurityMiddleware, is_settings_path
+from settings.service import (
+    SettingsService,
+    SettingsServiceError,
+    create_settings_service,
+)
+from settings.validation import SettingsValidationError
 
 
 logger = logging.getLogger(__name__)
+
+
+_SETTINGS_FIELD_ALIASES = {
+    "base_url": "baseUrl",
+    "timeout_seconds": "timeoutSeconds",
+    "max_context_messages": "maxContextMessages",
+    "max_context_chars": "maxContextChars",
+    "tool_calling_enabled": "toolCallingEnabled",
+    "api_key": "apiKey",
+    "allowed_group_ids": "allowedGroupIds",
+    "allowed_user_ids": "allowedUserIds",
+    "rate_per_minute": "ratePerMinute",
+    "rate_burst": "rateBurst",
+    "max_concurrency": "maxConcurrency",
+    "action_timeout_seconds": "actionTimeoutSeconds",
+    "access_token": "accessToken",
+    "gpt_sovits_url": "gptSovitsUrl",
+    "default_voice_id": "defaultVoiceId",
+    "audio_max_age_seconds": "audioMaxAgeSeconds",
+}
+_DRAFT_FIELDS = frozenset(
+    {
+        "revision",
+        "llm",
+        "llm.enabled",
+        "llm.baseUrl",
+        "llm.model",
+        "llm.timeoutSeconds",
+        "llm.maxContextMessages",
+        "llm.maxContextChars",
+        "llm.toolCallingEnabled",
+        "llm.apiKey",
+        "llm.apiKey.operation",
+        "llm.apiKey.value",
+        "qq",
+        "qq.enabled",
+        "qq.allowedGroupIds",
+        "qq.allowedUserIds",
+        "qq.ratePerMinute",
+        "qq.rateBurst",
+        "qq.maxConcurrency",
+        "qq.actionTimeoutSeconds",
+        "qq.accessToken",
+        "qq.accessToken.operation",
+        "qq.accessToken.value",
+        "tts",
+        "tts.gptSovitsUrl",
+        "tts.defaultVoiceId",
+        "tts.audioMaxAgeSeconds",
+    }
+)
+_REQUEST_FIELDS_BY_ROUTE = {
+    ("POST", "/api/settings/setup"): frozenset({"password"}),
+    ("POST", "/api/settings/login"): frozenset({"password"}),
+    ("PUT", "/api/settings/config"): _DRAFT_FIELDS,
+    ("POST", "/api/settings/test/llm"): frozenset(
+        {
+            "revision",
+            "baseUrl",
+            "model",
+            "apiKey",
+            "apiKey.operation",
+            "apiKey.value",
+        }
+    ),
+    ("POST", "/api/settings/test/qq"): frozenset(
+        {
+            "revision",
+            "enabled",
+            "allowedGroupIds",
+            "allowedUserIds",
+            "ratePerMinute",
+            "rateBurst",
+            "maxConcurrency",
+            "actionTimeoutSeconds",
+            "accessToken",
+            "accessToken.operation",
+            "accessToken.value",
+        }
+    ),
+    ("POST", "/api/settings/test/tts"): frozenset({"gptSovitsUrl"}),
+}
+
+
+def _safe_validation_field(request: Request, location: object) -> str:
+    allowed = _REQUEST_FIELDS_BY_ROUTE.get(
+        (request.method.upper(), request.url.path), frozenset()
+    )
+    if not isinstance(location, (tuple, list)):
+        return "request"
+    raw_parts = tuple(location)
+    if raw_parts and raw_parts[0] == "body":
+        raw_parts = raw_parts[1:]
+    normalized: list[str] = []
+    for part in raw_parts:
+        if not isinstance(part, str):
+            break
+        normalized.append(_SETTINGS_FIELD_ALIASES.get(part, part))
+    for size in range(len(normalized), 0, -1):
+        candidate = ".".join(normalized[:size])
+        if candidate in allowed:
+            return candidate
+    return "request"
 
 
 async def broadcast_tool_event(event: ToolEvent) -> None:
@@ -72,7 +194,23 @@ def _start_background_task(coroutine, tasks: list[asyncio.Task]) -> None:
 async def lifespan(app: FastAPI):
     runtime = app.state.runtime
     if runtime is None:
-        runtime = AssistantRuntime()
+        runtime_settings_factory = app.state.runtime_settings_factory
+        if runtime_settings_factory is None:
+            settings_service = app.state.settings_service
+            if settings_service is None:
+                with app.state.settings_service_lock:
+                    settings_service = app.state.settings_service
+                    if settings_service is None:
+                        settings_service = app.state.settings_service_factory()
+                        app.state.settings_service = settings_service
+            settings_service.recover()
+            runtime = AssistantRuntime(
+                runtime_settings=settings_service.runtime_settings()
+            )
+        else:
+            runtime = AssistantRuntime(
+                runtime_settings=runtime_settings_factory()
+            )
         app.state.runtime = runtime
     unsubscribe = None
     unsubscribe_tools = None
@@ -117,9 +255,87 @@ async def lifespan(app: FastAPI):
                 await runtime.aclose()
 
 
-def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
+def create_app(
+    runtime_instance: AssistantRuntime | None = None,
+    runtime_settings_factory: Callable[[], RuntimeSettings] | None = None,
+    settings_service: SettingsService | None = None,
+    settings_service_factory: Callable[
+        [], SettingsService
+    ] = create_settings_service,
+) -> FastAPI:
     app = FastAPI(title="Desktop Assistant API", version="1.0.0", lifespan=lifespan)
     app.state.runtime = runtime_instance
+    app.state.runtime_settings_factory = runtime_settings_factory
+    app.state.settings_service = settings_service
+    app.state.settings_service_factory = settings_service_factory
+    app.state.settings_service_lock = threading.Lock()
+
+    @app.exception_handler(SettingsHttpError)
+    async def handle_settings_http_error(request: Request, exc: SettingsHttpError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    @app.exception_handler(SettingsValidationError)
+    async def handle_settings_validation_error(
+        request: Request, exc: SettingsValidationError
+    ):
+        return JSONResponse(status_code=422, content=exc.to_dict())
+
+    @app.exception_handler(SettingsServiceError)
+    async def handle_settings_service_error(
+        request: Request, exc: SettingsServiceError
+    ):
+        status = 409 if exc.code == "SETTINGS_CONFLICT" else 503
+        if exc.code == "SETTINGS_ALREADY_INITIALIZED":
+            status = 409
+        return JSONResponse(status_code=status, content=exc.to_dict())
+
+    @app.exception_handler(LoginRateLimited)
+    async def handle_settings_rate_limit(request: Request, exc: LoginRateLimited):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "SETTINGS_RATE_LIMITED",
+                    "message": "登录尝试过多，请稍后重试",
+                }
+            },
+        )
+
+    @app.exception_handler(PasswordPolicyError)
+    async def handle_settings_password_policy(
+        request: Request, exc: PasswordPolicyError
+    ):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "SETTINGS_PASSWORD_INVALID",
+                    "message": "密码长度必须为 10 到 128 个字符",
+                }
+            },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation(request: Request, exc: RequestValidationError):
+        if not is_settings_path(request.url.path):
+            return await request_validation_exception_handler(request, exc)
+        fields: dict[str, str] = {}
+        for error in exc.errors():
+            field = _safe_validation_field(request, error.get("loc"))
+            fields[field] = "配置值无效"
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "SETTINGS_VALIDATION_FAILED",
+                    "message": "请检查标记的配置项",
+                    "fields": fields,
+                }
+            },
+        )
 
     app.add_middleware(
         CORSMiddleware,
@@ -137,6 +353,8 @@ def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
     app.include_router(conversations_router, prefix="/api")
     app.include_router(tools_router, prefix="/api")
     app.include_router(qq_status_router, prefix="/api")
+    app.include_router(settings_router, prefix="/api")
+    app.include_router(settings_static_router)
     app.include_router(ws_router)
     app.include_router(qq_websocket_router)
     app.mount(
@@ -144,6 +362,8 @@ def create_app(runtime_instance: AssistantRuntime | None = None) -> FastAPI:
         StaticFiles(directory=AUDIO_DIR, check_dir=False),
         name="tts-audio",
     )
+
+    app.add_middleware(SettingsSecurityMiddleware)
 
     return app
 

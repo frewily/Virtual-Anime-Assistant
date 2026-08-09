@@ -453,6 +453,7 @@ class SettingsValidationService:
             gateway = OpenAICompatibleGateway(
                 settings,
                 transport=classified_transport,
+                accept_reasoning_only=True,
             )
             await asyncio.wait_for(
                 gateway.complete(

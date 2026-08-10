@@ -378,4 +378,5 @@ git diff --check main...HEAD
 - 真实模型联调：`POST /api/chat/message` 返回 HTTP 200；在线 Renderer 随后请求 `POST /api/tts/speak` 并获得 HTTP 200，再以 `GET /api/tts/audio/...` 读取音频并获得 HTTP 206。
 - 本次真实联调中本机 GPT-SoVITS 不可达，后端使用 EdgeTTS 回退生成 MP3。记录未包含供应商响应正文、地址参数、模型密钥或其他凭据。
 - Mac 在视觉复核阶段处于锁屏状态，因此没有把人工听感记为验收证据；Renderer 对音频资源的 HTTP 206 读取证明浏览器媒体播放流程已经启动。
+- Mac 解锁后再次发送固定测试消息，聊天与 TTS 均返回 HTTP 200，Renderer 读取音频返回 HTTP 206；主人确认实际听到“主人，自动朗读已经正常工作”，人工听感验收通过。
 - 最终检查再次运行桌面端完整测试，41 项全部通过；分支差异检查无输出，提交前工作树干净。

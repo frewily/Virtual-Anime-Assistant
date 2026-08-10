@@ -26,7 +26,7 @@
 - 创建：desktop-app/src/renderer/js/speech-playback.js
 - 创建：desktop-app/tests/speech-playback.test.js
 
-- [ ] **步骤 1：编写失败的语音播放测试**
+- [x] **步骤 1：编写失败的语音播放测试**
 
 创建 desktop-app/tests/speech-playback.test.js。测试使用注入的 fetch、Audio 和 logger 替身，并精确覆盖：
 
@@ -84,7 +84,7 @@ assert.deepEqual(audio.urls, [
 ]
 ~~~
 
-- [ ] **步骤 2：运行测试并确认模块缺失**
+- [x] **步骤 2：运行测试并确认模块缺失**
 
 运行：
 
@@ -94,7 +94,7 @@ node --test desktop-app/tests/speech-playback.test.js
 
 预期：FAIL，错误包含 Cannot find module '../src/renderer/js/speech-playback'。
 
-- [ ] **步骤 3：实现最小语音播放模块**
+- [x] **步骤 3：实现最小语音播放模块**
 
 创建 desktop-app/src/renderer/js/speech-playback.js：
 
@@ -189,7 +189,7 @@ module.exports = {
 };
 ~~~
 
-- [ ] **步骤 4：运行语音播放测试并确认通过**
+- [x] **步骤 4：运行语音播放测试并确认通过**
 
 运行：
 
@@ -199,7 +199,7 @@ node --test desktop-app/tests/speech-playback.test.js
 
 预期：5 项测试通过，0 项失败。
 
-- [ ] **步骤 5：提交独立模块**
+- [x] **步骤 5：提交独立模块**
 
 ~~~bash
 git add -- desktop-app/src/renderer/js/speech-playback.js \
@@ -214,7 +214,7 @@ git commit -m "feat: 增加 Live2D 按需语音播放模块"
 - 修改：desktop-app/src/renderer/js/websocket.js
 - 修改：desktop-app/tests/live2d-renderer-contract.test.js
 
-- [ ] **步骤 1：编写失败的 Renderer 接线契约**
+- [x] **步骤 1：编写失败的 Renderer 接线契约**
 
 在 desktop-app/tests/live2d-renderer-contract.test.js 末尾增加：
 
@@ -232,7 +232,7 @@ test('websocket delegates speak audio to the bounded playback module', () => {
 });
 ~~~
 
-- [ ] **步骤 2：运行契约测试并确认失败**
+- [x] **步骤 2：运行契约测试并确认失败**
 
 ~~~bash
 node --test desktop-app/tests/live2d-renderer-contract.test.js
@@ -240,7 +240,7 @@ node --test desktop-app/tests/live2d-renderer-contract.test.js
 
 预期：FAIL，WebSocket 尚未引用 speech-playback。
 
-- [ ] **步骤 3：把音频处理委托给新模块**
+- [x] **步骤 3：把音频处理委托给新模块**
 
 在 desktop-app/src/renderer/js/websocket.js 顶部增加：
 
@@ -267,7 +267,7 @@ function handleSpeak(message) {
 
 不得改变 handleMessage() 的消息分类、WebSocket 重连或工具确认分发逻辑。
 
-- [ ] **步骤 4：运行定向测试和 Renderer 构建**
+- [x] **步骤 4：运行定向测试和 Renderer 构建**
 
 ~~~bash
 node --test \
@@ -278,7 +278,7 @@ npm run build:renderer --prefix desktop-app
 
 预期：定向测试全部通过；esbuild 退出码为 0。
 
-- [ ] **步骤 5：提交 WebSocket 接线**
+- [x] **步骤 5：提交 WebSocket 接线**
 
 ~~~bash
 git add -- desktop-app/src/renderer/js/websocket.js \
@@ -293,7 +293,7 @@ git commit -m "feat: 自动朗读 Live2D 模型回复"
 - 修改：README.md
 - 修改：docs/superpowers/plans/2026-08-10-live2d-chat-tts.md
 
-- [ ] **步骤 1：更新 README 能力和降级说明**
+- [x] **步骤 1：更新 README 能力和降级说明**
 
 在 README.md 的「当前能力」中增加：
 
@@ -307,16 +307,16 @@ git commit -m "feat: 自动朗读 Live2D 模型回复"
 模型聊天回复通过桌面端按需请求现有 TTS 接口，因此只有 Live2D 窗口在线时才会自动生成语音。场景消息已有音频时直接播放，不会重复合成；QQ 回复不会触发桌面端朗读。
 ~~~
 
-- [ ] **步骤 2：运行桌面端完整验证**
+- [x] **步骤 2：运行桌面端完整验证**
 
 ~~~bash
 npm test --prefix desktop-app
 git diff --check
 ~~~
 
-预期：原有 35 项加新增 5 项，共 40 项 Node.js 测试通过；Renderer 构建、src/main.js 和 src/preload.js 语法检查通过；git diff --check 无输出。
+预期：新增 5 项语音模块测试和 1 项接线契约后，共 41 项 Node.js 测试通过；Renderer 构建、src/main.js 和 src/preload.js 语法检查通过；git diff --check 无输出。
 
-- [ ] **步骤 3：进行真实联调**
+- [x] **步骤 3：进行真实联调**
 
 确保后端与开发版 Electron 正在运行：
 
@@ -338,11 +338,11 @@ curl --silent --show-error --max-time 45 \
 
 预期：聊天接口返回 HTTP 200；访问日志随后出现 POST /api/tts/speak 200 和 GET /api/tts/audio/... 200，证明在线 Renderer 完成合成与音频读取。日志不得包含供应商响应正文或凭据。
 
-- [ ] **步骤 4：验证失败降级**
+- [x] **步骤 4：验证失败降级**
 
 使用单元测试替身验证 TTS 503 和 Audio.play() 拒绝。不得在真实环境中故意破坏用户配置。确认失败只产生稳定日志，聊天、动作和 WebSocket 契约保持通过。
 
-- [ ] **步骤 5：记录验收结果**
+- [x] **步骤 5：记录验收结果**
 
 在本计划末尾增加「执行结果」章节，只记录：
 
@@ -369,3 +369,12 @@ git diff --check main...HEAD
 
 预期：工作树干净；分支包含规格、语音模块、WebSocket 接线和验收文档提交；差异检查无输出。
 
+## 执行结果（2026-08-10）
+
+- TDD 红灯确认：语音模块测试首次运行因 `speech-playback` 模块不存在而失败；WebSocket 接线契约首次运行因尚未引用该模块而失败。
+- 定向验证：语音模块 5 项测试通过；语音模块与 Live2D Renderer 契约合计 10 项测试通过。
+- 桌面端完整验证：41 项 Node.js 测试全部通过，0 项失败；Renderer 由 esbuild 成功构建，`src/main.js` 与 `src/preload.js` 语法检查通过。
+- Live2D 开发版重新启动后，`GET /api/avatar/status` 返回 HTTP 200，连接状态为 `true`。
+- 真实模型联调：`POST /api/chat/message` 返回 HTTP 200；在线 Renderer 随后请求 `POST /api/tts/speak` 并获得 HTTP 200，再以 `GET /api/tts/audio/...` 读取音频并获得 HTTP 206。
+- 本次真实联调中本机 GPT-SoVITS 不可达，后端使用 EdgeTTS 回退生成 MP3。记录未包含供应商响应正文、地址参数、模型密钥或其他凭据。
+- Mac 在视觉复核阶段处于锁屏状态，因此没有把人工听感记为验收证据；Renderer 对音频资源的 HTTP 206 读取证明浏览器媒体播放流程已经启动。

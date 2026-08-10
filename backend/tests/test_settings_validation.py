@@ -472,6 +472,34 @@ class ConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payload["messages"]), 1)
         self.assertNotIn("tools", payload)
 
+    async def test_llm_accepts_reasoning_only_probe_response(self) -> None:
+        result = await self.service.test_llm(
+            LLMTestRequest(
+                base_url="https://example.test/v1",
+                model="thinking-model",
+                api_key="temporary-test-key",
+            ),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": None,
+                                    "reasoning_content": "The service is responding.",
+                                }
+                            }
+                        ],
+                        "model": "thinking-model",
+                    },
+                )
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.code, ConnectionTestCode.SUCCESS)
+
     async def test_llm_401_is_redacted_authentication_failure(self) -> None:
         test_key = "VERY-PRIVATE-TEST-KEY"
         result = await self.service.test_llm(

@@ -39,6 +39,7 @@ class _ResponseToolCall(BaseModel):
 
 class _ResponseMessage(BaseModel):
     content: StrictStr | None = None
+    reasoning_content: StrictStr | None = None
     tool_calls: list[_ResponseToolCall] = Field(default_factory=list)
 
 
@@ -64,6 +65,7 @@ class OpenAICompatibleGateway:
         settings: LLMSettings,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        accept_reasoning_only: bool = False,
     ) -> None:
         base_url = (settings.base_url or "").strip().rstrip("/")
         model_name = (settings.model or "").strip()
@@ -75,6 +77,7 @@ class OpenAICompatibleGateway:
         self._model_name = model_name
         self._timeout_seconds = settings.timeout_seconds
         self._transport = transport
+        self._accept_reasoning_only = accept_reasoning_only
 
     @property
     def model_name(self) -> str:
@@ -191,6 +194,11 @@ class OpenAICompatibleGateway:
             text = content.strip() if content is not None else None
             if text == "":
                 text = None
+            if text is None and self._accept_reasoning_only:
+                reasoning = choice.message.reasoning_content
+                text = reasoning.strip() if reasoning is not None else None
+                if text == "":
+                    text = None
 
             tool_calls: list[ModelToolCall] = []
             call_ids: set[str] = set()

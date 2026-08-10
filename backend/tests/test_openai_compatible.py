@@ -192,6 +192,7 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
                     role=ModelRole.ASSISTANT,
                     content="这段附带文本不应进入历史请求",
                     tool_calls=[call],
+                    reasoning_content="private-reasoning-sentinel",
                 ),
                 ModelMessage(
                     role=ModelRole.TOOL,
@@ -210,7 +211,7 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": "system_current_time_2a9c83b2",
                         "description": tool.description,
                         "parameters": tool.parameters,
                     },
@@ -228,11 +229,12 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "system.current_time",
+                            "name": "system_current_time_2a9c83b2",
                             "arguments": '{"timezone":"UTC"}',
                         },
                     }
                 ],
+                "reasoning_content": "private-reasoning-sentinel",
             },
         )
         self.assertEqual(
@@ -241,9 +243,171 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
                 "role": "tool",
                 "content": '{"state":"succeeded"}',
                 "tool_call_id": "call-1",
-                "name": "system.current_time",
+                "name": "system_current_time_2a9c83b2",
             },
         )
+
+    async def test_complete_keeps_legal_short_tool_name(self):
+        captured_payload = None
+
+        def handler(request):
+            nonlocal captured_payload
+            captured_payload = json.loads(request.content)
+            return _json_response(
+                {"choices": [{"message": {"content": "done"}}]}
+            )
+
+        tool = ModelToolDefinition(
+            name="current_time",
+            description="读取当前时间",
+            parameters={"type": "object", "properties": {}},
+        )
+        gateway = OpenAICompatibleGateway(
+            _settings(tool_calling_enabled=True),
+            transport=httpx.MockTransport(handler),
+        )
+
+        await gateway.complete(
+            ModelRequest(
+                correlation_id="message-1",
+                messages=[
+                    ModelMessage(role=ModelRole.USER, content="几点了")
+                ],
+                tools=[tool],
+            )
+        )
+
+        self.assertEqual(
+            captured_payload["tools"][0]["function"]["name"],
+            "current_time",
+        )
+
+    async def test_complete_generates_unique_bounded_tool_aliases(self):
+        captured_payload = None
+
+        def handler(request):
+            nonlocal captured_payload
+            captured_payload = json.loads(request.content)
+            return _json_response(
+                {"choices": [{"message": {"content": "done"}}]}
+            )
+
+        names = [
+            "system.current_time",
+            "system_current_time_2a9c83b2",
+            "memory." + "x" * 80,
+        ]
+        tools = [
+            ModelToolDefinition(
+                name=name,
+                description=f"工具 {index}",
+                parameters={"type": "object", "properties": {}},
+            )
+            for index, name in enumerate(names)
+        ]
+        gateway = OpenAICompatibleGateway(
+            _settings(tool_calling_enabled=True),
+            transport=httpx.MockTransport(handler),
+        )
+
+        await gateway.complete(
+            ModelRequest(
+                correlation_id="message-1",
+                messages=[
+                    ModelMessage(role=ModelRole.USER, content="运行工具")
+                ],
+                tools=tools,
+            )
+        )
+
+        aliases = [
+            item["function"]["name"]
+            for item in captured_payload["tools"]
+        ]
+        self.assertEqual(len(set(aliases)), len(names))
+        self.assertEqual(aliases[1], "system_current_time_2a9c83b2")
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                self.assertRegex(alias, r"^[A-Za-z0-9_-]{1,64}$")
+                self.assertLessEqual(len(alias), 64)
+
+    async def test_complete_rejects_duplicate_internal_tool_names_locally(self):
+        calls = 0
+
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            return _json_response(
+                {"choices": [{"message": {"content": "done"}}]}
+            )
+
+        tool = _request_with_time_tool().tools[0]
+        gateway = OpenAICompatibleGateway(
+            _settings(tool_calling_enabled=True),
+            transport=httpx.MockTransport(handler),
+        )
+        request = ModelRequest(
+            correlation_id="message-1",
+            messages=[ModelMessage(role=ModelRole.USER, content="几点了")],
+            tools=[tool, tool],
+        )
+
+        with self.assertRaises(ModelConfigurationError):
+            await gateway.complete(request)
+
+        self.assertEqual(calls, 0)
+
+    async def test_complete_rejects_undeclared_message_tools_locally(self):
+        calls = 0
+
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            return _json_response(
+                {"choices": [{"message": {"content": "done"}}]}
+            )
+
+        declared = _request_with_time_tool().tools[0]
+        undeclared_call = ModelToolCall(
+            id="call-1",
+            name="memory.search",
+            arguments={},
+        )
+        invalid_message_sets = (
+            [
+                ModelMessage(role=ModelRole.USER, content="搜索"),
+                ModelMessage(
+                    role=ModelRole.ASSISTANT,
+                    tool_calls=[undeclared_call],
+                ),
+            ],
+            [
+                ModelMessage(role=ModelRole.USER, content="搜索"),
+                ModelMessage(
+                    role=ModelRole.TOOL,
+                    content='{"state":"succeeded"}',
+                    tool_call_id="call-1",
+                    name="memory.search",
+                ),
+            ],
+        )
+        gateway = OpenAICompatibleGateway(
+            _settings(tool_calling_enabled=True),
+            transport=httpx.MockTransport(handler),
+        )
+
+        for messages in invalid_message_sets:
+            with self.subTest(role=messages[-1].role):
+                with self.assertRaises(ModelConfigurationError):
+                    await gateway.complete(
+                        ModelRequest(
+                            correlation_id="message-1",
+                            messages=messages,
+                            tools=[declared],
+                        )
+                    )
+
+        self.assertEqual(calls, 0)
 
     async def test_complete_parses_tool_calls_with_optional_text(self):
         gateway = OpenAICompatibleGateway(
@@ -261,7 +425,10 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
                                             "id": "call-1",
                                             "type": "function",
                                             "function": {
-                                                "name": "system.current_time",
+                                                "name": (
+                                                    "system_current_time_"
+                                                    "2a9c83b2"
+                                                ),
                                                 "arguments": '{"timezone":"UTC"}',
                                             },
                                         }
@@ -305,7 +472,10 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
                                             "id": "call-1",
                                             "type": "function",
                                             "function": {
-                                                "name": "system.current_time",
+                                                "name": (
+                                                    "system_current_time_"
+                                                    "2a9c83b2"
+                                                ),
                                                 "arguments": "{}",
                                             },
                                         }
@@ -323,6 +493,149 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(reply.text)
         self.assertEqual(reply.tool_calls[0].arguments, {})
+
+    async def test_complete_maps_response_alias_and_keeps_tool_reasoning(self):
+        gateway = OpenAICompatibleGateway(
+            _settings(tool_calling_enabled=True),
+            transport=httpx.MockTransport(
+                lambda request: _json_response(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": None,
+                                    "reasoning_content": (
+                                        "private-reasoning-sentinel"
+                                    ),
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": (
+                                                    "system_current_time_"
+                                                    "2a9c83b2"
+                                                ),
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ]
+                    }
+                )
+            ),
+        )
+
+        reply = await gateway.complete(_request_with_time_tool())
+
+        self.assertEqual(reply.tool_calls[0].name, "system.current_time")
+        self.assertEqual(
+            reply.reasoning_content,
+            "private-reasoning-sentinel",
+        )
+
+    async def test_complete_discards_reasoning_from_final_text_reply(self):
+        gateway = OpenAICompatibleGateway(
+            _settings(),
+            transport=httpx.MockTransport(
+                lambda request: _json_response(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "done",
+                                    "reasoning_content": (
+                                        "private-reasoning-sentinel"
+                                    ),
+                                }
+                            }
+                        ]
+                    }
+                )
+            ),
+        )
+
+        reply = await gateway.complete(_request())
+
+        self.assertEqual(reply.text, "done")
+        self.assertIsNone(reply.reasoning_content)
+
+    async def test_complete_rejects_unknown_provider_tool_alias(self):
+        gateway = OpenAICompatibleGateway(
+            _settings(tool_calling_enabled=True),
+            transport=httpx.MockTransport(
+                lambda request: _json_response(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "unknown_tool",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                )
+            ),
+        )
+
+        with self.assertRaises(ModelProtocolError):
+            await gateway.complete(_request_with_time_tool())
+
+    async def test_complete_rejects_invalid_reasoning_content(self):
+        invalid_values = ("   ", "x" * 64_001, {"private": "value"})
+        for invalid_value in invalid_values:
+            with self.subTest(value_type=type(invalid_value).__name__):
+                gateway = OpenAICompatibleGateway(
+                    _settings(tool_calling_enabled=True),
+                    transport=httpx.MockTransport(
+                        lambda request, value=invalid_value: _json_response(
+                            {
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "content": None,
+                                            "reasoning_content": value,
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-1",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": (
+                                                            "system_current_"
+                                                            "time_2a9c83b2"
+                                                        ),
+                                                        "arguments": "{}",
+                                                    },
+                                                }
+                                            ],
+                                        }
+                                    }
+                                ]
+                            }
+                        )
+                    ),
+                )
+
+                with self.assertRaises(ModelProtocolError) as raised:
+                    await gateway.complete(_request_with_time_tool())
+
+                self.assertEqual(
+                    str(raised.exception),
+                    "model service returned an invalid response",
+                )
 
     async def test_complete_rejects_tool_calls_when_request_has_no_tools(self):
         for content in (None, "意外附带文本"):

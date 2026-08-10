@@ -181,6 +181,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ModelReply(
                     text=None,
                     tool_calls=[call],
+                    reasoning_content="private-reasoning-sentinel",
                     model="fake",
                     finish_reason="tool_calls",
                 ),
@@ -216,6 +217,13 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(requested.correlation_id), 70)
         self.assertEqual(gateway.requests[0].tools, gateway.requests[1].tools)
+        assistant_message = gateway.requests[1].messages[-2]
+        self.assertEqual(assistant_message.role, ModelRole.ASSISTANT)
+        self.assertEqual(
+            assistant_message.reasoning_content,
+            "private-reasoning-sentinel",
+        )
+        self.assertIsNone(result.reply.reasoning_content)
         tool_message = gateway.requests[1].messages[-1]
         self.assertEqual(tool_message.role, ModelRole.TOOL)
         self.assertEqual(tool_message.tool_call_id, "call-1")
@@ -234,6 +242,22 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 "error_code": None,
             },
         )
+
+    async def test_tool_round_without_reasoning_keeps_existing_path(self):
+        call = tool_call("call-without-reasoning")
+        gateway = FakeGateway(
+            [
+                ModelReply(tool_calls=[call], model="fake"),
+                ModelReply(text="完成", model="fake"),
+            ]
+        )
+        service = AsyncMock()
+        service.request.side_effect = lambda request: succeeded_view(request)
+
+        await configured_orchestrator(gateway, service).run(base_request())
+
+        assistant_message = gateway.requests[1].messages[-2]
+        self.assertIsNone(assistant_message.reasoning_content)
 
     async def test_tool_calls_take_priority_over_attached_reply_text(self):
         call = tool_call("call-with-text")

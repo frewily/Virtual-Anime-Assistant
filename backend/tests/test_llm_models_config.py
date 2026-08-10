@@ -414,6 +414,66 @@ class ModelContractTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     ModelMessage(**values)
 
+    def test_reasoning_content_requires_assistant_tool_calls(self):
+        call = ModelToolCall(
+            id="call-1",
+            name="system.current_time",
+            arguments={},
+        )
+        message = ModelMessage(
+            role=ModelRole.ASSISTANT,
+            tool_calls=[call],
+            reasoning_content="private-reasoning-sentinel",
+        )
+        reply = ModelReply(
+            tool_calls=[call],
+            reasoning_content="private-reasoning-sentinel",
+            model="model",
+        )
+
+        self.assertEqual(
+            message.reasoning_content,
+            "private-reasoning-sentinel",
+        )
+        self.assertEqual(
+            reply.reasoning_content,
+            "private-reasoning-sentinel",
+        )
+
+        invalid_messages = (
+            {
+                "role": ModelRole.USER,
+                "content": "hello",
+                "reasoning_content": "x",
+            },
+            {
+                "role": ModelRole.ASSISTANT,
+                "content": "answer",
+                "reasoning_content": "x",
+            },
+            {
+                "role": ModelRole.TOOL,
+                "content": "{}",
+                "tool_call_id": "call-1",
+                "name": call.name,
+                "reasoning_content": "x",
+            },
+            {
+                "role": ModelRole.ASSISTANT,
+                "tool_calls": [call],
+                "reasoning_content": "   ",
+            },
+            {
+                "role": ModelRole.ASSISTANT,
+                "tool_calls": [call],
+                "reasoning_content": "x" * 64_001,
+            },
+        )
+        for values in invalid_messages:
+            with self.subTest(values=values):
+                with self.assertRaises(ValidationError):
+                    ModelMessage(**values)
+
     def test_message_tool_field_boundaries_are_enforced(self):
         call = ModelToolCall(
             id="c",
@@ -576,6 +636,34 @@ class ModelContractTests(unittest.TestCase):
         self.assertIsNone(tool_only.text)
         self.assertEqual(len(tool_only.tool_calls), 1)
         self.assertEqual(both.text, "checking")
+
+    def test_reply_reasoning_content_requires_tool_calls(self):
+        tool_call = ModelToolCall(
+            id="call-1",
+            name="system.current_time",
+            arguments={},
+        )
+        invalid_replies = (
+            {
+                "text": "answer",
+                "reasoning_content": "x",
+                "model": "model",
+            },
+            {
+                "tool_calls": [tool_call],
+                "reasoning_content": "   ",
+                "model": "model",
+            },
+            {
+                "tool_calls": [tool_call],
+                "reasoning_content": "x" * 64_001,
+                "model": "model",
+            },
+        )
+        for values in invalid_replies:
+            with self.subTest(values=values):
+                with self.assertRaises(ValidationError):
+                    ModelReply(**values)
 
     def test_reply_rejects_invalid_boundaries(self):
         invalid_replies = (

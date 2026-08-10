@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 _SAFE_NAME_PATTERN = r"^[a-z][a-z0-9_.-]{2,99}$"
+_MAX_REASONING_CONTENT_CHARS = 64_000
 
 
 class _FrozenModel(BaseModel):
@@ -47,12 +48,24 @@ class ModelToolResult(_FrozenModel):
 class ModelMessage(BaseModel):
     role: ModelRole
     content: str | None = Field(default=None, min_length=1, max_length=12000)
+    reasoning_content: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_REASONING_CONTENT_CHARS,
+    )
     tool_calls: list[ModelToolCall] = Field(default_factory=list, max_length=4)
     tool_call_id: str | None = Field(default=None, min_length=1, max_length=200)
     name: str | None = Field(default=None, pattern=_SAFE_NAME_PATTERN)
 
     @model_validator(mode="after")
     def require_role_shape(self) -> "ModelMessage":
+        if self.reasoning_content is not None:
+            if not self.reasoning_content.strip():
+                raise ValueError("reasoning content cannot be blank")
+            if self.role is not ModelRole.ASSISTANT or not self.tool_calls:
+                raise ValueError(
+                    "reasoning content requires assistant tool calls"
+                )
         if self.role in (ModelRole.SYSTEM, ModelRole.USER):
             if self.content is None:
                 raise ValueError("system and user messages require content")
@@ -86,6 +99,11 @@ class ModelRequest(BaseModel):
 
 class ModelReply(BaseModel):
     text: str | None = Field(default=None, min_length=1, max_length=4000)
+    reasoning_content: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_REASONING_CONTENT_CHARS,
+    )
     tool_calls: list[ModelToolCall] = Field(default_factory=list, max_length=4)
     model: str = Field(min_length=1, max_length=200)
     finish_reason: str | None = Field(default=None, max_length=100)
@@ -97,6 +115,11 @@ class ModelReply(BaseModel):
     def require_output(self) -> "ModelReply":
         if self.text is None and not self.tool_calls:
             raise ValueError("model reply requires text or tool calls")
+        if self.reasoning_content is not None:
+            if not self.reasoning_content.strip():
+                raise ValueError("reasoning content cannot be blank")
+            if not self.tool_calls:
+                raise ValueError("reasoning content requires tool calls")
         return self
 
 

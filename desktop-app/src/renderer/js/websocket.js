@@ -1,10 +1,12 @@
 const WS_URL = 'ws://127.0.0.1:8080/ws/avatar';
-const BACKEND_URL = 'http://127.0.0.1:8080';
+const { createSpeechPlayback } = require('./speech-playback');
 const {
     enqueueConfirmation,
     handleConfirmationUpdate,
     restorePendingConfirmations
 } = require('./tool-confirmation');
+
+const speechPlayback = createSpeechPlayback();
 
 let ws;
 
@@ -54,10 +56,7 @@ function handleMessage(message) {
 }
 
 function handleSpeak(message) {
-    if (message.audioUrl) {
-        const audio = new Audio(new URL(message.audioUrl, BACKEND_URL));
-        audio.play();
-    }
+    void speechPlayback.handleSpeakAudio(message);
     
     if (message.motion) {
         window.playMotion && window.playMotion(message.motion);

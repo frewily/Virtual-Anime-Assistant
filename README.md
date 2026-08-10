@@ -9,6 +9,7 @@ Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron
 - 根据 CPU、时间和应用持续时间触发场景提醒。
 - 优先调用 GPT-SoVITS，失败时回退到 EdgeTTS。
 - 通过 WebSocket 驱动角色表情、动作和语音播放。
+- Live2D 在线时，桌面端会为没有现成音频的模型回复按需调用 TTS 并自动播放；语音失败不影响文字回复、动作或 WebSocket。
 - 使用统一消息模型和会话编排处理桌面交互与场景事件。默认未启用真实模型时，Demo 网关返回固定演示回复；配置 OpenAI 兼容服务后，聊天改用真实模型。
 - 使用 SQLite 持久化会话、消息、长期记忆和模型调用元数据。
 - 提供可扩展的工具注册表与权限状态机：低风险工具自动执行，高风险工具必须逐次确认，Electron 会展示待确认队列。
@@ -115,6 +116,8 @@ desktop-app/src/renderer/assets/dev-live2d/
 - 使用 `+`、`-`、`0` 调整或重置缩放。
 - 使用 `Ctrl/Command + 滚轮` 调整缩放。
 - 从窗口顶部透明区域拖动窗口。
+
+模型聊天回复通过桌面端按需请求现有 TTS 接口，因此只有 Live2D 窗口在线时才会自动生成语音。场景消息已有音频时直接播放，不会重复合成；QQ 回复不会触发桌面端朗读。
 
 资源损坏或缺失时，重新运行 `npm run setup:live2d-dev` 并重启 Electron。第三方资源来源、版权说明和发布限制见 [Live2D 第三方开发资源说明](desktop-app/THIRD_PARTY_DEV_ASSETS.md)。
 

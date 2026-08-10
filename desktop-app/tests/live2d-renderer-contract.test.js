@@ -48,3 +48,15 @@ test('renderer uses the Cubism 4 entry and real Hiyori motion groups', () => {
     assert.match(source, /resolveMotionGroup/);
     assert.doesNotMatch(source, /tap_head/);
 });
+
+test('websocket delegates speak audio to the bounded playback module', () => {
+    const source = fs.readFileSync(
+        path.join(rendererRoot, 'js', 'websocket.js'),
+        'utf8'
+    );
+
+    assert.match(source, /require\('\.\/speech-playback'\)/);
+    assert.match(source, /createSpeechPlayback\(\)/);
+    assert.match(source, /speechPlayback\.handleSpeakAudio\(message\)/);
+    assert.doesNotMatch(source, /new Audio\(/);
+});

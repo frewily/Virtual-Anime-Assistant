@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+**/__pycache__
+**/*.py[cod]
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.env
+**/secrets.env
+qq-bot/data
+desktop-app/node_modules
+desktop-app/dist
+logs
+tmp
+temp

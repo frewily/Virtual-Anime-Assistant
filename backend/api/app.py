@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from api.avatar import router as avatar_router
 from api.chat import router as chat_router
 from api.conversations import router as conversations_router
+from api.health import router as health_router
 from api.memories import router as memories_router
 from api.qq import status_router as qq_status_router
 from api.qq import websocket_router as qq_websocket_router
@@ -28,6 +29,7 @@ from api.ws import router as ws_router
 from api.ws import broadcast_json, broadcast_to_desktop
 from agent.monitor import run as run_window_monitor
 from core.runtime import AssistantRuntime
+from core.deployment import DeploymentSettings
 from core.tts import AUDIO_DIR
 from domain.tools import ToolEvent
 from settings.auth import LoginRateLimited, PasswordPolicyError
@@ -227,13 +229,14 @@ async def lifespan(app: FastAPI):
             supervise("scenario-loop", lambda: scenario_loop(runtime)),
             tasks,
         )
-        _start_background_task(
-            supervise(
-                "window-monitor",
-                lambda: run_window_monitor(runtime.report_window),
-            ),
-            tasks,
-        )
+        if app.state.deployment_settings.desktop_monitor_enabled:
+            _start_background_task(
+                supervise(
+                    "window-monitor",
+                    lambda: run_window_monitor(runtime.report_window),
+                ),
+                tasks,
+            )
         yield
     finally:
         for task in tasks:
@@ -262,6 +265,7 @@ def create_app(
     settings_service_factory: Callable[
         [], SettingsService
     ] = create_settings_service,
+    deployment_settings: DeploymentSettings | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Desktop Assistant API", version="1.0.0", lifespan=lifespan)
     app.state.runtime = runtime_instance
@@ -269,6 +273,9 @@ def create_app(
     app.state.settings_service = settings_service
     app.state.settings_service_factory = settings_service_factory
     app.state.settings_service_lock = threading.Lock()
+    app.state.deployment_settings = (
+        deployment_settings or DeploymentSettings.from_env()
+    )
 
     @app.exception_handler(SettingsHttpError)
     async def handle_settings_http_error(request: Request, exc: SettingsHttpError):
@@ -345,6 +352,7 @@ def create_app(
     )
 
     app.include_router(status_router, prefix="/api")
+    app.include_router(health_router, prefix="/api")
     app.include_router(tts_router, prefix="/api")
     app.include_router(window_router, prefix="/api")
     app.include_router(chat_router, prefix="/api")

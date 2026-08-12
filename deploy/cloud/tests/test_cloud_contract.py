@@ -10,6 +10,7 @@ DOCKERFILE = ROOT / "backend/Dockerfile"
 DOCKERIGNORE = ROOT / ".dockerignore"
 COMPOSE_PATH = ROOT / "deploy/cloud/docker-compose.yml"
 GITIGNORE = ROOT / ".gitignore"
+DEPLOY_WORKFLOW = ROOT / ".github/workflows/deploy-cloud.yml"
 
 
 class CloudDeploymentContractTests(unittest.TestCase):
@@ -160,6 +161,34 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("/api/health/onebot", script)
         self.assertIn('"status":"connected"', script)
         self.assertNotIn("cat ", script)
+
+    def test_deploy_workflow_has_strict_ci_and_main_gate(self):
+        workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("workflow_run:", workflow)
+        self.assertIn('workflows: ["CI"]', workflow)
+        self.assertIn("branches: [main]", workflow)
+        self.assertIn("types: [completed]", workflow)
+        self.assertIn("workflow_run.conclusion == 'success'", workflow)
+        self.assertIn("workflow_run.head_branch == 'main'", workflow)
+        self.assertIn("contents: read", workflow)
+
+    def test_deploy_workflow_is_serial_and_uses_only_ssh_secrets(self):
+        workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("group: vaa-cloud-production", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        for name in (
+            "VAA_DEPLOY_HOST",
+            "VAA_DEPLOY_USER",
+            "VAA_DEPLOY_PORT",
+            "VAA_DEPLOY_SSH_KEY",
+            "VAA_DEPLOY_KNOWN_HOSTS",
+        ):
+            self.assertIn(f"secrets.{name}", workflow)
+        self.assertIn("github.event.workflow_run.head_sha", workflow)
+        self.assertNotIn("ssh-keyscan", workflow)
+        self.assertNotIn("password", workflow.lower())
 
 
 if __name__ == "__main__":

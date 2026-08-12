@@ -1,4 +1,7 @@
 import json
+import re
+from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, Literal, NoReturn
 
 import httpx
@@ -19,11 +22,80 @@ from .models import (
     ModelRequest,
     ModelRole,
     ModelToolCall,
+    ModelToolDefinition,
 )
+
+
+_PROVIDER_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_INVALID_PROVIDER_TOOL_NAME = re.compile(r"[^A-Za-z0-9_-]+")
+_MAX_REASONING_CONTENT_CHARS = 64_000
 
 
 def _reject_non_json_constant(_: str) -> NoReturn:
     raise ValueError("non-standard JSON constant")
+
+
+@dataclass(frozen=True)
+class _ToolNameAliases:
+    internal_to_provider: dict[str, str]
+    provider_to_internal: dict[str, str]
+
+    @classmethod
+    def build(
+        cls,
+        tools: list[ModelToolDefinition],
+    ) -> "_ToolNameAliases":
+        internal_names = [tool.name for tool in tools]
+        if len(set(internal_names)) != len(internal_names):
+            raise ModelConfigurationError("duplicate model tool name")
+
+        used = {
+            name
+            for name in internal_names
+            if _PROVIDER_TOOL_NAME.fullmatch(name)
+        }
+        forward: dict[str, str] = {}
+        reverse: dict[str, str] = {}
+        for index, internal_name in enumerate(internal_names, start=1):
+            if _PROVIDER_TOOL_NAME.fullmatch(internal_name):
+                candidate = internal_name
+            else:
+                cleaned = _INVALID_PROVIDER_TOOL_NAME.sub("_", internal_name)
+                cleaned = cleaned.strip("_") or "tool"
+                digest = sha256(internal_name.encode("utf-8")).hexdigest()[:8]
+                for offset in range(len(tools) + 1):
+                    suffix = (
+                        f"_{digest}"
+                        if offset == 0
+                        else f"_{index + offset - 1}_{digest}"
+                    )
+                    candidate = f"{cleaned[:64 - len(suffix)]}{suffix}"
+                    if candidate not in used:
+                        break
+                else:
+                    raise ModelConfigurationError(
+                        "model tool aliases are not unique"
+                    )
+            forward[internal_name] = candidate
+            reverse[candidate] = internal_name
+            used.add(candidate)
+        return cls(forward, reverse)
+
+    def to_provider(self, internal_name: str) -> str:
+        try:
+            return self.internal_to_provider[internal_name]
+        except KeyError:
+            raise ModelConfigurationError(
+                "model message references an undeclared tool"
+            ) from None
+
+    def to_internal(self, provider_name: str) -> str:
+        try:
+            return self.provider_to_internal[provider_name]
+        except KeyError:
+            raise ModelProtocolError(
+                "model service returned an invalid response"
+            ) from None
 
 
 class _ResponseFunction(BaseModel):
@@ -84,10 +156,12 @@ class OpenAICompatibleGateway:
         return self._model_name
 
     async def complete(self, request: ModelRequest) -> ModelReply:
+        aliases = _ToolNameAliases.build(request.tools)
         payload: dict[str, Any] = {
             "model": self._model_name,
             "messages": [
-                self._message_payload(message) for message in request.messages
+                self._message_payload(message, aliases)
+                for message in request.messages
             ],
             "stream": False,
         }
@@ -96,7 +170,7 @@ class OpenAICompatibleGateway:
                 {
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": aliases.to_provider(tool.name),
                         "description": tool.description,
                         "parameters": tool.parameters,
                     },
@@ -132,10 +206,14 @@ class OpenAICompatibleGateway:
         return self._parse_reply(
             response,
             allow_tool_calls=bool(request.tools),
+            aliases=aliases,
         )
 
     @staticmethod
-    def _message_payload(message: ModelMessage) -> dict[str, Any]:
+    def _message_payload(
+        message: ModelMessage,
+        aliases: _ToolNameAliases,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "role": message.role.value,
             "content": message.content,
@@ -147,7 +225,7 @@ class OpenAICompatibleGateway:
                     "id": call.id,
                     "type": "function",
                     "function": {
-                        "name": call.name,
+                        "name": aliases.to_provider(call.name),
                         "arguments": json.dumps(
                             call.arguments,
                             ensure_ascii=False,
@@ -158,10 +236,12 @@ class OpenAICompatibleGateway:
                 }
                 for call in message.tool_calls
             ]
+            if message.reasoning_content is not None:
+                payload["reasoning_content"] = message.reasoning_content
             return payload
         if message.role is ModelRole.TOOL:
             payload["tool_call_id"] = message.tool_call_id
-            payload["name"] = message.name
+            payload["name"] = aliases.to_provider(message.name)
         return payload
 
     @staticmethod
@@ -181,6 +261,7 @@ class OpenAICompatibleGateway:
         response: httpx.Response,
         *,
         allow_tool_calls: bool,
+        aliases: _ToolNameAliases,
     ) -> ModelReply:
         try:
             completion = _ChatCompletionResponse.model_validate(response.json())
@@ -190,13 +271,22 @@ class OpenAICompatibleGateway:
             choice = completion.choices[0]
             if choice.message.tool_calls and not allow_tool_calls:
                 raise ValueError("unexpected tool calls")
+            reasoning_content = choice.message.reasoning_content
+            if choice.message.tool_calls and reasoning_content is not None and (
+                not reasoning_content.strip()
+                or len(reasoning_content) > _MAX_REASONING_CONTENT_CHARS
+            ):
+                raise ValueError("invalid reasoning content")
             content = choice.message.content
             text = content.strip() if content is not None else None
             if text == "":
                 text = None
             if text is None and self._accept_reasoning_only:
-                reasoning = choice.message.reasoning_content
-                text = reasoning.strip() if reasoning is not None else None
+                text = (
+                    reasoning_content.strip()
+                    if reasoning_content is not None
+                    else None
+                )
                 if text == "":
                     text = None
 
@@ -223,7 +313,7 @@ class OpenAICompatibleGateway:
                 tool_calls.append(
                     ModelToolCall(
                         id=call_id,
-                        name=function.name,
+                        name=aliases.to_internal(function.name),
                         arguments=arguments,
                     )
                 )
@@ -235,6 +325,9 @@ class OpenAICompatibleGateway:
             usage = completion.usage
             return ModelReply(
                 text=text,
+                reasoning_content=(
+                    reasoning_content if tool_calls else None
+                ),
                 tool_calls=tool_calls,
                 model=response_model or self._model_name,
                 finish_reason=choice.finish_reason,

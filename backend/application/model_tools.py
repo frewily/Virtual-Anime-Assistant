@@ -125,6 +125,7 @@ class ModelToolOrchestrator:
                 ModelMessage(
                     role=ModelRole.ASSISTANT,
                     content=None,
+                    reasoning_content=reply.reasoning_content,
                     tool_calls=calls,
                 )
             )

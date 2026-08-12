@@ -371,6 +371,7 @@ class ApiIntegrationTests(unittest.TestCase):
                         arguments={"timezone": "UTC"},
                     )
                 ],
+                reasoning_content="private-reasoning-sentinel",
                 model="fake-model",
                 prompt_tokens=10,
                 completion_tokens=2,
@@ -399,6 +400,8 @@ class ApiIntegrationTests(unittest.TestCase):
             confirmations = client.get("/api/tools/confirmations")
 
         self.assertEqual(response.status_code, 200)
+        self.assertNotIn("reasoning", response.json())
+        self.assertNotIn("private-reasoning-sentinel", response.text)
         self.assertEqual(
             response.json(),
             {"reply": "已读取 UTC 时间", "status": "ok"},
@@ -406,6 +409,10 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(confirmations.json(), [])
         self.assertEqual(self.llm.complete.await_count, 2)
         self.assertEqual(len(self.llm.requests), 2)
+        self.assertEqual(
+            self.llm.requests[1].messages[-2].reasoning_content,
+            "private-reasoning-sentinel",
+        )
         self.assertEqual(
             [tool.name for tool in self.llm.requests[0].tools],
             ["system.current_time"],
@@ -461,6 +468,11 @@ class ApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(assistant, ("已读取 UTC 时间", "completed"))
         self.assertEqual(pending_count, 0)
+        with closing(
+            sqlite3.connect(self.store.database_path)
+        ) as connection:
+            database_dump = "\n".join(connection.iterdump())
+        self.assertNotIn("private-reasoning-sentinel", database_dump)
 
     def test_chat_model_error_is_a_safe_503(self):
         self.llm.error = ModelServiceError(

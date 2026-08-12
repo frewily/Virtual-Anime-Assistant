@@ -13,6 +13,9 @@ RUN groupadd --gid 10001 vaa \
 
 COPY --chown=vaa:vaa backend /app/backend
 COPY --chown=vaa:vaa config /app/config
+COPY --chown=vaa:vaa deploy/cloud/scripts/healthcheck.sh /app/backend/healthcheck.sh
+
+RUN chmod 0555 /app/backend/healthcheck.sh
 
 WORKDIR /app/backend
 USER vaa

@@ -11,6 +11,7 @@ DOCKERIGNORE = ROOT / ".dockerignore"
 COMPOSE_PATH = ROOT / "deploy/cloud/docker-compose.yml"
 GITIGNORE = ROOT / ".gitignore"
 DEPLOY_WORKFLOW = ROOT / ".github/workflows/deploy-cloud.yml"
+CLOUD_RUNBOOK = ROOT / "docs/deployment/cloud-qq-assistant.md"
 
 
 class CloudDeploymentContractTests(unittest.TestCase):
@@ -189,6 +190,38 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("github.event.workflow_run.head_sha", workflow)
         self.assertNotIn("ssh-keyscan", workflow)
         self.assertNotIn("password", workflow.lower())
+
+    def test_cloud_runbook_covers_setup_tunnels_and_onebot(self):
+        runbook = CLOUD_RUNBOOK.read_text(encoding="utf-8")
+
+        for required in (
+            "Alibaba Cloud Linux 3",
+            "vaa-deploy",
+            "/opt/virtual-anime-assistant",
+            "chmod 600 secrets.env",
+            "8080:127.0.0.1:8080",
+            "6099:127.0.0.1:6099",
+            "ws://vaa-app:8080/ws/qq",
+            "不修改宝塔 Nginx",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, runbook)
+
+    def test_cloud_runbook_covers_backup_recovery_and_acceptance(self):
+        runbook = CLOUD_RUNBOOK.read_text(encoding="utf-8")
+
+        for required in (
+            "backup-sqlite.sh",
+            "verify-deployment.sh full",
+            "ss -lnt",
+            "vaa-backup.timer",
+            "网站",
+            "博客",
+            "回滚",
+            "停止 `vaa-app`",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, runbook)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Platform-aware paths used by the settings persistence layer."""
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,9 @@ class SettingsPaths:
 
     @classmethod
     def default(cls) -> "SettingsPaths":
+        configured_root = os.getenv("ASSISTANT_CONFIG_DIR", "").strip()
+        if configured_root:
+            return cls.from_root(Path(configured_root).expanduser())
         return cls.from_root(
             user_config_path("Virtual Anime Assistant", appauthor=False)
         )

@@ -19,6 +19,7 @@ from application.assistant import AssistantApplication
 from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
 from channels.onebot.connection import OneBotConnectionManager
+from core.deployment import DeploymentSettings
 from core.runtime import AssistantRuntime
 from domain.tools import ToolRisk, ToolSource
 from infrastructure.database_config import DatabaseSettings
@@ -1231,6 +1232,34 @@ class RuntimeTests(unittest.TestCase):
         factory.assert_not_called()
         service_factory.assert_not_called()
         service.recover.assert_not_called()
+
+    def test_cloud_lifespan_does_not_start_desktop_window_monitor(self):
+        runtime = Mock()
+        runtime.application.publisher.subscribe.return_value = Mock()
+        runtime.tool_service = None
+        runtime.aclose = AsyncMock()
+        application = create_app(
+            runtime_instance=runtime,
+            deployment_settings=DeploymentSettings(
+                profile="cloud",
+                desktop_monitor_enabled=False,
+            ),
+        )
+        def capture(coroutine, tasks):
+            coroutine.close()
+
+        async def exercise():
+            async with lifespan(application):
+                pass
+
+        with patch(
+            "api.app._start_background_task",
+            side_effect=capture,
+        ) as start_task:
+            asyncio.run(exercise())
+
+        self.assertEqual(start_task.call_count, 1)
+        runtime.aclose.assert_awaited_once()
 
     def test_fresh_import_does_not_instantiate_tts_or_database(self):
         backend = Path(__file__).resolve().parents[1]

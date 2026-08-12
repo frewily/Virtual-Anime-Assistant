@@ -47,6 +47,9 @@ logs/
 *.db-shm
 qq-bot/data/
 qq-bot/.env
+deploy/cloud/.env
+deploy/cloud/secrets.env
+deploy/cloud/data/
 
 # Live2D models (large files)
 desktop-app/src/renderer/assets/models/*.moc3

@@ -1,0 +1,50 @@
+services:
+  vaa-app:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+      - secrets.env
+    environment:
+      ASSISTANT_RUNTIME_PROFILE: cloud
+      ASSISTANT_HOST: 0.0.0.0
+      ASSISTANT_CONFIG_DIR: /data/config
+      ASSISTANT_DATA_DIR: /data/sqlite
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data/vaa:/data
+    networks:
+      - vaa-internal
+    mem_limit: 512m
+    cpus: 0.8
+    healthcheck:
+      test: ["CMD", "/app/backend/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  napcat:
+    image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - ./data/napcat/qq:/app/.config/QQ
+      - ./data/napcat/config:/app/napcat/config
+    networks:
+      - vaa-internal
+    mem_limit: 768m
+    cpus: 0.8
+    logging: *default-logging
+
+networks:
+  vaa-internal: {}

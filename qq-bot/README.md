@@ -1,4 +1,6 @@
-# NapCat QQ 开发环境
+# NapCat QQ 本地开发环境
+
+> 本目录只用于本地开发。云端生产部署请参考 [云端 QQ 助手部署与运维](../docs/deployment/cloud-qq-assistant.md)。
 
 本目录提供可选的 NapCat Docker 配套，用于把 QQ 的 OneBot 11 事件通过反向 WebSocket 发送给本机助手。Docker 只运行 NapCat，不运行 FastAPI、Electron、SQLite 或大模型服务。
 

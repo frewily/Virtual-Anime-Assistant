@@ -23,6 +23,22 @@ jobs:
         run: python -m compileall -q backend
       - name: Run backend tests
         run: python -m unittest discover -s backend/tests -v
+      - name: Run cloud deployment contracts
+        run: python -m unittest deploy.cloud.tests.test_cloud_contract -v
+      - name: Check cloud scripts
+        run: |
+          bash -n deploy/cloud/scripts/healthcheck.sh
+          bash -n deploy/cloud/scripts/backup-sqlite.sh
+          bash -n deploy/cloud/scripts/verify-deployment.sh
+          bash -n deploy/cloud/scripts/deploy.sh
+      - name: Validate cloud compose
+        run: |
+          cp deploy/cloud/.env.example deploy/cloud/.env
+          cp deploy/cloud/secrets.env.example deploy/cloud/secrets.env
+          chmod 0600 deploy/cloud/secrets.env
+          docker compose -f deploy/cloud/docker-compose.yml config --quiet
+      - name: Build cloud backend image
+        run: docker build -f backend/Dockerfile -t vaa-backend:ci .
 
   desktop:
     runs-on: ubuntu-latest

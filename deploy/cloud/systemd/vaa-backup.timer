@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Virtual Anime Assistant SQLite backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=vaa-backup.service
+
+[Install]
+WantedBy=timers.target

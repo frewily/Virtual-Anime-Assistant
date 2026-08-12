@@ -98,6 +98,28 @@ class CloudDeploymentContractTests(unittest.TestCase):
             ["ASSISTANT_LLM_API_KEY=", "ASSISTANT_QQ_ACCESS_TOKEN="],
         )
 
+    def test_backup_timer_is_daily_and_persistent(self):
+        service = (
+            ROOT / "deploy/cloud/systemd/vaa-backup.service"
+        ).read_text(encoding="utf-8")
+        timer = (
+            ROOT / "deploy/cloud/systemd/vaa-backup.timer"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("User=vaa-deploy", service)
+        self.assertIn("OnCalendar=daily", timer)
+        self.assertIn("Persistent=true", timer)
+
+    def test_backup_script_uses_in_container_backup_api(self):
+        script = (
+            ROOT / "deploy/cloud/scripts/backup-sqlite.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("docker compose exec -T vaa-app", script)
+        self.assertIn("python -m infrastructure.sqlite_backup", script)
+        self.assertNotIn("cp /data/sqlite", script)
+
 
 if __name__ == "__main__":
     unittest.main()

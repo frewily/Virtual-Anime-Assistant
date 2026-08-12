@@ -951,3 +951,15 @@ git log --oneline main..HEAD
 ```
 
 预期：工作区干净，`git diff --check` 无输出，分支包含设计、模型契约、网关兼容、编排回传和验收记录提交。
+
+## 完成记录
+
+验证日期：2026-08-12
+
+- `python3 -m compileall -q backend`：退出码 0。
+- `python3 -m unittest discover -s backend/tests -p 'test_*.py'`：594 项测试全部通过。
+- `npm --prefix desktop-app test`：41 项测试全部通过，renderer 构建及主进程、preload 语法检查成功。
+- `node --check backend/settings/static/settings.js`：退出码 0。
+- 敏感字段扫描：生产代码只命中 `backend/llm/models.py`、`backend/llm/openai_compatible.py` 和 `backend/application/model_tools.py`。
+- 真实 DeepSeek V4 验收：聊天 HTTP 200；`system.current_time` 状态为 `succeeded`；模型请求 2 次且均为 `succeeded`；最终回复包含可识别的上海当前时间。
+- 隐私检查：未记录 API Key、供应商响应正文、`reasoning_content` 或工具参数正文。

@@ -538,30 +538,30 @@ class OpenAICompatibleGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_complete_discards_reasoning_from_final_text_reply(self):
-        gateway = OpenAICompatibleGateway(
-            _settings(),
-            transport=httpx.MockTransport(
-                lambda request: _json_response(
-                    {
-                        "choices": [
+        for reasoning_content in ("", "private-reasoning-sentinel"):
+            with self.subTest(reasoning_length=len(reasoning_content)):
+                gateway = OpenAICompatibleGateway(
+                    _settings(),
+                    transport=httpx.MockTransport(
+                        lambda request, value=reasoning_content: _json_response(
                             {
-                                "message": {
-                                    "content": "done",
-                                    "reasoning_content": (
-                                        "private-reasoning-sentinel"
-                                    ),
-                                }
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "content": "done",
+                                            "reasoning_content": value,
+                                        }
+                                    }
+                                ]
                             }
-                        ]
-                    }
+                        )
+                    ),
                 )
-            ),
-        )
 
-        reply = await gateway.complete(_request())
+                reply = await gateway.complete(_request())
 
-        self.assertEqual(reply.text, "done")
-        self.assertIsNone(reply.reasoning_content)
+                self.assertEqual(reply.text, "done")
+                self.assertIsNone(reply.reasoning_content)
 
     async def test_complete_rejects_unknown_provider_tool_alias(self):
         gateway = OpenAICompatibleGateway(

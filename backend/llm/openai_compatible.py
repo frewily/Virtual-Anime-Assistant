@@ -272,7 +272,7 @@ class OpenAICompatibleGateway:
             if choice.message.tool_calls and not allow_tool_calls:
                 raise ValueError("unexpected tool calls")
             reasoning_content = choice.message.reasoning_content
-            if reasoning_content is not None and (
+            if choice.message.tool_calls and reasoning_content is not None and (
                 not reasoning_content.strip()
                 or len(reasoning_content) > _MAX_REASONING_CONTENT_CHARS
             ):

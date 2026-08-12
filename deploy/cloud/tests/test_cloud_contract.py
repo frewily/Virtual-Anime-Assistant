@@ -120,6 +120,47 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("python -m infrastructure.sqlite_backup", script)
         self.assertNotIn("cp /data/sqlite", script)
 
+    def test_deploy_script_has_lock_backup_health_and_rollback(self):
+        script = (
+            ROOT / "deploy/cloud/scripts/deploy.sh"
+        ).read_text(encoding="utf-8")
+
+        for required in (
+            "flock",
+            "^[0-9a-f]{40}$",
+            "git fetch origin",
+            "backup-sqlite.sh",
+            "up -d --build",
+            "/api/health/live",
+            "/api/health/ready",
+            "rollback",
+            "previous_sha",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, script)
+        for forbidden in (
+            "git reset --hard",
+            "docker compose down -v",
+            "docker system prune",
+            "printenv",
+            "env |",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, script)
+
+    def test_verify_script_has_startup_and_full_modes(self):
+        script = (
+            ROOT / "deploy/cloud/scripts/verify-deployment.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("startup", script)
+        self.assertIn("full", script)
+        self.assertIn("/api/health/live", script)
+        self.assertIn("/api/health/ready", script)
+        self.assertIn("/api/health/onebot", script)
+        self.assertIn('"status":"connected"', script)
+        self.assertNotIn("cat ", script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 """Tests for strict, atomic local settings-file persistence."""
 
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -28,6 +29,23 @@ class SettingsFileStoreTests(unittest.TestCase):
         self.assertNotIn(secret, "".join(traceback.format_exception(error)))
         self.assertIsNone(error.__cause__)
         self.assertTrue(error.__suppress_context__)
+
+    def test_default_paths_use_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch.dict(
+                os.environ,
+                {"ASSISTANT_CONFIG_DIR": temporary_directory},
+                clear=False,
+            ):
+                paths = SettingsPaths.default()
+
+            root = Path(temporary_directory)
+            self.assertEqual(paths.root, root)
+            self.assertEqual(paths.settings_file, root / "settings.json")
+            self.assertEqual(
+                paths.journal_file,
+                root / "settings.save-journal.json",
+            )
 
     def test_load_from_empty_directory_returns_defaults_without_creating_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

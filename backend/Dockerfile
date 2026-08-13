@@ -19,7 +19,8 @@ COPY --chown=vaa:vaa backend /app/backend
 COPY --chown=vaa:vaa config /app/config
 COPY --chown=vaa:vaa deploy/cloud/scripts/healthcheck.sh /app/backend/healthcheck.sh
 
-RUN chmod 0555 /app/backend/healthcheck.sh
+RUN chmod 0555 /app/backend/healthcheck.sh \
+    && install -d --owner=vaa --group=vaa --mode=0750 /app/backend/audio
 
 WORKDIR /app/backend
 USER vaa

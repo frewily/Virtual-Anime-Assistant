@@ -27,6 +27,14 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("USER vaa", dockerfile)
         self.assertIn('CMD ["python", "main.py"]', dockerfile)
 
+    def test_backend_image_provides_writable_audio_directory(self):
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "install -d --owner=vaa --group=vaa --mode=0750 /app/backend/audio",
+            dockerfile,
+        )
+
     def test_cloud_build_can_use_a_non_secret_pypi_mirror(self):
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")
         environment_example = (

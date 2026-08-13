@@ -1,12 +1,16 @@
 FROM python:3.12-slim
 
+ARG PIP_INDEX_URL
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
 COPY backend/requirements.txt /app/backend/requirements.txt
-RUN python -m pip install --no-cache-dir -r /app/backend/requirements.txt
+RUN python -m pip install --no-cache-dir \
+    ${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL} \
+    -r /app/backend/requirements.txt
 
 RUN groupadd --gid 10001 vaa \
     && useradd --uid 10001 --gid vaa --create-home vaa

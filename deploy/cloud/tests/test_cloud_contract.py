@@ -27,6 +27,21 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("USER vaa", dockerfile)
         self.assertIn('CMD ["python", "main.py"]', dockerfile)
 
+    def test_cloud_build_can_use_a_non_secret_pypi_mirror(self):
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        environment_example = (
+            ROOT / "deploy/cloud/.env.example"
+        ).read_text(encoding="utf-8")
+        build_args = self.compose["services"]["vaa-app"]["build"]["args"]
+
+        self.assertIn("ARG PIP_INDEX_URL", dockerfile)
+        self.assertIn("${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL}", dockerfile)
+        self.assertEqual(build_args["PIP_INDEX_URL"], "${PIP_INDEX_URL:-}")
+        self.assertIn(
+            "PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/",
+            environment_example.splitlines(),
+        )
+
     def test_build_context_excludes_secrets_and_state(self):
         patterns = DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
 

@@ -12,6 +12,9 @@ COMPOSE_PATH = ROOT / "deploy/cloud/docker-compose.yml"
 GITIGNORE = ROOT / ".gitignore"
 DEPLOY_WORKFLOW = ROOT / ".github/workflows/deploy-cloud.yml"
 CLOUD_RUNBOOK = ROOT / "docs/deployment/cloud-qq-assistant.md"
+MONITOR_INSTALLER = (
+    ROOT / "deploy/cloud/scripts/install-cloud-monitor.sh"
+)
 
 
 class CloudDeploymentContractTests(unittest.TestCase):
@@ -168,6 +171,31 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("Persistent=true", timer)
         self.assertIn("RandomizedDelaySec=10s", timer)
 
+    def test_cloud_monitor_installer_grants_only_required_data_access(self):
+        script = MONITOR_INSTALLER.read_text(encoding="utf-8")
+
+        for required in (
+            "(( EUID == 0 ))",
+            "setfacl -m u:vaa-deploy:--x \"$vaa_data_dir\"",
+            "setfacl -m u:vaa-deploy:r-x \"$backup_dir\"",
+            "install -d -o vaa-deploy -g vaa-deploy -m 0750",
+            "setfacl -m u:10001:r-x,d:u:10001:r-x",
+            "systemctl enable --now vaa-cloud-monitor.timer",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, script)
+
+        for forbidden in (
+            "chmod 777",
+            "chmod -R",
+            "chown -R",
+            "setfacl -R",
+            "docker.sock",
+            "secrets.env",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, script)
+
     def test_application_never_receives_docker_socket(self):
         serialized = json.dumps(self.compose)
 
@@ -272,6 +300,8 @@ class CloudDeploymentContractTests(unittest.TestCase):
             "回滚",
             "停止 `vaa-app`",
             "vaa-cloud-monitor.timer",
+            "install-cloud-monitor.sh",
+            "setfacl",
             "systemctl status vaa-cloud-monitor.timer",
             "systemctl start vaa-cloud-monitor.service",
             "recovery_exhausted",

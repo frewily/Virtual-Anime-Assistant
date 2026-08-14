@@ -152,18 +152,17 @@ deploy/cloud/scripts/backup-sqlite.sh
 
 长期运行监控每分钟检查 VAA、OneBot 与 SQLite 备份。OneBot 连续 3 次断开后，监控只重启 NapCat；10 分钟内最多恢复 2 次，避免重启风暴。VAA 容器不会获得 Docker Socket 或宿主机管理权限。
 
-管理员安装并启用 systemd 单元：
+管理员使用固定路径安装器授予监控所需的最小目录权限，并启用 systemd 单元：
 
 ```bash
-cd /opt/virtual-anime-assistant/current
-sudo install -m 0644 deploy/cloud/systemd/vaa-cloud-monitor.service \
-  /etc/systemd/system/vaa-cloud-monitor.service
-sudo install -m 0644 deploy/cloud/systemd/vaa-cloud-monitor.timer \
-  /etc/systemd/system/vaa-cloud-monitor.timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now vaa-cloud-monitor.timer
+sudo /opt/virtual-anime-assistant/current/deploy/cloud/scripts/\
+install-cloud-monitor.sh
 systemctl status vaa-cloud-monitor.timer
 ```
+
+安装器不会改变 VAA 数据目录的所有者，也不会递归放宽权限。它只通过
+`setfacl` 允许 `vaa-deploy` 穿过数据根目录、读取备份元数据并写入脱敏监控
+状态，同时仅允许容器 UID `10001` 读取该状态。脚本可安全重复执行。
 
 手动执行一次检查并读取脱敏摘要：
 

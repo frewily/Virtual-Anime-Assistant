@@ -329,6 +329,9 @@ class CloudDeploymentContractTests(unittest.TestCase):
             "systemctl start vaa-cloud-monitor.service",
             "recovery_exhausted",
             "/api/status/cloud",
+            "Git bundle",
+            "服务器无需访问 GitHub",
+            "vaa-deploy-<提交 SHA>.bundle",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, runbook)

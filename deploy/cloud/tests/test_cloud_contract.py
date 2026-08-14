@@ -145,6 +145,35 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("python -m infrastructure.sqlite_backup", script)
         self.assertNotIn("cp /data/sqlite", script)
 
+    def test_cloud_monitor_timer_is_bounded_persistent_and_non_privileged(self):
+        service = (
+            ROOT / "deploy/cloud/systemd/vaa-cloud-monitor.service"
+        ).read_text(encoding="utf-8")
+        timer = (
+            ROOT / "deploy/cloud/systemd/vaa-cloud-monitor.timer"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("User=vaa-deploy", service)
+        self.assertIn("Group=vaa-deploy", service)
+        self.assertIn("UMask=0027", service)
+        self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn(
+            "ExecStart=/opt/virtual-anime-assistant/current/deploy/cloud/"
+            "scripts/cloud-monitor.sh",
+            service,
+        )
+        self.assertIn("OnBootSec=2min", timer)
+        self.assertIn("OnUnitActiveSec=1min", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("RandomizedDelaySec=10s", timer)
+
+    def test_application_never_receives_docker_socket(self):
+        serialized = json.dumps(self.compose)
+
+        self.assertNotIn("docker.sock", serialized)
+        self.assertNotIn("/var/run/docker", serialized)
+
     def test_deploy_script_has_lock_backup_health_and_rollback(self):
         script = (
             ROOT / "deploy/cloud/scripts/deploy.sh"
@@ -242,6 +271,11 @@ class CloudDeploymentContractTests(unittest.TestCase):
             "博客",
             "回滚",
             "停止 `vaa-app`",
+            "vaa-cloud-monitor.timer",
+            "systemctl status vaa-cloud-monitor.timer",
+            "systemctl start vaa-cloud-monitor.service",
+            "recovery_exhausted",
+            "/api/status/cloud",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, runbook)

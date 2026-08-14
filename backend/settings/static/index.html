@@ -71,6 +71,20 @@
       </nav>
 
       <div class="content">
+        <section id="cloud-operations" class="operations-card" aria-labelledby="cloud-operations-title" hidden>
+          <header>
+            <p class="section-number">CLOUD · OPERATIONS</p>
+            <h2 id="cloud-operations-title">云端运行状态</h2>
+          </header>
+          <dl class="operations-grid">
+            <div><dt>总体</dt><dd id="cloud-overall-state">正在读取…</dd></div>
+            <div><dt>VAA</dt><dd id="cloud-vaa-state">未知</dd></div>
+            <div><dt>QQ / OneBot</dt><dd id="cloud-onebot-state">未知</dd></div>
+            <div><dt>SQLite 备份</dt><dd id="cloud-backup-state">未知</dd></div>
+            <div><dt>自动恢复</dt><dd id="cloud-recovery-state">尚无记录</dd></div>
+            <div><dt>告警</dt><dd id="cloud-alert-state">无</dd></div>
+          </dl>
+        </section>
         <div id="error-summary" class="error-summary" role="alert" tabindex="-1" hidden></div>
         <form id="settings-form" novalidate>
           <section id="panel-llm" class="panel is-active" role="tabpanel" aria-labelledby="tab-llm" data-panel="llm">

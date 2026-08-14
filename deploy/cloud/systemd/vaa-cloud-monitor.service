@@ -1,0 +1,14 @@
+[Unit]
+Description=Monitor Virtual Anime Assistant cloud operation
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+User=vaa-deploy
+Group=vaa-deploy
+UMask=0027
+WorkingDirectory=/opt/virtual-anime-assistant/current/deploy/cloud
+ExecStart=/opt/virtual-anime-assistant/current/deploy/cloud/scripts/cloud-monitor.sh
+NoNewPrivileges=true
+PrivateTmp=true

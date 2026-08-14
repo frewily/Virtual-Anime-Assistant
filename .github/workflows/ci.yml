@@ -24,13 +24,14 @@ jobs:
       - name: Run backend tests
         run: python -m unittest discover -s backend/tests -v
       - name: Run cloud deployment contracts
-        run: python -m unittest deploy.cloud.tests.test_cloud_contract -v
+        run: python -m unittest discover -s deploy/cloud/tests -p 'test_*.py' -v
       - name: Check cloud scripts
         run: |
           bash -n deploy/cloud/scripts/healthcheck.sh
           bash -n deploy/cloud/scripts/backup-sqlite.sh
           bash -n deploy/cloud/scripts/verify-deployment.sh
           bash -n deploy/cloud/scripts/deploy.sh
+          bash -n deploy/cloud/scripts/cloud-monitor.sh
       - name: Validate cloud compose
         run: |
           cp deploy/cloud/.env.example deploy/cloud/.env

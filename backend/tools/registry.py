@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from computer.models import ModelAccess
 from domain.messages import MessageSource
 from domain.tools import ToolRisk, ToolSource
 
@@ -29,6 +30,7 @@ class ToolDefinition:
     timeout_seconds: float
     cancellable: bool
     handler: ToolHandler
+    model_access: ModelAccess = ModelAccess.HIDDEN
     sensitive_fields: frozenset[str] = field(default_factory=frozenset)
     allowed_sources: frozenset[ToolSource] = field(
         default_factory=lambda: frozenset(
@@ -44,6 +46,10 @@ class ToolDefinition:
     def __post_init__(self) -> None:
         if not _TOOL_NAME_PATTERN.fullmatch(self.name):
             raise ValueError("tool name is invalid")
+        if not isinstance(self.risk, ToolRisk):
+            raise TypeError("tool risk must be a ToolRisk value")
+        if type(self.cancellable) is not bool:
+            raise TypeError("tool cancellable must be a bool")
         if not self.title.strip():
             raise ValueError("tool title must not be blank")
         if not self.impact.strip():
@@ -55,6 +61,8 @@ class ToolDefinition:
             raise TypeError("arguments_model must be a Pydantic model")
         if not callable(self.handler):
             raise TypeError("tool handler must be callable")
+        if not isinstance(self.model_access, ModelAccess):
+            raise TypeError("tool model access must be a ModelAccess value")
         if not 0 < self.timeout_seconds <= 300:
             raise ValueError("tool timeout must be between 0 and 300 seconds")
         normalized_sources = frozenset(self.allowed_sources)
@@ -75,6 +83,11 @@ class ToolDefinition:
             raise TypeError(
                 "tool allowed channels must contain MessageSource values"
             )
+        if any(
+            not isinstance(field_name, str)
+            for field_name in self.sensitive_fields
+        ):
+            raise TypeError("tool sensitive fields must contain strings")
         normalized_fields = frozenset(
             field_name.casefold()
             for field_name in self.sensitive_fields

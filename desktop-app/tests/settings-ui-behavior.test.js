@@ -82,9 +82,12 @@ function makeHarness(fetchImpl) {
     for (const tab of elements.filter((node) => node.getAttribute('role') === 'tab')) tab.parentElement = tablist;
 
     function withDataset(key) { return elements.filter((node) => node.dataset[key] !== undefined); }
+    const documentListeners = new Map();
     const document = {
+        visibilityState: 'visible',
         getElementById: (id) => ids.get(id),
         createElement: (name) => new FakeElement(name),
+        addEventListener: (name, callback) => documentListeners.set(name, callback),
         querySelector(selector) {
             if (selector === '[role="tablist"]') return tablist;
             if (selector === '.panel.is-active') return elements.find((node) => node.classList.contains('panel') && node.classList.contains('is-active')) || null;
@@ -107,10 +110,14 @@ function makeHarness(fetchImpl) {
             return [];
         }
     };
+    const timers = new Map();
+    let nextTimer = 1;
     const window = {
         confirm: () => true,
         addEventListener() {},
-        matchMedia: () => ({ matches: false, addEventListener() {} })
+        matchMedia: () => ({ matches: false, addEventListener() {} }),
+        setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
+        clearTimeout(id) { timers.delete(id); }
     };
     const hooks = {};
     const source = originalSource.replace(
@@ -118,7 +125,8 @@ function makeHarness(fetchImpl) {
         `  Object.assign(window.__hooks, {
           state, applySnapshot, collectDraft, collectProbe, markFieldDirty,
           request, loadAuthenticatedData, authenticate, saveSettings, runProbe,
-          performLogout, retainSecret
+          performLogout, retainSecret, startCloudPolling, stopCloudPolling,
+          refreshCloudStatus, renderCloudStatus
         });`
     );
     vm.runInNewContext(source, {
@@ -126,7 +134,22 @@ function makeHarness(fetchImpl) {
         fetch: fetchImpl, AbortController, JSON, Object, Array, Map, Set,
         String, Number, RegExp, Error, Promise, Boolean
     });
-    return { hooks, ids, elements };
+    return {
+        hooks, ids, elements,
+        runNextTimer() {
+            const entry = timers.entries().next().value;
+            if (!entry) return false;
+            timers.delete(entry[0]);
+            entry[1]();
+            return true;
+        },
+        setVisibility(value) {
+            document.visibilityState = value;
+            const listener = documentListeners.get('visibilitychange');
+            if (listener) listener();
+        },
+        timerCount: () => timers.size
+    };
 }
 
 function snapshot(revision, overrides = {}) {
@@ -435,6 +458,42 @@ test('save 401 followed by reauthentication clears the old saving status', async
     assert.equal(hooks.state.authenticated, true);
     assert.equal(ids.get('save-status').textContent, '');
     assert.equal(hooks.state.dirty, false);
+});
+
+test('cloud polling starts for authenticated sessions and stops explicitly', async () => {
+    const paths = [];
+    const harness = makeHarness(async (path) => {
+        paths.push(path);
+        return response({ available: true, overallState: 'healthy', vaaState: 'ready', onebotState: 'connected', backupState: 'fresh', recoveriesInWindow: 0, alertCode: null });
+    });
+    const { hooks } = harness;
+    hooks.state.authenticated = true;
+
+    await hooks.startCloudPolling();
+
+    assert.equal(paths.filter((path) => path === '/api/status/cloud').length, 1);
+    assert.equal(harness.timerCount(), 1);
+    hooks.stopCloudPolling();
+    assert.equal(harness.timerCount(), 0);
+});
+
+test('hidden page pauses cloud polling and visible page refreshes immediately', async () => {
+    const paths = [];
+    const harness = makeHarness(async (path) => {
+        paths.push(path);
+        return response({ available: false });
+    });
+    const { hooks } = harness;
+    hooks.state.authenticated = true;
+
+    harness.setVisibility('hidden');
+    hooks.startCloudPolling();
+    assert.equal(paths.length, 0);
+
+    harness.setVisibility('visible');
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(paths.filter((path) => path === '/api/status/cloud').length, 1);
 });
 
 test('stale save catch and finally cannot clear a newer save operation status', async () => {

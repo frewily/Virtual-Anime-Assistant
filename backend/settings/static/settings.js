@@ -25,6 +25,22 @@
     SERVICE_ERROR: '服务暂时不可用'
   });
   const SECRET_PATHS = Object.freeze(['llm.apiKey', 'qq.accessToken']);
+  const CLOUD_STATUS_API = '/api/status/cloud';
+  const CLOUD_POLL_INTERVAL_MS = 30_000;
+  const CLOUD_LABELS = Object.freeze({
+    overall: Object.freeze({ healthy: '正常', degraded: '降级', alerting: '需要处理', unknown: '未知' }),
+    vaa: Object.freeze({ ready: '正常', not_ready: '未就绪', unavailable: '不可用', unknown: '未知' }),
+    onebot: Object.freeze({ connected: '已连接', disconnected: '已断开', disabled: '未启用', misconfigured: '配置错误', unknown: '未知' }),
+    backup: Object.freeze({ fresh: '正常', stale: '已过期', missing: '未找到', unknown: '未知' })
+  });
+  const CLOUD_ALERT_LABELS = Object.freeze({
+    vaa_unavailable: 'VAA 不可用，请检查服务状态',
+    configuration_required: 'QQ 配置需要处理',
+    backup_stale: 'SQLite 备份已过期',
+    recovery_exhausted: '自动恢复已达上限，请检查 QQ 登录',
+    deployment_in_progress: '正在部署，已暂停自动恢复',
+    state_invalid: '监控状态不可用'
+  });
 
   const state = {
     authenticated: false,
@@ -46,6 +62,8 @@
     probeGeneration: 0,
     statusOperationGeneration: 0,
     transientStatuses: new Map(),
+    cloudStatusController: null,
+    cloudStatusTimer: null,
     readOnlyPaths: new Set(),
     secrets: {
       'llm.apiKey': { operation: 'retain', value: null },
@@ -135,6 +153,82 @@
     return fallback;
   }
 
+  function safeCloudLabel(group, value) {
+    const labels = CLOUD_LABELS[group];
+    return labels && typeof value === 'string' ? (labels[value] || '未知') : '未知';
+  }
+
+  function setCloudValue(id, text, tone = '') {
+    const node = byId(id);
+    node.textContent = text;
+    node.classList.toggle('is-healthy', tone === 'healthy');
+    node.classList.toggle('is-alerting', tone === 'alerting');
+  }
+
+  function renderCloudStatus(payload) {
+    const card = byId('cloud-operations');
+    if (!payload || payload.available !== true) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    setCloudValue('cloud-overall-state', safeCloudLabel('overall', payload.overallState), payload.overallState === 'healthy' ? 'healthy' : (payload.overallState === 'alerting' ? 'alerting' : ''));
+    setCloudValue('cloud-vaa-state', safeCloudLabel('vaa', payload.vaaState), payload.vaaState === 'ready' ? 'healthy' : '');
+    setCloudValue('cloud-onebot-state', safeCloudLabel('onebot', payload.onebotState), payload.onebotState === 'connected' ? 'healthy' : (payload.onebotState === 'misconfigured' ? 'alerting' : ''));
+    const backupTime = typeof payload.latestBackupAt === 'string' ? ` · ${payload.latestBackupAt}` : '';
+    setCloudValue('cloud-backup-state', `${safeCloudLabel('backup', payload.backupState)}${backupTime}`, payload.backupState === 'fresh' ? 'healthy' : (['stale', 'missing'].includes(payload.backupState) ? 'alerting' : ''));
+    const recoveries = Number.isInteger(payload.recoveriesInWindow) ? payload.recoveriesInWindow : 0;
+    const lastRecovery = typeof payload.lastRecoveryAt === 'string' ? `，最近 ${payload.lastRecoveryAt}` : '';
+    setCloudValue('cloud-recovery-state', `10 分钟内 ${recoveries} 次${lastRecovery}`);
+    const alert = typeof payload.alertCode === 'string' ? (CLOUD_ALERT_LABELS[payload.alertCode] || '未知告警') : '无';
+    setCloudValue('cloud-alert-state', alert, payload.alertCode ? 'alerting' : 'healthy');
+  }
+
+  function stopCloudPolling() {
+    if (state.cloudStatusController) state.cloudStatusController.abort();
+    state.cloudStatusController = null;
+    if (state.cloudStatusTimer !== null) window.clearTimeout(state.cloudStatusTimer);
+    state.cloudStatusTimer = null;
+  }
+
+  function scheduleCloudPoll(sessionGeneration) {
+    if (!state.authenticated || document.visibilityState === 'hidden' || sessionGeneration !== state.sessionGeneration) return;
+    state.cloudStatusTimer = window.setTimeout(() => {
+      state.cloudStatusTimer = null;
+      refreshCloudStatus(sessionGeneration);
+    }, CLOUD_POLL_INTERVAL_MS);
+  }
+
+  async function refreshCloudStatus(sessionGeneration = state.sessionGeneration) {
+    if (!state.authenticated || document.visibilityState === 'hidden' || sessionGeneration !== state.sessionGeneration) return;
+    if (state.cloudStatusController) state.cloudStatusController.abort();
+    const controller = new AbortController();
+    state.cloudStatusController = controller;
+    try {
+      const payload = await request(CLOUD_STATUS_API, {
+        signal: controller.signal
+      });
+      if (controller !== state.cloudStatusController || sessionGeneration !== state.sessionGeneration) return;
+      renderCloudStatus(payload);
+    } catch (error) {
+      if (controller !== state.cloudStatusController || sessionGeneration !== state.sessionGeneration) return;
+      if (!(error && error.name === 'AbortError') && !(error instanceof ApiError && error.status === 401)) {
+        byId('cloud-operations').hidden = false;
+        setCloudValue('cloud-overall-state', '暂时无法读取云端状态', 'alerting');
+      }
+    } finally {
+      if (controller !== state.cloudStatusController) return;
+      state.cloudStatusController = null;
+      scheduleCloudPoll(sessionGeneration);
+    }
+  }
+
+  function startCloudPolling() {
+    stopCloudPolling();
+    if (!state.authenticated || document.visibilityState === 'hidden') return;
+    return refreshCloudStatus(state.sessionGeneration);
+  }
+
   async function request(path, options = {}) {
     const sessionGeneration = options.sessionBound
       ? (Number.isInteger(options.sessionGeneration) ? options.sessionGeneration : state.sessionGeneration)
@@ -206,6 +300,7 @@
     state.saveBusy = false;
     state.logoutGeneration += 1;
     state.logoutBusy = false;
+    stopCloudPolling();
     abortProbes('');
     clearTransientStatusesForGeneration(previousGeneration);
     byId('save-settings').disabled = false;
@@ -225,6 +320,7 @@
   }
 
   function showAuth(initialized, message = '') {
+    stopCloudPolling();
     byId('auth-panel').hidden = false;
     byId('workspace').hidden = true;
     byId('action-bar').hidden = true;
@@ -247,6 +343,7 @@
     byId('session-status').textContent = '已安全登录';
     byId('session-dot').classList.add('is-on');
     byId('logout-button').hidden = false;
+    startCloudPolling();
   }
 
   function valueAt(object, path) {
@@ -909,6 +1006,11 @@
     if (!state.dirty) return;
     event.preventDefault();
     event.returnValue = '';
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') stopCloudPolling();
+    else if (state.authenticated) startCloudPolling();
   });
 
   initialize();

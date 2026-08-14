@@ -98,3 +98,20 @@ test('settings styles are warm, responsive, accessible, and motion-aware', () =>
     assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
     assert.doesNotMatch(css, /url\s*\(\s*['"]?https?:\/\//);
 });
+
+test('cloud operations card uses a read-only safe status contract', () => {
+    const html = read('index.html');
+    const source = read('settings.js');
+
+    for (const id of [
+        'cloud-operations', 'cloud-overall-state', 'cloud-vaa-state',
+        'cloud-onebot-state', 'cloud-backup-state', 'cloud-recovery-state',
+        'cloud-alert-state'
+    ]) assert.match(html, new RegExp(`id="${id}"`));
+
+    assert.match(source, /\/api\/status\/cloud/);
+    assert.match(source, /30_000/);
+    assert.match(source, /visibilitychange/);
+    assert.match(source, /textContent/);
+    assert.doesNotMatch(source, /innerHTML|localStorage|sessionStorage|console\./);
+});

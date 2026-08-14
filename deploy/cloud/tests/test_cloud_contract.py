@@ -210,7 +210,8 @@ class CloudDeploymentContractTests(unittest.TestCase):
         for required in (
             "flock",
             "^[0-9a-f]{40}$",
-            "git fetch origin",
+            'vaa-import-$target_sha.sh',
+            "readonly repo_root=/opt/virtual-anime-assistant/current",
             "backup-sqlite.sh",
             "up -d --build",
             "/api/health/live",
@@ -226,9 +227,11 @@ class CloudDeploymentContractTests(unittest.TestCase):
             "docker system prune",
             "printenv",
             "env |",
+            "secrets.env",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, script)
+        self.assertNotIn("git fetch origin", script)
 
     def test_verify_script_has_startup_and_full_modes(self):
         script = (

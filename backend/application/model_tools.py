@@ -2,6 +2,7 @@ import json
 from hashlib import sha256
 from time import perf_counter
 
+from domain.messages import MessageSource
 from domain.tools import (
     ToolRequest,
     ToolRequestState,
@@ -76,9 +77,11 @@ class ModelToolOrchestrator:
     async def run(
         self,
         request: ModelRequest,
+        *,
+        source: MessageSource,
     ) -> ModelOrchestrationResult:
         messages = list(request.messages)
-        tools = list(self.catalog.list()) if self.enabled else []
+        tools = list(self.catalog.list(source)) if self.enabled else []
         advertised_tool_names = {tool.name for tool in tools}
         attempts: list[ModelAttempt] = []
         seen_call_ids: set[str] = set()

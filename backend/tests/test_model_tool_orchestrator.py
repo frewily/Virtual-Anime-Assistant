@@ -12,6 +12,7 @@ from application.model_tools import (
     ModelToolOrchestrationError,
     ModelToolOrchestrator,
 )
+from domain.messages import MessageSource
 from domain.tools import (
     ToolRequestState,
     ToolRequestView,
@@ -108,9 +109,11 @@ class FakeCatalog:
     def __init__(self, tools: list[ModelToolDefinition]) -> None:
         self.tools = tools
         self.list_calls = 0
+        self.sources = []
 
-    def list(self):
+    def list(self, source):
         self.list_calls += 1
+        self.sources.append(source)
         return tuple(self.tools)
 
 
@@ -155,7 +158,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
         )
 
-        result = await orchestrator.run(base_request())
+        result = await orchestrator.run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(result.reply.text, "直接回答")
         self.assertEqual(len(result.attempts), 1)
@@ -169,6 +172,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreaterEqual(result.attempts[0].latency_ms, 0)
         self.assertEqual(catalog.list_calls, 1)
+        self.assertEqual(catalog.sources, [MessageSource.DESKTOP])
         service.request.assert_not_awaited()
 
     async def test_time_tool_result_is_returned_to_model(self):
@@ -201,7 +205,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
         orchestrator = configured_orchestrator(gateway, service)
 
-        result = await orchestrator.run(base_request())
+        result = await orchestrator.run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(result.reply.text, "现在是 12:00")
         self.assertEqual(len(result.attempts), 2)
@@ -254,7 +258,10 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         service = AsyncMock()
         service.request.side_effect = lambda request: succeeded_view(request)
 
-        await configured_orchestrator(gateway, service).run(base_request())
+        await configured_orchestrator(gateway, service).run(
+            base_request(),
+            source=MessageSource.DESKTOP,
+        )
 
         assistant_message = gateway.requests[1].messages[-2]
         self.assertIsNone(assistant_message.reasoning_content)
@@ -277,7 +284,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         result = await configured_orchestrator(
             gateway,
             service,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(result.reply.text, "最终答复")
         assistant_message = gateway.requests[1].messages[-2]
@@ -313,7 +320,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        await orchestrator.run(base_request())
+        await orchestrator.run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(events, ["example.first", "example.second"])
 
@@ -332,7 +339,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await configured_orchestrator(
                 gateway,
                 service,
-            ).run(base_request())
+            ).run(base_request(), source=MessageSource.DESKTOP)
 
         error = raised.exception
         self.assertEqual(error.code, "protocol_error")
@@ -363,7 +370,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await configured_orchestrator(
                 gateway,
                 service,
-            ).run(base_request())
+            ).run(base_request(), source=MessageSource.DESKTOP)
 
         error = raised.exception
         self.assertEqual(error.code, "protocol_error")
@@ -392,7 +399,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await configured_orchestrator(
                 gateway,
                 service,
-            ).run(base_request())
+            ).run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(raised.exception.code, "model_tool_round_limit")
         self.assertEqual(len(raised.exception.attempts), 3)
@@ -415,7 +422,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await configured_orchestrator(
                 gateway,
                 service,
-            ).run(base_request())
+            ).run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(raised.exception.code, "model_tool_round_limit")
         self.assertEqual(len(raised.exception.attempts), 3)
@@ -446,7 +453,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await configured_orchestrator(
                 gateway,
                 service,
-            ).run(base_request())
+            ).run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(raised.exception.code, "model_tool_call_limit")
         self.assertEqual(len(raised.exception.attempts), 2)
@@ -468,7 +475,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await configured_orchestrator(
             gateway,
             service,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         first_messages = gateway.requests[0].messages
         second_messages = gateway.requests[1].messages
@@ -512,7 +519,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         result = await configured_orchestrator(
             gateway,
             service,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         content = gateway.requests[1].messages[-1].content
         payload = json.loads(content)
@@ -541,7 +548,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         result = await configured_orchestrator(
             gateway,
             service,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         content = gateway.requests[1].messages[-1].content
         payload = json.loads(content)
@@ -580,7 +587,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             tools=[tool_definition("system.current_time")],
         )
 
-        result = await orchestrator.run(base_request())
+        result = await orchestrator.run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(result.reply.text, "不可用")
         service.request.assert_not_awaited()
@@ -612,7 +619,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             enabled=False,
         )
 
-        await orchestrator.run(base_request())
+        await orchestrator.run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(catalog.list_calls, 0)
         self.assertEqual(gateway.requests[0].tools, [])
@@ -633,7 +640,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await configured_orchestrator(
             gateway,
             None,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         payload = json.loads(gateway.requests[1].messages[-1].content)
         self.assertEqual(payload["error_code"], "tool_not_available")
@@ -656,7 +663,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await configured_orchestrator(
             gateway,
             service,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         payload = json.loads(gateway.requests[1].messages[-1].content)
         self.assertEqual(payload["state"], "failed")
@@ -684,7 +691,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await configured_orchestrator(
             gateway,
             service,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         payload = json.loads(gateway.requests[1].messages[-1].content)
         self.assertEqual(payload["state"], "failed")
@@ -716,7 +723,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await configured_orchestrator(
             gateway,
             service,
-        ).run(base_request())
+        ).run(base_request(), source=MessageSource.DESKTOP)
 
         content = gateway.requests[1].messages[-1].content
         payload = json.loads(content)
@@ -745,7 +752,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await configured_orchestrator(
                 gateway,
                 service,
-            ).run(base_request())
+            ).run(base_request(), source=MessageSource.DESKTOP)
 
         error = raised.exception
         self.assertEqual(error.code, "timeout_error")
@@ -767,7 +774,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await configured_orchestrator(
                 gateway,
                 AsyncMock(),
-            ).run(base_request())
+            ).run(base_request(), source=MessageSource.DESKTOP)
 
         self.assertEqual(len(raised.exception.attempts), 1)
         self.assertEqual(

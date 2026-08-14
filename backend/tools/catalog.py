@@ -10,6 +10,7 @@ from pydantic.errors import (
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
 from pydantic_core import core_schema
 
+from domain.messages import MessageSource
 from domain.tools import ToolRisk, ToolSource
 from llm.models import ModelToolDefinition
 from tools.registry import ToolDefinition, ToolRegistry
@@ -145,12 +146,18 @@ class ModelToolCatalog:
     def __init__(self, registry: ToolRegistry) -> None:
         self.registry = registry
 
-    def list(self) -> Sequence[ModelToolDefinition]:
+    def list(
+        self,
+        source: MessageSource,
+    ) -> Sequence[ModelToolDefinition]:
+        if not isinstance(source, MessageSource):
+            raise TypeError("model tool source must be a MessageSource")
         tools: list[ModelToolDefinition] = []
         for definition in self.registry.list():
             if (
                 definition.risk is not ToolRisk.LOW
                 or ToolSource.MODEL not in definition.allowed_sources
+                or source not in definition.allowed_channels
             ):
                 continue
             try:

@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from domain.messages import MessageSource
 from domain.tools import ToolRisk, ToolSource
 
 
@@ -34,6 +35,11 @@ class ToolDefinition:
             {ToolSource.DESKTOP, ToolSource.SYSTEM}
         )
     )
+    allowed_channels: frozenset[MessageSource] = field(
+        default_factory=lambda: frozenset(
+            {MessageSource.DESKTOP, MessageSource.QQ}
+        )
+    )
 
     def __post_init__(self) -> None:
         if not _TOOL_NAME_PATTERN.fullmatch(self.name):
@@ -59,6 +65,16 @@ class ToolDefinition:
             for source in normalized_sources
         ):
             raise TypeError("tool allowed sources must contain ToolSource values")
+        normalized_channels = frozenset(self.allowed_channels)
+        if not normalized_channels:
+            raise ValueError("tool allowed channels must not be empty")
+        if any(
+            not isinstance(channel, MessageSource)
+            for channel in normalized_channels
+        ):
+            raise TypeError(
+                "tool allowed channels must contain MessageSource values"
+            )
         normalized_fields = frozenset(
             field_name.casefold()
             for field_name in self.sensitive_fields
@@ -68,6 +84,7 @@ class ToolDefinition:
         object.__setattr__(self, "impact", self.impact.strip())
         object.__setattr__(self, "sensitive_fields", normalized_fields)
         object.__setattr__(self, "allowed_sources", normalized_sources)
+        object.__setattr__(self, "allowed_channels", normalized_channels)
 
 
 class ToolRegistry:

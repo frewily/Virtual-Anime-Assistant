@@ -16,9 +16,11 @@ from channels.onebot.connection import OneBotConnectionManager
 from computer.macos import build_macos_state_providers
 from computer.models import ComputerPlatform
 from computer.state import DesktopStateService
+from computer.tools import build_current_state_tool
 from core.monitor import SystemMonitor
 from core.scenario import ScenarioEngine
 from core.tts import TTSService
+from domain.messages import MessageSource
 from infrastructure.database_config import DatabaseSettings
 from infrastructure.sqlite_store import SqliteStore
 from llm.config import LLMSettings
@@ -65,6 +67,23 @@ class AssistantRuntime:
                 if scenario_engine is not None
                 else ScenarioEngine()
             )
+            self.computer_state_enabled = computer_state_enabled
+            self.computer_platform = computer_platform or (
+                "macos" if sys.platform == "darwin" else "other"
+            )
+            if (
+                computer_state_service is None
+                and self.computer_state_enabled
+                and self.computer_platform == "macos"
+            ):
+                computer_state_service = DesktopStateService(
+                    device_id="local-mac",
+                    platform=ComputerPlatform.MACOS,
+                    providers=build_macos_state_providers(),
+                )
+            self.computer_state_service = computer_state_service
+            if computer_state_service is not None:
+                self._register_owned("computer_state", computer_state_service)
 
             if application is None:
                 settings = (
@@ -89,6 +108,7 @@ class AssistantRuntime:
                     or getattr(tool_service, "registry", None)
                     or build_builtin_registry()
                 )
+                self._register_computer_state_tool()
                 self.tool_service = tool_service or ToolExecutionService(
                     registry=self.tool_registry,
                     repository=self.store,
@@ -102,7 +122,7 @@ class AssistantRuntime:
                         self.tool_registry
                     )
                     tools_enabled = bool(
-                        self.model_tool_catalog.list()
+                        self.model_tool_catalog.list(MessageSource.DESKTOP)
                     )
                 llm = (
                     OpenAICompatibleGateway(settings)
@@ -158,6 +178,7 @@ class AssistantRuntime:
                     or getattr(tool_service, "registry", None)
                     or build_builtin_registry()
                 )
+                self._register_computer_state_tool()
                 self.tool_service = tool_service
                 if self.tool_service is None and self.store is not None:
                     self.tool_service = ToolExecutionService(
@@ -166,23 +187,6 @@ class AssistantRuntime:
                     )
 
             self.application = application
-            self.computer_state_enabled = computer_state_enabled
-            self.computer_platform = computer_platform or (
-                "macos" if sys.platform == "darwin" else "other"
-            )
-            if (
-                computer_state_service is None
-                and self.computer_state_enabled
-                and self.computer_platform == "macos"
-            ):
-                computer_state_service = DesktopStateService(
-                    device_id="local-mac",
-                    platform=ComputerPlatform.MACOS,
-                    providers=build_macos_state_providers(),
-                )
-            self.computer_state_service = computer_state_service
-            if computer_state_service is not None:
-                self._register_owned("computer_state", computer_state_service)
             self.qq_settings = (
                 qq_settings
                 or (
@@ -234,6 +238,19 @@ class AssistantRuntime:
     def _register_owned(self, name: str, resource: object) -> None:
         self._owned_resources.append((name, resource))
         self._resource_closed[name] = False
+
+    def _register_computer_state_tool(self) -> None:
+        if (
+            not self.computer_state_enabled
+            or self.computer_state_service is None
+        ):
+            return
+        self.tool_registry.register(
+            build_current_state_tool(
+                self.computer_state_service,
+                allowed_channels=frozenset({MessageSource.DESKTOP}),
+            )
+        )
 
     def _rollback_initialization(self) -> None:
         for name, resource in reversed(self._owned_resources):

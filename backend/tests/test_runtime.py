@@ -21,6 +21,7 @@ from channels.onebot.config import OneBotSettings
 from channels.onebot.connection import OneBotConnectionManager
 from core.deployment import DeploymentSettings
 from core.runtime import AssistantRuntime
+from domain.messages import MessageSource
 from domain.tools import ToolRisk, ToolSource
 from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
@@ -325,7 +326,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 [
                     tool.name
-                    for tool in runtime.model_tool_catalog.list()
+                    for tool in runtime.model_tool_catalog.list(MessageSource.DESKTOP)
                 ],
                 ["system.current_time"],
             )
@@ -438,7 +439,12 @@ class RuntimeTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                [tool.name for tool in runtime.model_tool_catalog.list()],
+                [
+                    tool.name
+                    for tool in runtime.model_tool_catalog.list(
+                        MessageSource.DESKTOP
+                    )
+                ],
                 ["example.valid"],
             )
             self.assertIsNotNone(runtime.model_tool_orchestrator)

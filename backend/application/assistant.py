@@ -256,7 +256,10 @@ class AssistantApplication:
             )
 
         try:
-            orchestration = await self.model_orchestrator.run(request)
+            orchestration = await self.model_orchestrator.run(
+                request,
+                source=message.source,
+            )
         except (ModelToolOrchestrationError, ModelToolLimitError) as exc:
             public_error = exc.public_error or exc
             response = AssistantResponse(

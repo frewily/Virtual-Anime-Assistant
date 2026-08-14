@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import sys
 import threading
 
 from application.assistant import AssistantApplication
@@ -12,6 +13,9 @@ from channels.desktop import scenario_result_to_message
 from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
 from channels.onebot.connection import OneBotConnectionManager
+from computer.macos import build_macos_state_providers
+from computer.models import ComputerPlatform
+from computer.state import DesktopStateService
 from core.monitor import SystemMonitor
 from core.scenario import ScenarioEngine
 from core.tts import TTSService
@@ -42,6 +46,9 @@ class AssistantRuntime:
         qq_connection: OneBotConnectionManager | None = None,
         qq_channel: OneBotChannel | None = None,
         runtime_settings: RuntimeSettings | None = None,
+        computer_state_service: DesktopStateService | None = None,
+        computer_state_enabled: bool = False,
+        computer_platform: str | None = None,
     ):
         self._owned_resources: list[tuple[str, object]] = []
         self._resource_closed: dict[str, bool] = {}
@@ -159,6 +166,23 @@ class AssistantRuntime:
                     )
 
             self.application = application
+            self.computer_state_enabled = computer_state_enabled
+            self.computer_platform = computer_platform or (
+                "macos" if sys.platform == "darwin" else "other"
+            )
+            if (
+                computer_state_service is None
+                and self.computer_state_enabled
+                and self.computer_platform == "macos"
+            ):
+                computer_state_service = DesktopStateService(
+                    device_id="local-mac",
+                    platform=ComputerPlatform.MACOS,
+                    providers=build_macos_state_providers(),
+                )
+            self.computer_state_service = computer_state_service
+            if computer_state_service is not None:
+                self._register_owned("computer_state", computer_state_service)
             self.qq_settings = (
                 qq_settings
                 or (
@@ -280,6 +304,16 @@ class AssistantRuntime:
 
     def report_window(self, window: dict) -> None:
         self._current_window = dict(window)
+
+    def start_computer_state(self, *, profile: str) -> bool:
+        if (
+            profile != "desktop"
+            or not self.computer_state_enabled
+            or self.computer_platform != "macos"
+            or self.computer_state_service is None
+        ):
+            return False
+        return self.computer_state_service.start()
 
     def current_window(self) -> dict | None:
         return dict(self._current_window) if self._current_window else None

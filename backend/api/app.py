@@ -225,6 +225,9 @@ async def lifespan(app: FastAPI):
             unsubscribe_tools = runtime.tool_service.publisher.subscribe(
                 broadcast_tool_event
             )
+        runtime.start_computer_state(
+            profile=app.state.deployment_settings.profile
+        )
         _start_background_task(
             supervise("scenario-loop", lambda: scenario_loop(runtime)),
             tasks,

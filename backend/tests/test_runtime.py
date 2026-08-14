@@ -1261,6 +1261,64 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(start_task.call_count, 1)
         runtime.aclose.assert_awaited_once()
 
+    def test_runtime_starts_computer_state_only_for_enabled_desktop_macos(self):
+        state_service = Mock()
+        state_service.start.return_value = True
+        state_service.aclose = AsyncMock()
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            computer_state_service=state_service,
+            computer_state_enabled=True,
+            computer_platform="macos",
+        )
+
+        self.assertFalse(runtime.start_computer_state(profile="cloud"))
+        self.assertTrue(runtime.start_computer_state(profile="desktop"))
+        state_service.start.assert_called_once_with()
+        asyncio.run(runtime.aclose())
+        state_service.aclose.assert_awaited_once_with()
+
+    def test_runtime_does_not_start_computer_state_when_disabled_or_not_macos(self):
+        for enabled, platform in ((False, "macos"), (True, "other")):
+            with self.subTest(enabled=enabled, platform=platform):
+                state_service = Mock()
+                state_service.aclose = AsyncMock()
+                runtime = AssistantRuntime(
+                    application=Mock(spec=AssistantApplication),
+                    computer_state_service=state_service,
+                    computer_state_enabled=enabled,
+                    computer_platform=platform,
+                )
+
+                self.assertFalse(
+                    runtime.start_computer_state(profile="desktop")
+                )
+                state_service.start.assert_not_called()
+                asyncio.run(runtime.aclose())
+
+    def test_lifespan_asks_runtime_to_start_state_for_active_profile(self):
+        runtime = Mock()
+        runtime.application.publisher.subscribe.return_value = Mock()
+        runtime.tool_service = None
+        runtime.start_computer_state.return_value = False
+        runtime.aclose = AsyncMock()
+        application = create_app(
+            runtime_instance=runtime,
+            deployment_settings=DeploymentSettings(
+                profile="desktop",
+                desktop_monitor_enabled=False,
+            ),
+        )
+
+        async def exercise():
+            async with lifespan(application):
+                pass
+
+        asyncio.run(exercise())
+
+        runtime.start_computer_state.assert_called_once_with(profile="desktop")
+        runtime.aclose.assert_awaited_once()
+
     def test_fresh_import_does_not_instantiate_tts_or_database(self):
         backend = Path(__file__).resolve().parents[1]
         probe = """

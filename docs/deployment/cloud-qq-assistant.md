@@ -148,7 +148,50 @@ deploy/cloud/scripts/backup-sqlite.sh
 
 系统每天备份 1 次并保留最近 7 份。
 
-## 7. 上线验收
+## 7. 启用长期运行监控
+
+长期运行监控每分钟检查 VAA、OneBot 与 SQLite 备份。OneBot 连续 3 次断开后，监控只重启 NapCat；10 分钟内最多恢复 2 次，避免重启风暴。VAA 容器不会获得 Docker Socket 或宿主机管理权限。
+
+管理员安装并启用 systemd 单元：
+
+```bash
+cd /opt/virtual-anime-assistant/current
+sudo install -m 0644 deploy/cloud/systemd/vaa-cloud-monitor.service \
+  /etc/systemd/system/vaa-cloud-monitor.service
+sudo install -m 0644 deploy/cloud/systemd/vaa-cloud-monitor.timer \
+  /etc/systemd/system/vaa-cloud-monitor.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now vaa-cloud-monitor.timer
+systemctl status vaa-cloud-monitor.timer
+```
+
+手动执行一次检查并读取脱敏摘要：
+
+```bash
+sudo systemctl start vaa-cloud-monitor.service
+systemctl status vaa-cloud-monitor.service
+curl -fsS http://127.0.0.1:8080/api/status/cloud
+```
+
+设置页登录后会显示「云端运行状态」卡片。接口与卡片只展示固定状态、时间和计数，不展示 Token、API Key、QQ 号或原始日志。
+
+常见告警：
+
+- `configuration_required`：QQ 白名单或 Token 等运行配置不完整，先检查设置页。
+- `backup_stale`：最近 36 小时没有成功备份，检查 `vaa-backup.timer`。
+- `recovery_exhausted`：10 分钟内已恢复 2 次，监控停止继续重启；通过 SSH 隧道进入 NapCat WebUI，检查 QQ 是否要求重新扫码。
+- `deployment_in_progress`：部署正在运行，监控暂时不执行容器操作。
+- `state_invalid`：状态文件缺失、损坏或超过 3 分钟未更新，检查 monitor timer。
+
+需要停用自动恢复时执行：
+
+```bash
+sudo systemctl disable --now vaa-cloud-monitor.timer
+```
+
+停用监控不会删除 QQ 登录、OneBot 配置、SQLite 或备份数据。监控异常不得通过开放公网端口解决。
+
+## 8. 上线验收
 
 ```bash
 cd /opt/virtual-anime-assistant/current/deploy/cloud
@@ -156,6 +199,8 @@ docker compose ps
 deploy/cloud/scripts/verify-deployment.sh full
 ss -lnt
 systemctl status vaa-backup.timer
+systemctl status vaa-cloud-monitor.timer
+curl -fsS http://127.0.0.1:8080/api/status/cloud
 ```
 
 逐项确认：
@@ -166,22 +211,25 @@ systemctl status vaa-backup.timer
 - 分别重启 `vaa-app`、NapCat 和服务器后，服务可以恢复。
 - 容器内存与 CPU 上限生效，网站和博客保持正常。
 - 备份文件能够通过 SQLite `PRAGMA integrity_check`。
+- 云端运行状态更新时间不超过 3 分钟，正常状态不会触发 NapCat 重启。
 
-## 8. 日志与故障排查
+## 9. 日志与故障排查
 
 只查看必要日志，不输出环境变量：
 
 ```bash
 docker compose logs --tail=200 vaa-app
 docker compose logs --tail=200 napcat
+journalctl -u vaa-cloud-monitor.service --since today
 ```
 
 - `ready` 失败：检查数据目录所有权和磁盘空间。
 - OneBot 为 `disconnected`：检查 NapCat 登录状态、反向 WebSocket URL 与 Token 是否一致。
 - QQ 登录失效：通过 SSH 隧道进入 NapCat WebUI 重新扫码。
 - 模型不可用：通过 VAA 设置页测试非秘密配置；不要在日志中打印 API Key。
+- 自动恢复耗尽：确认是否需要重新扫码；不要删除 NapCat 持久化数据或扩大端口暴露。
 
-## 9. 回滚与数据库恢复
+## 10. 回滚与数据库恢复
 
 自动部署失败时，`deploy.sh` 会回滚到上一提交，但不会替换 SQLite。
 
@@ -199,7 +247,7 @@ deploy/cloud/scripts/verify-deployment.sh startup
 
 恢复前核对实际挂载路径和文件所有权。不得使用 `docker compose down -v`，也不得在自动回滚中恢复数据库。
 
-## 10. GitHub Actions 部署密钥
+## 11. GitHub Actions 部署密钥
 
 工作流需要 5 个 GitHub Secrets：
 

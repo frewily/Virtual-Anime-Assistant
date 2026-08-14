@@ -271,6 +271,11 @@ class CloudDeploymentContractTests(unittest.TestCase):
             "博客",
             "回滚",
             "停止 `vaa-app`",
+            "vaa-cloud-monitor.timer",
+            "systemctl status vaa-cloud-monitor.timer",
+            "systemctl start vaa-cloud-monitor.service",
+            "recovery_exhausted",
+            "/api/status/cloud",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, runbook)

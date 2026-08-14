@@ -13,6 +13,7 @@ from computer.models import (
     ModelAccess,
     ProviderResult,
 )
+from computer.privacy import PrivacyLevel, sanitize_foreground
 
 __all__ = [
     "ActionProvider",
@@ -23,5 +24,7 @@ __all__ = [
     "ComputerSnapshot",
     "ModelAccess",
     "ProviderResult",
+    "PrivacyLevel",
     "StateProvider",
+    "sanitize_foreground",
 ]

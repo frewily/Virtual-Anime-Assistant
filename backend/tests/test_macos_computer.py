@@ -1,0 +1,207 @@
+import asyncio
+import inspect
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from computer.macos import (
+    AsyncProcessRunner,
+    ProcessResult,
+    build_macos_state_providers,
+)
+
+
+class FakeRunner:
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    async def run(self, argv, *, timeout=3):
+        self.calls.append(tuple(argv))
+        response = self.responses.get(tuple(argv))
+        if isinstance(response, BaseException):
+            raise response
+        return response or ProcessResult(returncode=1, stdout="", stderr="")
+
+
+class FakePsutil:
+    @staticmethod
+    def cpu_percent(interval=None):
+        return 21.5
+
+    @staticmethod
+    def virtual_memory():
+        return type("Memory", (), {"percent": 61.25})()
+
+    @staticmethod
+    def disk_usage(path):
+        assert path == "/"
+        return type("Disk", (), {"percent": 72.0})()
+
+    @staticmethod
+    def sensors_battery():
+        return type(
+            "Battery",
+            (),
+            {"percent": 88.0, "power_plugged": True},
+        )()
+
+
+class MacOSComputerTests(unittest.TestCase):
+    def run_async(self, awaitable):
+        return asyncio.run(awaitable)
+
+    def build(self, responses):
+        runner = FakeRunner(responses)
+        providers = build_macos_state_providers(
+            runner=runner,
+            psutil_module=FakePsutil,
+        )
+        return runner, {provider.capability: provider for provider in providers}
+
+    def test_process_runner_uses_exec_without_shell(self):
+        source = inspect.getsource(AsyncProcessRunner.run)
+
+        self.assertIn("create_subprocess_exec", source)
+        self.assertNotIn("create_subprocess_shell", source)
+        self.assertNotIn("shell=True", source)
+
+    def test_resources_and_power_use_bounded_psutil_results(self):
+        _, providers = self.build({})
+
+        resources = self.run_async(providers["system.resources"].collect())
+        power = self.run_async(providers["system.power"].collect())
+
+        self.assertEqual(
+            resources.state,
+            {
+                "status": "available",
+                "cpuPercent": 21.5,
+                "memoryPercent": 61.25,
+                "diskPercent": 72.0,
+            },
+        )
+        self.assertEqual(
+            power.state,
+            {"status": "available", "percent": 88, "charging": True},
+        )
+
+    def test_presence_uses_fixed_ioreg_commands_and_rounds_idle_minutes(self):
+        idle_command = ("/usr/sbin/ioreg", "-c", "IOHIDSystem", "-d", "4")
+        lock_command = ("/usr/sbin/ioreg", "-n", "Root", "-d", "1")
+        runner, providers = self.build(
+            {
+                idle_command: ProcessResult(
+                    returncode=0,
+                    stdout='"HIDIdleTime" = 125000000000\n',
+                    stderr="",
+                ),
+                lock_command: ProcessResult(
+                    returncode=0,
+                    stdout='"CGSSessionScreenIsLocked" = No\n',
+                    stderr="",
+                ),
+            }
+        )
+
+        result = self.run_async(providers["system.presence"].collect())
+
+        self.assertEqual(result.state["presence"], "active")
+        self.assertEqual(result.state["idleMinutes"], 2)
+        self.assertIn(idle_command, runner.calls)
+        self.assertIn(lock_command, runner.calls)
+
+    def test_foreground_is_privacy_filtered_before_result(self):
+        command = next(
+            provider.command
+            for provider in build_macos_state_providers(
+                runner=FakeRunner({}), psutil_module=FakePsutil
+            )
+            if provider.capability == "application.foreground"
+        )
+        _, providers = self.build(
+            {
+                command: ProcessResult(
+                    returncode=0,
+                    stdout=(
+                        "Safari\x1fcom.apple.Safari\x1f"
+                        "Secret banking page\x1fYES"
+                    ),
+                    stderr="",
+                )
+            }
+        )
+
+        result = self.run_async(
+            providers["application.foreground"].collect()
+        )
+
+        self.assertEqual(result.state["appName"], "Safari")
+        self.assertEqual(result.state["privacyLevel"], "browser")
+        self.assertNotIn("windowTitle", result.state)
+        self.assertTrue(result.state["fullscreen"])
+
+    def test_network_media_and_volume_parse_only_fixed_outputs(self):
+        seed = build_macos_state_providers(
+            runner=FakeRunner({}), psutil_module=FakePsutil
+        )
+        commands = {
+            provider.capability: provider.command
+            for provider in seed
+            if hasattr(provider, "command")
+        }
+        _, providers = self.build(
+            {
+                commands["system.network"]: ProcessResult(
+                    0, "Network interfaces: en0\n", ""
+                ),
+                commands["media.playback"]: ProcessResult(
+                    0, "Music\x1fplaying\x1fSong\x1fArtist", ""
+                ),
+                commands["media.volume"]: ProcessResult(0, "42\x1fNO", ""),
+            }
+        )
+
+        network = self.run_async(providers["system.network"].collect())
+        media = self.run_async(providers["media.playback"].collect())
+        volume = self.run_async(providers["media.volume"].collect())
+
+        self.assertEqual(network.state, {"status": "available", "online": True})
+        self.assertEqual(media.state["player"], "Music")
+        self.assertEqual(media.state["title"], "Song")
+        self.assertEqual(volume.state["percent"], 42)
+        self.assertFalse(volume.state["muted"])
+
+    def test_failed_probe_returns_stable_unavailable_without_output(self):
+        seed = build_macos_state_providers(
+            runner=FakeRunner({}), psutil_module=FakePsutil
+        )
+        network_command = next(
+            provider.command
+            for provider in seed
+            if provider.capability == "system.network"
+        )
+        _, providers = self.build(
+            {
+                network_command: ProcessResult(
+                    returncode=1,
+                    stdout="private output",
+                    stderr="secret error",
+                )
+            }
+        )
+
+        result = self.run_async(providers["system.network"].collect())
+
+        self.assertEqual(
+            result.state,
+            {"status": "unavailable", "errorCode": "state_probe_failed"},
+        )
+        self.assertNotIn("private output", str(result.state))
+        self.assertNotIn("secret error", str(result.state))
+
+
+if __name__ == "__main__":
+    unittest.main()

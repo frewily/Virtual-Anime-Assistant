@@ -28,6 +28,26 @@ class DeploymentSettingsTests(unittest.TestCase):
                 {"ASSISTANT_RUNTIME_PROFILE": "production-ish"}
             )
 
+    def test_cloud_monitor_state_path_has_safe_default_and_override(self):
+        default = DeploymentSettings.from_env(
+            {"ASSISTANT_RUNTIME_PROFILE": "cloud"}
+        )
+        overridden = DeploymentSettings.from_env(
+            {
+                "ASSISTANT_RUNTIME_PROFILE": "cloud",
+                "ASSISTANT_CLOUD_MONITOR_STATE_FILE": "/tmp/monitor.json",
+            }
+        )
+
+        self.assertEqual(
+            default.cloud_monitor_state_file,
+            Path("/data/operations/cloud-monitor-state.json"),
+        )
+        self.assertEqual(
+            overridden.cloud_monitor_state_file,
+            Path("/tmp/monitor.json"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -84,14 +84,10 @@ docker compose config --quiet
 
 ## 4. 首次部署
 
-在部署用户会话中执行目标提交：
+完成服务器目录和环境文件初始化后，通过 main 分支的 CI 触发首次部署。GitHub
+Actions 会上传目标提交及部署脚本；不要直接用单个提交参数运行 `deploy.sh`。
 
-```bash
-cd /opt/virtual-anime-assistant/current
-deploy/cloud/scripts/deploy.sh <提交 SHA>
-```
-
-部署脚本串行运行，启动前备份现有 SQLite，并检查 live 与 ready。健康检查失败时只回滚应用代码和镜像，不恢复或删除数据库。
+部署脚本串行运行，验证部署包后备份现有 SQLite，并检查 live 与 ready。健康检查失败时只回滚应用代码和镜像，不恢复或删除数据库。
 
 查看状态：
 
@@ -227,6 +223,11 @@ journalctl -u vaa-cloud-monitor.service --since today
 - QQ 登录失效：通过 SSH 隧道进入 NapCat WebUI 重新扫码。
 - 模型不可用：通过 VAA 设置页测试非秘密配置；不要在日志中打印 API Key。
 - 自动恢复耗尽：确认是否需要重新扫码；不要删除 NapCat 持久化数据或扩大端口暴露。
+- `invalid deployment bundle path`：检查 Actions 上传的临时文件名是否为
+  `/tmp/vaa-deploy-<提交 SHA>.bundle`。
+- `deployment bundle target mismatch` 或 `git bundle verify` 失败：停止使用该部署包，
+  检查 Actions 检出的提交和 bundle 生成步骤。这些失败发生在数据库备份与容器切换前，
+  不会重建当前容器。
 
 ## 10. 回滚与数据库恢复
 
@@ -246,7 +247,15 @@ deploy/cloud/scripts/verify-deployment.sh startup
 
 恢复前核对实际挂载路径和文件所有权。不得使用 `docker compose down -v`，也不得在自动回滚中恢复数据库。
 
-## 11. GitHub Actions 部署密钥
+## 11. GitHub Actions 自动部署与密钥
+
+main 分支的 CI 成功后，GitHub Actions 精确检出通过验证的提交，生成并校验完整
+Git bundle，再通过 SSH 上传。服务器从
+`/tmp/vaa-deploy-<提交 SHA>.bundle` 导入目标提交，服务器无需访问 GitHub。
+
+自动部署保留部署锁、SQLite 备份、健康检查和失败回滚。bundle 路径、固定引用或
+目标 SHA 校验失败时，流程会在备份和容器切换前停止。临时 bundle、部署脚本和导入
+脚本无论部署成功或失败都会自动删除。
 
 工作流需要 5 个 GitHub Secrets：
 

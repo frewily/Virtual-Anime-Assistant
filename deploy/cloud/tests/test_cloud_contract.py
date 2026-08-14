@@ -210,7 +210,8 @@ class CloudDeploymentContractTests(unittest.TestCase):
         for required in (
             "flock",
             "^[0-9a-f]{40}$",
-            "git fetch origin",
+            'vaa-import-$target_sha.sh',
+            "readonly repo_root=/opt/virtual-anime-assistant/current",
             "backup-sqlite.sh",
             "up -d --build",
             "/api/health/live",
@@ -226,9 +227,11 @@ class CloudDeploymentContractTests(unittest.TestCase):
             "docker system prune",
             "printenv",
             "env |",
+            "secrets.env",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, script)
+        self.assertNotIn("git fetch origin", script)
 
     def test_verify_script_has_startup_and_full_modes(self):
         script = (
@@ -253,6 +256,19 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("workflow_run.conclusion == 'success'", workflow)
         self.assertIn("workflow_run.head_branch == 'main'", workflow)
         self.assertIn("contents: read", workflow)
+        for required in (
+            "actions/checkout@v4",
+            "ref: ${{ github.event.workflow_run.head_sha }}",
+            "fetch-depth: 0",
+            "refs/heads/vaa-deploy-target",
+            "git bundle create",
+            "git bundle verify",
+            "scp",
+            "deploy/cloud/scripts/import-deployment-bundle.sh",
+            "trap cleanup EXIT",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, workflow)
 
     def test_deploy_workflow_is_serial_and_uses_only_ssh_secrets(self):
         workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
@@ -268,6 +284,13 @@ class CloudDeploymentContractTests(unittest.TestCase):
         ):
             self.assertIn(f"secrets.{name}", workflow)
         self.assertIn("github.event.workflow_run.head_sha", workflow)
+        self.assertIn(
+            'test "$(git rev-parse HEAD)" = "$TARGET_SHA"', workflow
+        )
+        self.assertIn("BatchMode=yes", workflow)
+        self.assertIn("IdentitiesOnly=yes", workflow)
+        self.assertIn("StrictHostKeyChecking=yes", workflow)
+        self.assertNotIn("git fetch origin", workflow)
         self.assertNotIn("ssh-keyscan", workflow)
         self.assertNotIn("password", workflow.lower())
 
@@ -306,6 +329,9 @@ class CloudDeploymentContractTests(unittest.TestCase):
             "systemctl start vaa-cloud-monitor.service",
             "recovery_exhausted",
             "/api/status/cloud",
+            "Git bundle",
+            "服务器无需访问 GitHub",
+            "vaa-deploy-<提交 SHA>.bundle",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, runbook)

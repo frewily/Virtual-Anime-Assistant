@@ -30,7 +30,6 @@
 创建 `deploy/cloud/tests/test_bundle_import.py`。测试在临时目录创建源仓库和目标仓库，生成固定引用的完整 bundle：
 
 ```python
-import os
 import subprocess
 import tempfile
 import unittest
@@ -153,8 +152,8 @@ if [[ "$bundle_file" != "$expected_bundle" || ! -f "$bundle_file" ]]; then
 fi
 
 git -C "$repo_root" rev-parse --git-dir >/dev/null
-git bundle verify "$bundle_file" >/dev/null
-bundle_target=$(git bundle list-heads "$bundle_file" "$bundle_ref" \
+git -C "$repo_root" bundle verify "$bundle_file" >/dev/null
+bundle_target=$(git -C "$repo_root" bundle list-heads "$bundle_file" "$bundle_ref" \
   | awk 'NR == 1 {print $1}')
 readonly bundle_target
 if [[ "$bundle_target" != "$target_sha" ]]; then

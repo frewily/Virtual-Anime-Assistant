@@ -20,6 +20,24 @@ jobs:
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     steps:
+      - name: Check out verified main commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Build verified Git bundle
+        env:
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git update-ref refs/heads/vaa-deploy-target "$TARGET_SHA"
+          bundle_file="$RUNNER_TEMP/vaa-deploy-$TARGET_SHA.bundle"
+          git bundle create "$bundle_file" refs/heads/vaa-deploy-target
+          git bundle verify "$bundle_file"
+          chmod 0600 "$bundle_file"
+
       - name: Configure SSH files
         env:
           DEPLOY_KEY: ${{ secrets.VAA_DEPLOY_SSH_KEY }}
@@ -39,12 +57,45 @@ jobs:
           TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -Eeuo pipefail
-          trap 'rm -rf "$RUNNER_TEMP/vaa-ssh"' EXIT
-          ssh -i "$RUNNER_TEMP/vaa-ssh/key" \
-            -o BatchMode=yes \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$RUNNER_TEMP/vaa-ssh/known_hosts" \
-            -p "$DEPLOY_PORT" \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            "/opt/virtual-anime-assistant/current/deploy/cloud/scripts/deploy.sh '$TARGET_SHA'"
+          bundle_file="$RUNNER_TEMP/vaa-deploy-$TARGET_SHA.bundle"
+          remote_bundle="/tmp/vaa-deploy-$TARGET_SHA.bundle"
+          remote_deploy="/tmp/vaa-deploy-$TARGET_SHA.sh"
+          remote_import="/tmp/vaa-import-$TARGET_SHA.sh"
+          ssh_args=(
+            -i "$RUNNER_TEMP/vaa-ssh/key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$RUNNER_TEMP/vaa-ssh/known_hosts"
+            -p "$DEPLOY_PORT"
+          )
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          scp_args=(
+            -i "$RUNNER_TEMP/vaa-ssh/key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$RUNNER_TEMP/vaa-ssh/known_hosts"
+            -P "$DEPLOY_PORT"
+          )
+
+          cleanup() {
+            local status=$?
+            trap - EXIT
+            set +e
+            ssh "${ssh_args[@]}" "$target" \
+              "rm -f '$remote_bundle' '$remote_deploy' '$remote_import'"
+            rm -f "$bundle_file"
+            rm -rf "$RUNNER_TEMP/vaa-ssh"
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          scp "${scp_args[@]}" "$bundle_file" "$target:$remote_bundle"
+          scp "${scp_args[@]}" deploy/cloud/scripts/deploy.sh \
+            "$target:$remote_deploy"
+          scp "${scp_args[@]}" \
+            deploy/cloud/scripts/import-deployment-bundle.sh \
+            "$target:$remote_import"
+          ssh "${ssh_args[@]}" "$target" \
+            "chmod 0600 '$remote_bundle' && chmod 0700 '$remote_deploy' '$remote_import' && '$remote_deploy' '$TARGET_SHA' '$remote_bundle'"

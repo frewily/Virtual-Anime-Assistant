@@ -2,7 +2,7 @@
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
-**目标：** 为 macOS 桌面版增加可扩展的实时状态感知与逐次确认操作，并让云端 QQ 通过受限 SSH 隧道查询本机主动上报的脱敏最新状态。
+**目标：** 为 macOS 桌面版增加可扩展的实时状态感知与逐次确认操作，并让云端 QQ 通过受限 SSH stdin relay 查询本机主动上报的脱敏最新状态。
 
 **架构：** 新增版本化状态模型、Provider/ActionProvider、能力注册表和渠道策略；本机只运行固定系统探针并在内存缓存快照。桌面模型可提议固定高风险操作并等待 Live2D 确认；云端只保存每台设备的最新快照，通过专用只读工具向 QQ 提供状态。
 
@@ -17,7 +17,7 @@
 - 创建 `backend/computer/privacy.py`：保守的 macOS 应用隐私分级。
 - 创建 `backend/computer/macos.py`：固定命令执行器、macOS 状态 Provider 和操作适配器。
 - 创建 `backend/computer/state.py`：采集调度、最新快照缓存、TTL 与远端最新状态存储。
-- 创建 `backend/computer/reporter.py`：受限 SSH 隧道生命周期与脱敏状态上报。
+- 创建 `backend/computer/reporter.py`：单次 SSH stdin 会话与脱敏状态上报。
 - 创建 `backend/computer/tools.py`：状态查询及 4 个固定操作的工具定义。
 - 创建 `backend/api/computer.py`：本机状态读取和云端设备状态上报 API。
 - 修改 `backend/domain/tools.py`、`backend/tools/registry.py`、`backend/tools/catalog.py`：持久化原始消息渠道并支持显式高风险提议。
@@ -25,7 +25,8 @@
 - 修改 `backend/core/runtime.py`、`backend/core/deployment.py`、`backend/api/app.py`：按运行模式组装能力和后台任务。
 - 修改 `backend/settings/` 与 `backend/settings/static/`：增加 3 个独立开关和安全配置展示。
 - 修改 `backend/infrastructure/sqlite_store.py`：为工具请求增加原始消息渠道迁移。
-- 创建 `deploy/cloud/scripts/install-state-relay-access.sh`：安装只允许转发到回环 8080 的专用 SSH 公钥。
+- 创建 `deploy/cloud/scripts/vaa-state-relay.py`：校验 stdin 快照并转交回环 API。
+- 创建 `deploy/cloud/scripts/install-state-relay-access.sh`：安装禁止全部转发、每把密钥固定设备的专用 SSH 公钥与 relay wrapper。
 - 修改 `deploy/cloud/.env.example`、`deploy/cloud/secrets.env.example`、`deploy/cloud/tests/test_cloud_contract.py`：云端状态接收配置与安全契约。
 - 创建 `backend/tests/test_computer_models.py`、`test_computer_privacy.py`、`test_macos_computer.py`、`test_computer_state.py`、`test_computer_tools.py`、`test_computer_report_api.py`、`test_computer_reporter.py`。
 - 修改 `backend/tests/test_model_tool_catalog.py`、`test_model_tool_orchestrator.py`、`test_tool_service.py`、`test_sqlite_store.py`、`test_runtime.py`、`test_settings_api.py`：锁定渠道、确认、持久化和配置行为。
@@ -446,108 +447,234 @@ git add -- backend/computer/state.py backend/api/computer.py backend/api/app.py 
 git commit -m "feat: receive current computer state in cloud"
 ```
 
-### 任务 9：实现受限 SSH 隧道上报器
+### 任务 9：将 Reporter 改为单次 SSH stdin 上报
 
 **文件：**
-- 创建：`backend/computer/reporter.py`
-- 测试：`backend/tests/test_computer_reporter.py`
-- 修改：`backend/core/runtime.py`
-- 修改：`backend/api/app.py`
+- 修改：`backend/computer/reporter.py`
+- 修改：`backend/tests/test_computer_reporter.py`
 
-- [ ] **步骤 1：编写失败的 Reporter 测试**
+- [ ] **步骤 1：把旧隧道测试改成失败的 stdin relay 测试**
 
-注入 SSH 进程工厂和 HTTP 客户端，验证严格 SSH 参数、15 秒心跳、旧快照不重复发送、指数退避上限、关闭清理和秘密不进日志。
+删除 Token、`local_port`、HTTP 客户端和 `open_tunnel()` 夹具。新增可记录
+`communicate(input=...)` 的假进程，并锁定以下契约：
 
-- [ ] **步骤 2：运行测试确认 Reporter 不存在**
+```python
+reporter = ComputerStateReporter(
+    latest_snapshot=lambda: snapshot(),
+    ssh_target="relay@cloud.example",
+    ssh_port=2222,
+    identity_file=Path("/private/identity-secret"),
+    known_hosts_file=Path("/private/known-hosts-secret"),
+    process_factory=process_factory,
+    process_timeout=0.01,
+)
+
+self.assertTrue(await reporter.report_once())
+self.assertLessEqual(len(process.communicated_input), 32 * 1024)
+self.assertEqual(
+    json.loads(process.communicated_input),
+    snapshot().model_dump(mode="json", by_alias=True),
+)
+```
+
+精确断言 SSH 参数含 `-T`、`-F none`、`BatchMode=yes`、
+`IdentitiesOnly=yes`、`StrictHostKeyChecking=yes`、`ClearAllForwardings=yes`、
+`ProxyCommand=none`、`ProxyJump=none`、`RequestTTY=no`、固定身份、known hosts、端口和
+目标；参数不得含 `-L`、`-R`、`-D`、`-N` 或远程命令。进程必须使用 `stdin=PIPE`、
+`stdout=DEVNULL`、`stderr=DEVNULL`。
+
+覆盖非零退出、创建失败、communicate 超时、取消、terminate/kill/reap、32 KiB 上限、
+同时间戳不重复、旧快照不发送、并发 `report_once()` 只发送一次、15 秒心跳、60 秒退避、
+关闭竞态和日志不泄露快照或路径。
+
+- [ ] **步骤 2：运行测试确认旧实现失败**
 
 运行：`python3 -m unittest backend.tests.test_computer_reporter -v`
 
-预期：FAIL，模块不存在。
+预期：FAIL；旧构造器仍要求 Token/本地端口，旧 argv 仍含 `-N` 和 `-L`。
 
-- [ ] **步骤 3：实现严格隧道与上报循环**
+- [ ] **步骤 3：实现一次性 SSH stdin 传输**
 
-SSH 参数必须包含：
+将进程协议改为一次性通信，并增加严格序列化边界：
+
+```python
+class _Process(Protocol):
+    returncode: int | None
+    async def communicate(
+        self, input: bytes | None = None,
+    ) -> tuple[bytes | None, bytes | None]: ...
+    def terminate(self) -> None: ...
+    def kill(self) -> None: ...
+    async def wait(self) -> int: ...
+
+def _serialize_snapshot(snapshot: ComputerSnapshot) -> bytes:
+    payload = json.dumps(
+        snapshot.model_dump(mode="json", by_alias=True),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > 32 * 1024:
+        raise ReporterError("computer state report failed")
+    return payload
+```
+
+`ssh_argv` 必须精确采用无转发短连接：
 
 ```python
 (
-    "/usr/bin/ssh", "-N",
+    "/usr/bin/ssh", "-T",
+    "-F", "none",
     "-o", "BatchMode=yes",
     "-o", "IdentitiesOnly=yes",
     "-o", "StrictHostKeyChecking=yes",
-    "-o", "ExitOnForwardFailure=yes",
-    "-o", "ServerAliveInterval=30",
-    "-o", "ServerAliveCountMax=3",
+    "-o", "ClearAllForwardings=yes",
+    "-o", "ProxyCommand=none",
+    "-o", "ProxyJump=none",
+    "-o", "PermitLocalCommand=no",
+    "-o", "RequestTTY=no",
     "-o", f"UserKnownHostsFile={known_hosts}",
     "-i", str(identity_file),
     "-p", str(port),
-    "-L", f"127.0.0.1:{local_port}:127.0.0.1:8080",
     target,
 )
 ```
 
-Reporter 只提交 `ComputerSnapshot.model_dump(mode="json")`，Bearer Token 只放请求头。关闭时终止 SSH 子进程并等待；失败退避最大 60 秒。
+`report_once()` 在专用锁内读取最新快照、序列化、创建一个 SSH 子进程并调用
+`asyncio.wait_for(process.communicate(payload), process_timeout)`。只有退出码为 0 才更新
+`_last_collected_at`。失败或取消必须有界 terminate/kill/reap；Reporter 不再导入
+`httpx`，也不接受或保存 Bearer Token。
 
 - [ ] **步骤 4：运行 Reporter 与禁止项扫描**
 
 ```bash
 python3 -m unittest backend.tests.test_computer_reporter -v
-rg -n "StrictHostKeyChecking=no|ssh-keyscan|printenv|env \|" backend/computer/reporter.py
+rg -n '"-L"|"-R"|"-D"|"-N"|httpx|Authorization|Bearer|shell=True' \
+  backend/computer/reporter.py
 ```
 
-预期：测试 PASS；扫描无命中。
+预期：测试 PASS；禁止项扫描无命中。
 
 - [ ] **步骤 5：提交本机上报器**
 
 ```bash
-git add -- backend/computer/reporter.py backend/core/runtime.py backend/api/app.py \
-  backend/tests/test_computer_reporter.py
-git commit -m "feat: report computer state through strict SSH"
+git add -- backend/computer/reporter.py backend/tests/test_computer_reporter.py
+git commit -m "feat: report computer state through SSH stdin"
 ```
 
-### 任务 10：提供专用 SSH 访问安装契约
+### 任务 10：提供固定设备的服务器 relay 契约
 
 **文件：**
-- 创建：`deploy/cloud/scripts/install-state-relay-access.sh`
+- 创建：`deploy/cloud/scripts/vaa-state-relay.py`
+- 修改：`deploy/cloud/scripts/install-state-relay-access.sh`
+- 创建：`deploy/cloud/tests/test_state_relay_wrapper.py`
 - 修改：`deploy/cloud/tests/test_cloud_contract.py`
-- 修改：`deploy/cloud/.env.example`
 - 修改：`deploy/cloud/secrets.env.example`
 
-- [ ] **步骤 1：编写失败的云端安全契约**
+- [ ] **步骤 1：编写失败的 wrapper 与云端安全契约**
 
-断言专用用户或密钥只允许 `permitopen="127.0.0.1:8080"`，强制固定长运行命令，禁止 PTY、Agent/X11 Forwarding，并且 Compose 不公开新端口。秘密模板只增加空槽 `ASSISTANT_COMPUTER_STATE_REPORT_TOKEN=`。
+契约测试必须断言：
 
-- [ ] **步骤 2：运行云端契约确认失败**
+```python
+self.assertIn(
+    'command="/usr/local/libexec/vaa-state-relay macbook-main",restrict',
+    authorized_key_line,
+)
+for forbidden in ("permitopen", "port-forwarding", "-L", "-R", "-D"):
+    self.assertNotIn(forbidden, authorized_key_line)
+```
 
-运行：`python3 -m unittest deploy.cloud.tests.test_cloud_contract -v`
+安装器接收 `PUBLIC_KEY_FILE DEVICE_ID TOKEN_FILE` 三个参数，设备标识使用与后端一致的
+`[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?`。断言 wrapper 安装为
+`root:root 0755`，Token 安装为 `root:vaa-state-relay 0640`，专用账号、目录和
+`authorized_keys` 权限正确，Compose 不增加端口，秘密模板只保留空 Token 槽。
 
-预期：FAIL，安装器和新配置不存在。
+wrapper 单元测试注入 stdin、Token reader 和 HTTP connection，覆盖：32 KiB 边界、
+第 32769 字节拒绝、单个 JSON 对象、固定 `deviceId`、拒绝非空
+`SSH_ORIGINAL_COMMAND`、Token 为 32～256 位可见 ASCII、只连接
+`127.0.0.1:8080`、固定 `/api/computer/state`、5 秒超时、非 2xx 失败、响应体有界读取，
+且 stdout/stderr 不出现 Token、快照或底层异常。
 
-- [ ] **步骤 3：实现幂等安装器**
+- [ ] **步骤 2：运行测试确认旧方案失败**
 
-脚本要求 root、读取一个已审查的 ed25519 公钥文件，并写入独立账号的 `authorized_keys`。固定选项包含：
+```bash
+python3 -m unittest deploy.cloud.tests.test_state_relay_wrapper -v
+python3 -m unittest deploy.cloud.tests.test_cloud_contract -v
+```
+
+预期：FAIL；旧安装器仍生成 `port-forwarding/permitopen`，wrapper 不存在。
+
+- [ ] **步骤 3：实现失败关闭的 wrapper**
+
+`vaa-state-relay.py` 仅使用 Python 标准库。入口固定为：
+
+```python
+MAX_SNAPSHOT_BYTES = 32 * 1024
+TOKEN_PATH = Path("/etc/virtual-anime-assistant/state-relay-token")
+
+def relay(
+    device_id: str, *, stdin, environ, token_path=TOKEN_PATH,
+    connection_factory=http.client.HTTPConnection,
+) -> int:
+    if environ.get("SSH_ORIGINAL_COMMAND"):
+        return 2
+    payload = stdin.read(MAX_SNAPSHOT_BYTES + 1)
+    if not payload or len(payload) > MAX_SNAPSHOT_BYTES:
+        return 2
+    document = json.loads(payload)
+    if not isinstance(document, dict) or document.get("deviceId") != device_id:
+        return 2
+    token = _read_valid_token(token_path)
+    connection = connection_factory("127.0.0.1", 8080, timeout=5)
+    connection.request(
+        "POST", "/api/computer/state", body=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    response = connection.getresponse()
+    response.read(1025)
+    return 0 if 200 <= response.status < 300 else 1
+```
+
+所有异常只映射稳定退出码，不打印正文。`finally` 必须关闭 connection。Token 文件必须
+恰好一行、32～256 位可见 ASCII。
+
+- [ ] **步骤 4：实现幂等安装器**
+
+脚本要求 root，校验一个裸 `ssh-ed25519` 公钥、设备标识和专用 Token 文件。安装
+由 root 所有的 wrapper 与 Token 后，写入：
 
 ```text
-command="/usr/bin/sleep infinity",restrict,port-forwarding,permitopen="127.0.0.1:8080"
+command="/usr/local/libexec/vaa-state-relay macbook-main",restrict ssh-ed25519 ... vaa-state-relay:macbook-main
 ```
 
-脚本拒绝包含换行、选项前缀或非 `ssh-ed25519` 的公钥；不修改全局 `sshd_config`、root 登录、密码登录、Nginx 或防火墙。
+脚本拒绝换行、选项前缀、非 ed25519、公钥校验失败、非法设备标识和非法 Token。重跑
+同一设备只替换其标记行；其他行必须也符合相同的受限 managed 格式，否则整个操作失败，
+不覆盖现有文件。脚本不修改全局 `sshd_config`、root/密码登录、Nginx 或防火墙。
 
-- [ ] **步骤 4：运行契约与 Shell 语法检查**
+- [ ] **步骤 5：运行 wrapper、契约与 Shell 语法检查**
 
 ```bash
+python3 -m unittest deploy.cloud.tests.test_state_relay_wrapper -v
 python3 -m unittest deploy.cloud.tests.test_cloud_contract -v
 bash -n deploy/cloud/scripts/install-state-relay-access.sh
+rg -n 'permitopen|port-forwarding|sleep infinity|ssh-rsa|ecdsa-' \
+  deploy/cloud/scripts/install-state-relay-access.sh \
+  deploy/cloud/scripts/vaa-state-relay.py
 ```
 
-预期：全部 PASS。
+预期：全部测试和 Shell 语法 PASS；禁止项扫描无命中。
 
-- [ ] **步骤 5：提交访问契约**
+- [ ] **步骤 6：提交访问契约**
 
 ```bash
-git add -- deploy/cloud/scripts/install-state-relay-access.sh \
-  deploy/cloud/tests/test_cloud_contract.py deploy/cloud/.env.example \
+git add -- deploy/cloud/scripts/vaa-state-relay.py \
+  deploy/cloud/scripts/install-state-relay-access.sh \
+  deploy/cloud/tests/test_state_relay_wrapper.py \
+  deploy/cloud/tests/test_cloud_contract.py \
   deploy/cloud/secrets.env.example
-git commit -m "ops: restrict computer state relay access"
+git commit -m "ops: add restricted computer state relay"
 ```
 
 ## 阶段 D：配置、文档与最终验证
@@ -630,7 +757,7 @@ git commit -m "feat: configure computer capabilities safely"
 
 - [ ] **步骤 2：更新本地与云端操作说明**
 
-说明启用顺序、macOS 权限、状态字段、设置开关、隧道诊断、QQ 查询、停止上报和撤销专用公钥。创建或安装持久 SSH 凭证必须在实际执行前重新取得用户确认。
+说明启用顺序、macOS 权限、状态字段、设置开关、SSH relay 诊断、QQ 查询、停止上报和撤销专用公钥。创建或安装持久 SSH 凭证必须在实际执行前重新取得用户确认。
 
 - [ ] **步骤 3：运行全部定向测试**
 
@@ -677,7 +804,8 @@ git log --oneline origin/main..HEAD
 
 1. 合并前只运行本地状态采集，不创建持久 SSH 凭证。
 2. 用户明确授权后，在 Mac 与服务器创建专用状态上报密钥和 Token。
-3. 确认专用 SSH 身份不能执行远程命令，只能转发到服务器回环 8080。
+3. 确认专用 SSH 身份不能执行远程命令或任何端口转发，只能把匹配固定 `deviceId` 的
+   32 KiB 内 JSON 交给服务器 relay wrapper。
 4. 确认 Desktop 能查询脱敏状态并逐次确认 4 个固定操作。
 5. 确认 QQ 能查询最新状态，但完全看不到操作工具。
 6. 确认 Mac 断网或停止上报后 45 秒内显示离线。

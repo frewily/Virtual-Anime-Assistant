@@ -159,7 +159,13 @@ class MacOSComputerTests(unittest.TestCase):
 
     def test_presence_uses_fixed_ioreg_commands_and_rounds_idle_minutes(self):
         idle_command = ("/usr/sbin/ioreg", "-c", "IOHIDSystem", "-d", "4")
-        lock_command = ("/usr/sbin/ioreg", "-n", "Root", "-d", "1")
+        lock_command = (
+            "/usr/sbin/ioreg",
+            "-k",
+            "CGSSessionScreenIsLocked",
+            "-d",
+            "1",
+        )
         runner, providers = self.build(
             {
                 idle_command: ProcessResult(
@@ -216,6 +222,11 @@ class MacOSComputerTests(unittest.TestCase):
         seed = build_macos_state_providers(
             runner=FakeRunner({}), psutil_module=FakePsutil
         )
+        media_provider = next(
+            provider
+            for provider in seed
+            if provider.capability == "media.playback"
+        )
         commands = {
             provider.capability: provider.command
             for provider in seed
@@ -226,7 +237,8 @@ class MacOSComputerTests(unittest.TestCase):
                 commands["system.network"]: ProcessResult(
                     0, "Network interfaces: en0\n", ""
                 ),
-                commands["media.playback"]: ProcessResult(
+                commands["media.playback"]: ProcessResult(0, "Music\n", ""),
+                media_provider.player_commands["Music"]: ProcessResult(
                     0, "Music\x1fplaying\x1fSong\x1fArtist", ""
                 ),
                 commands["media.volume"]: ProcessResult(0, "42\x1fNO", ""),
@@ -242,6 +254,40 @@ class MacOSComputerTests(unittest.TestCase):
         self.assertEqual(media.state["title"], "Song")
         self.assertEqual(volume.state["percent"], 42)
         self.assertFalse(volume.state["muted"])
+
+    def test_media_probe_without_known_player_is_cleanly_unavailable(self):
+        seed = build_macos_state_providers(
+            runner=FakeRunner({}), psutil_module=FakePsutil
+        )
+        command = next(
+            provider.command
+            for provider in seed
+            if provider.capability == "media.playback"
+        )
+        runner, providers = self.build(
+            {command: ProcessResult(0, "\n", "")}
+        )
+
+        result = self.run_async(providers["media.playback"].collect())
+
+        self.assertEqual(result.state, {"status": "unavailable"})
+        self.assertEqual(runner.calls, [command])
+
+    def test_media_detection_reads_process_names_once(self):
+        provider = next(
+            provider
+            for provider in build_macos_state_providers(
+                runner=FakeRunner({}), psutil_module=FakePsutil
+            )
+            if provider.capability == "media.playback"
+        )
+        script = provider.command[-1]
+
+        self.assertEqual(
+            script.count("name of every application process"),
+            1,
+        )
+        self.assertNotIn("exists process", script)
 
     def test_failed_probe_returns_stable_unavailable_without_output(self):
         seed = build_macos_state_providers(

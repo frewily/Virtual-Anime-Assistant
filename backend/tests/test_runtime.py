@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from pydantic import BaseModel, RootModel
 
@@ -19,8 +19,11 @@ from application.assistant import AssistantApplication
 from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
 from channels.onebot.connection import OneBotConnectionManager
+from computer.models import ComputerPlatform, ModelAccess
+from computer.state import RemoteDeviceStateStore
 from core.deployment import DeploymentSettings
 from core.runtime import AssistantRuntime
+from domain.messages import MessageSource
 from domain.tools import ToolRisk, ToolSource
 from infrastructure.database_config import DatabaseSettings
 from llm.config import LLMSettings
@@ -28,11 +31,15 @@ from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
 from settings.file_store import SaveJournal, SettingsFileStore
 from settings.paths import SettingsPaths
-from settings.resolver import RuntimeSettings, TTSRuntimeSettings
+from settings.resolver import (
+    ComputerRuntimeSettings,
+    RuntimeSettings,
+    TTSRuntimeSettings,
+)
 from settings.service import SettingsService, SettingsServiceError
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolDefinition, ToolRegistry
-from tools.service import ToolExecutionService
+from tools.service import ToolExecutionError, ToolExecutionService
 
 
 def llm_settings(
@@ -79,6 +86,7 @@ def runtime_tool_definition(
         timeout_seconds=1,
         cancellable=True,
         handler=runtime_tool_handler,
+        model_access=ModelAccess.READ_ONLY,
         allowed_sources=frozenset({ToolSource.MODEL}),
     )
 
@@ -90,6 +98,7 @@ class RuntimeTests(unittest.TestCase):
         llm: LLMSettings | None = None,
         qq: OneBotSettings | None = None,
         default_voice: str = "character_002",
+        computer: ComputerRuntimeSettings | None = None,
     ) -> RuntimeSettings:
         return RuntimeSettings(
             llm=llm or llm_settings(enabled=False),
@@ -99,6 +108,7 @@ class RuntimeTests(unittest.TestCase):
                 default_voice_id=default_voice,
                 audio_max_age_seconds=3600,
             ),
+            computer=computer or ComputerRuntimeSettings(),
         )
 
     def test_runtime_builds_components_from_unified_settings(self):
@@ -284,6 +294,7 @@ class RuntimeTests(unittest.TestCase):
                     data_dir=path.parent,
                     database_path=path,
                 ),
+                computer_platform="other",
             )
 
             self.assertEqual(
@@ -298,6 +309,107 @@ class RuntimeTests(unittest.TestCase):
                 ToolExecutionService,
             )
             asyncio.run(runtime.aclose())
+
+    def test_desktop_macos_runtime_registers_confirmed_actions_with_shared_gates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assistant.db"
+            runtime = AssistantRuntime(
+                llm_settings=llm_settings(
+                    enabled=True,
+                    tool_calling_enabled=True,
+                ),
+                database_settings=DatabaseSettings(
+                    data_dir=path.parent,
+                    database_path=path,
+                ),
+                computer_platform="macos",
+                computer_state_enabled=True,
+                computer_actions_enabled=True,
+                confirmation_client_online=lambda: True,
+                deployment_settings=DeploymentSettings(
+                    profile="desktop",
+                    desktop_monitor_enabled=True,
+                ),
+            )
+
+            action_names = {
+                "computer.open_application",
+                "computer.open_url",
+                "computer.set_volume",
+                "computer.toggle_media",
+            }
+            self.assertTrue(
+                action_names.issubset(
+                    {item.name for item in runtime.tool_registry.list()}
+                )
+            )
+            self.assertTrue(
+                action_names.issubset(
+                    {
+                        item.name
+                        for item in runtime.model_tool_catalog.list(
+                            MessageSource.DESKTOP
+                        )
+                    }
+                )
+            )
+            self.assertIs(runtime.tool_service.platform, ComputerPlatform.MACOS)
+            self.assertEqual(runtime.tool_service.runtime_profile, "desktop")
+            self.assertIn(
+                "tool_service",
+                {name for name, _ in runtime._owned_resources},
+            )
+            asyncio.run(runtime.aclose())
+
+    def test_runtime_settings_gate_state_actions_and_remote_reporter(self):
+        state_service = Mock()
+        state_service.start.return_value = True
+        state_service.aclose = AsyncMock()
+        reporter = Mock()
+        reporter.start.return_value = True
+        reporter.aclose = AsyncMock()
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            runtime_settings=self.runtime_settings_bundle(
+                computer=ComputerRuntimeSettings(
+                    state_enabled=True,
+                    actions_enabled=True,
+                    remote_report_enabled=True,
+                    device_id="macbook-main",
+                    relay_target="relay@cloud.example",
+                    relay_port=2222,
+                    relay_identity_file=Path("/private/identity"),
+                    relay_known_hosts_file=Path("/private/known-hosts"),
+                )
+            ),
+            computer_state_service=state_service,
+            computer_state_reporter=reporter,
+            computer_platform="macos",
+        )
+
+        names = {item.name for item in runtime.tool_registry.list()}
+        self.assertIn("computer.current_state", names)
+        self.assertIn("computer.open_application", names)
+        self.assertTrue(runtime.start_computer_state(profile="desktop"))
+        state_service.start.assert_called_once_with()
+        reporter.start.assert_called_once_with()
+        asyncio.run(runtime.aclose())
+        reporter.aclose.assert_awaited_once_with()
+        state_service.aclose.assert_awaited_once_with()
+
+    def test_disabled_computer_settings_register_no_local_tools(self):
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            runtime_settings=self.runtime_settings_bundle(),
+            computer_platform="macos",
+        )
+
+        names = {item.name for item in runtime.tool_registry.list()}
+        self.assertNotIn("computer.current_state", names)
+        self.assertNotIn("computer.open_application", names)
+        self.assertIsNone(runtime.computer_state_service)
+        self.assertIsNone(runtime.computer_state_reporter)
+        asyncio.run(runtime.aclose())
 
     def test_runtime_enables_model_tools_only_when_configured(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -325,7 +437,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 [
                     tool.name
-                    for tool in runtime.model_tool_catalog.list()
+                    for tool in runtime.model_tool_catalog.list(MessageSource.DESKTOP)
                 ],
                 ["system.current_time"],
             )
@@ -438,7 +550,12 @@ class RuntimeTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                [tool.name for tool in runtime.model_tool_catalog.list()],
+                [
+                    tool.name
+                    for tool in runtime.model_tool_catalog.list(
+                        MessageSource.DESKTOP
+                    )
+                ],
                 ["example.valid"],
             )
             self.assertIsNotNone(runtime.model_tool_orchestrator)
@@ -733,7 +850,7 @@ class RuntimeTests(unittest.TestCase):
                 ),
                 patch(
                     "core.runtime.ModelToolCatalog",
-                    side_effect=lambda _: (
+                    side_effect=lambda _, **__: (
                         events.append("catalog"),
                         catalog,
                     )[1],
@@ -773,6 +890,7 @@ class RuntimeTests(unittest.TestCase):
                     qq_settings=OneBotSettings(),
                     qq_connection=Mock(),
                     qq_channel=Mock(),
+                    computer_platform="other",
                 )
 
             self.assertEqual(
@@ -999,11 +1117,16 @@ class RuntimeTests(unittest.TestCase):
 
         factory.assert_called_once_with()
         service_factory.assert_not_called()
-        runtime_type.assert_called_once_with(runtime_settings=bundle)
+        runtime_type.assert_called_once_with(
+            runtime_settings=bundle,
+            deployment_settings=application.state.deployment_settings,
+            confirmation_client_online=ANY,
+        )
 
     def test_default_lifespan_recovers_settings_before_building_runtime(self):
         bundle = self.runtime_settings_bundle()
         events = []
+        online_callbacks = []
         service = Mock()
         service.recover.side_effect = lambda: events.append("recover")
         service.runtime_settings.side_effect = lambda: (
@@ -1017,9 +1140,20 @@ class RuntimeTests(unittest.TestCase):
         runtime.tool_service = None
         runtime.aclose = AsyncMock()
 
-        def build_runtime(*, runtime_settings):
+        def build_runtime(
+            *,
+            runtime_settings,
+            deployment_settings,
+            confirmation_client_online,
+        ):
             events.append("runtime")
             self.assertIs(runtime_settings, bundle)
+            self.assertIs(
+                deployment_settings,
+                application.state.deployment_settings,
+            )
+            self.assertTrue(callable(confirmation_client_online))
+            online_callbacks.append(confirmation_client_online)
             return runtime
 
         with patch("api.app.AssistantRuntime", side_effect=build_runtime):
@@ -1030,6 +1164,11 @@ class RuntimeTests(unittest.TestCase):
                     request = Mock()
                     request.app = application
                     self.assertIs(get_settings_service(request), service)
+                    self.assertFalse(online_callbacks[0]())
+                    socket = Mock()
+                    application.state.desktop_hub.attach(socket)
+                    self.assertTrue(online_callbacks[0]())
+                    await application.state.desktop_hub.detach(socket)
 
             asyncio.run(exercise())
 
@@ -1077,7 +1216,11 @@ class RuntimeTests(unittest.TestCase):
             service_factory.assert_called_once_with()
             service.recover.assert_called_once_with()
             service.runtime_settings.assert_called_once_with()
-            runtime_type.assert_called_once_with(runtime_settings=bundle)
+            runtime_type.assert_called_once_with(
+                runtime_settings=bundle,
+                deployment_settings=application.state.deployment_settings,
+                confirmation_client_online=ANY,
+            )
         finally:
             (
                 application.state.runtime,
@@ -1259,6 +1402,192 @@ class RuntimeTests(unittest.TestCase):
             asyncio.run(exercise())
 
         self.assertEqual(start_task.call_count, 1)
+        runtime.aclose.assert_awaited_once()
+
+    def test_runtime_starts_computer_state_only_for_enabled_desktop_macos(self):
+        state_service = Mock()
+        state_service.start.return_value = True
+        state_service.aclose = AsyncMock()
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            computer_state_service=state_service,
+            computer_state_enabled=True,
+            computer_platform="macos",
+        )
+
+        self.assertFalse(runtime.start_computer_state(profile="cloud"))
+        self.assertTrue(runtime.start_computer_state(profile="desktop"))
+        state_service.start.assert_called_once_with()
+        asyncio.run(runtime.aclose())
+        state_service.aclose.assert_awaited_once_with()
+
+    def test_desktop_runtime_uses_configured_computer_device_id(self):
+        state_service = Mock()
+        state_service.aclose = AsyncMock()
+        deployment = DeploymentSettings(
+            profile="desktop",
+            desktop_monitor_enabled=True,
+            computer_default_device_id="macbook-main",
+        )
+        with (
+            patch(
+                "core.runtime.DesktopStateService",
+                return_value=state_service,
+            ) as service_type,
+            patch(
+                "core.runtime.build_macos_state_providers",
+                return_value=(Mock(capability="system.resources"),),
+            ) as providers,
+        ):
+            runtime = AssistantRuntime(
+                application=Mock(spec=AssistantApplication),
+                computer_state_enabled=True,
+                computer_platform="macos",
+                deployment_settings=deployment,
+            )
+
+        providers.assert_called_once_with()
+        service_type.assert_called_once_with(
+            device_id="macbook-main",
+            platform=ComputerPlatform.MACOS,
+            providers=providers.return_value,
+        )
+        asyncio.run(runtime.aclose())
+
+    def test_cloud_runtime_builds_in_memory_store_and_qq_only_state_tool(self):
+        settings = DeploymentSettings(
+            profile="cloud",
+            desktop_monitor_enabled=False,
+            computer_state_report_token="report-token-0123456789-abcdefghijklm",
+            computer_default_device_id="macbook-main",
+        )
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            deployment_settings=settings,
+        )
+
+        self.assertIsInstance(
+            runtime.computer_remote_state_store,
+            RemoteDeviceStateStore,
+        )
+        definition = runtime.tool_registry.require("computer.current_state")
+        self.assertEqual(definition.allowed_channels, frozenset({MessageSource.QQ}))
+        with self.assertRaises(ToolExecutionError) as raised:
+            asyncio.run(definition.handler(definition.arguments_model()))
+        self.assertEqual(raised.exception.error_code, "device_offline")
+        asyncio.run(runtime.aclose())
+
+    def test_cloud_runtime_enables_model_tools_from_qq_catalog(self):
+        settings = DeploymentSettings(
+            profile="cloud",
+            desktop_monitor_enabled=False,
+            computer_state_report_token="report-token-0123456789-abcdefghijklm",
+            computer_default_device_id="macbook-main",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assistant.db"
+            runtime = AssistantRuntime(
+                llm_settings=llm_settings(
+                    enabled=True,
+                    tool_calling_enabled=True,
+                ),
+                database_settings=DatabaseSettings(
+                    data_dir=path.parent,
+                    database_path=path,
+                ),
+                deployment_settings=settings,
+            )
+
+            self.assertIsNotNone(runtime.model_tool_orchestrator)
+            runtime.tool_registry.register(
+                runtime_tool_definition("example.qq-low-risk")
+            )
+            qq_tools = {
+                item.name
+                for item in runtime.model_tool_catalog.list(MessageSource.QQ)
+            }
+            self.assertEqual(qq_tools, {"computer.current_state"})
+            desktop_tools = {
+                item.name
+                for item in runtime.model_tool_catalog.list(MessageSource.DESKTOP)
+            }
+            self.assertNotIn("computer.current_state", desktop_tools)
+            asyncio.run(runtime.aclose())
+
+    def test_runtime_profiles_do_not_cross_register_computer_providers(self):
+        remote = RemoteDeviceStateStore()
+        desktop = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            deployment_settings=DeploymentSettings(
+                profile="desktop",
+                desktop_monitor_enabled=True,
+            ),
+            computer_remote_state_store=remote,
+            computer_platform="other",
+        )
+        self.assertNotIn(
+            "computer.current_state",
+            {item.name for item in desktop.tool_registry.list()},
+        )
+        asyncio.run(desktop.aclose())
+
+        with patch("core.runtime.DesktopStateService") as state_type:
+            cloud = AssistantRuntime(
+                application=Mock(spec=AssistantApplication),
+                deployment_settings=DeploymentSettings(
+                    profile="cloud",
+                    desktop_monitor_enabled=False,
+                    computer_state_report_token=(
+                        "report-token-0123456789-abcdefghijklm"
+                    ),
+                ),
+                computer_state_enabled=True,
+                computer_platform="macos",
+            )
+
+        state_type.assert_not_called()
+        self.assertIsNone(cloud.computer_state_service)
+        asyncio.run(cloud.aclose())
+
+    def test_runtime_does_not_start_computer_state_when_disabled_or_not_macos(self):
+        for enabled, platform in ((False, "macos"), (True, "other")):
+            with self.subTest(enabled=enabled, platform=platform):
+                state_service = Mock()
+                state_service.aclose = AsyncMock()
+                runtime = AssistantRuntime(
+                    application=Mock(spec=AssistantApplication),
+                    computer_state_service=state_service,
+                    computer_state_enabled=enabled,
+                    computer_platform=platform,
+                )
+
+                self.assertFalse(
+                    runtime.start_computer_state(profile="desktop")
+                )
+                state_service.start.assert_not_called()
+                asyncio.run(runtime.aclose())
+
+    def test_lifespan_asks_runtime_to_start_state_for_active_profile(self):
+        runtime = Mock()
+        runtime.application.publisher.subscribe.return_value = Mock()
+        runtime.tool_service = None
+        runtime.start_computer_state.return_value = False
+        runtime.aclose = AsyncMock()
+        application = create_app(
+            runtime_instance=runtime,
+            deployment_settings=DeploymentSettings(
+                profile="desktop",
+                desktop_monitor_enabled=False,
+            ),
+        )
+
+        async def exercise():
+            async with lifespan(application):
+                pass
+
+        asyncio.run(exercise())
+
+        runtime.start_computer_state.assert_called_once_with(profile="desktop")
         runtime.aclose.assert_awaited_once()
 
     def test_fresh_import_does_not_instantiate_tts_or_database(self):

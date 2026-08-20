@@ -21,12 +21,14 @@ test('settings page is self-contained, semantic, and covers every editable field
         'qq-max-concurrency', 'qq-action-timeout-seconds',
         'tts-gpt-sovits-url', 'tts-default-voice-id',
         'tts-audio-max-age-seconds', 'save-settings', 'restart-notice',
+        'computer-state-enabled', 'computer-actions-enabled',
+        'computer-remote-report-enabled', 'computer-relay-status',
         'dirty-notice', 'error-summary', 'keychain-status'
     ];
 
     for (const id of ids) assert.match(html, new RegExp(`id="${id}"`));
     assert.match(html, /role="tablist"/);
-    assert.equal((html.match(/role="tab"/g) || []).length, 3);
+    assert.equal((html.match(/role="tab"/g) || []).length, 4);
     assert.match(html, /aria-live="(?:polite|assertive)"/);
     assert.match(html, /<script src="\/settings\/settings\.js" defer><\/script>/);
     assert.match(html, /<link rel="stylesheet" href="\/settings\/settings\.css">/);
@@ -34,6 +36,26 @@ test('settings page is self-contained, semantic, and covers every editable field
     assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>/);
     assert.doesNotMatch(html, /<style\b|\son\w+=/);
     assert.doesNotMatch(html, /https?:\/\//);
+});
+
+test('computer settings explain consent boundaries and redact relay configuration', () => {
+    const html = read('index.html');
+    const source = read('settings.js');
+
+    for (const path of [
+        'computer.stateEnabled',
+        'computer.actionsEnabled',
+        'computer.remoteReportEnabled'
+    ]) {
+        assert.match(html, new RegExp(`data-path="${path.replace('.', '\\.')}`));
+        assert.match(source, new RegExp(path.replace('.', '\\.')));
+    }
+    assert.match(html, /不会采集.*屏幕内容/);
+    assert.match(html, /辅助功能权限/);
+    assert.match(html, /QQ.*只.*脱敏状态/);
+    assert.match(source, /relayTargetConfigured/);
+    assert.match(source, /textContent/);
+    assert.doesNotMatch(source, /ASSISTANT_COMPUTER_STATE_REPORT_TOKEN/);
 });
 
 test('settings favicon is a local self-contained SVG asset', () => {

@@ -16,12 +16,15 @@ from pydantic import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from computer.models import ComputerPlatform, ModelAccess
+from domain.messages import MessageSource
 from domain.tools import (
     ConfirmationState,
     ToolAuditEvent,
     ToolConfirmationRecord,
     ToolDecision,
     ToolDecisionClaim,
+    ToolEventType,
     ToolRequest,
     ToolRequestRecord,
     ToolRequestState,
@@ -29,6 +32,7 @@ from domain.tools import (
     ToolSource,
 )
 from tools.registry import ToolDefinition, ToolNotFoundError, ToolRegistry
+from tools.catalog import ModelToolCallContext
 from tools.service import (
     ToolArgumentsError,
     ToolExecutionService,
@@ -337,6 +341,12 @@ def build_service(
     clock=None,
     allowed_sources: frozenset[ToolSource] | None = None,
     arguments_model: type[BaseModel] = Arguments,
+    model_access: ModelAccess = ModelAccess.HIDDEN,
+    confirmation_client_online=lambda: False,
+    platform: ComputerPlatform | None = ComputerPlatform.MACOS,
+    runtime_profile: str | None = "desktop",
+    allowed_channels: frozenset[MessageSource] | None = None,
+    allowed_model_tool_names: frozenset[str] | None = None,
 ):
     repository = InMemoryToolRepository()
     registry = ToolRegistry()
@@ -350,15 +360,22 @@ def build_service(
         cancellable=cancellable,
         sensitive_fields=frozenset({"token"}),
         handler=handler,
+        model_access=model_access,
     )
     if allowed_sources is not None:
         definition_values["allowed_sources"] = allowed_sources
+    if allowed_channels is not None:
+        definition_values["allowed_channels"] = allowed_channels
     registry.register(ToolDefinition(**definition_values))
     service = ToolExecutionService(
         registry=registry,
         repository=repository,
         confirmation_timeout_seconds=60,
         clock=clock,
+        confirmation_client_online=confirmation_client_online,
+        platform=platform,
+        runtime_profile=runtime_profile,
+        allowed_model_tool_names=allowed_model_tool_names,
     )
     return service, repository
 
@@ -367,12 +384,765 @@ def request() -> ToolRequest:
     return ToolRequest(
         correlation_id="message-1",
         source=ToolSource.DESKTOP,
+        origin=MessageSource.DESKTOP,
         tool_name="example.tool",
         arguments={"value": "hello", "token": "private-token"},
     )
 
 
+def model_context(
+    channel: MessageSource = MessageSource.DESKTOP,
+) -> ModelToolCallContext:
+    return ModelToolCallContext(
+        channel=channel,
+        advertised_tool_names=frozenset({"example.tool"}),
+    )
+
+
 class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_desktop_model_proposal_waits_for_online_confirmation(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"done": True}
+
+        service, repository = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        proposed = request().model_copy(
+            update={"source": ToolSource.MODEL}
+        )
+
+        pending = await service.request(
+            proposed,
+            model_context=model_context(),
+        )
+        waiter = asyncio.create_task(
+            service.wait_for_terminal(pending.request_id, timeout=1)
+        )
+        await asyncio.sleep(0)
+        approved = await service.decide(
+            pending.confirmation.id,
+            ToolDecision.APPROVE,
+        )
+        terminal = await waiter
+
+        self.assertEqual(approved.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(terminal.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(calls, 1)
+        self.assertIs(
+            repository.requests[pending.request_id].origin,
+            MessageSource.DESKTOP,
+        )
+
+    async def test_model_proposal_fails_closed_for_untrusted_context(self):
+        async def handler(_: Arguments) -> dict:
+            raise AssertionError("high-risk action must not execute")
+
+        cases = (
+            (MessageSource.QQ, True, ComputerPlatform.MACOS, "desktop", None),
+            (
+                MessageSource.DESKTOP,
+                False,
+                ComputerPlatform.MACOS,
+                "desktop",
+                None,
+            ),
+            (MessageSource.DESKTOP, True, None, "desktop", None),
+            (
+                MessageSource.DESKTOP,
+                True,
+                ComputerPlatform.MACOS,
+                "cloud",
+                None,
+            ),
+            (
+                MessageSource.DESKTOP,
+                True,
+                ComputerPlatform.MACOS,
+                "desktop",
+                frozenset({MessageSource.QQ}),
+            ),
+        )
+        for origin, online, platform, profile, channels in cases:
+            with self.subTest(
+                origin=origin,
+                online=online,
+                platform=platform,
+                profile=profile,
+                channels=channels,
+            ):
+                service, repository = build_service(
+                    risk=ToolRisk.HIGH,
+                    handler=handler,
+                    allowed_sources=frozenset({ToolSource.MODEL}),
+                    model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+                    confirmation_client_online=lambda value=online: value,
+                    platform=platform,
+                    runtime_profile=profile,
+                    allowed_channels=channels,
+                )
+                proposed = request().model_copy(
+                    update={
+                        "source": ToolSource.MODEL,
+                        "origin": origin,
+                    }
+                )
+
+                with self.assertRaises(ToolNotFoundError):
+                    await service.request(
+                        proposed,
+                        model_context=model_context(origin),
+                    )
+
+                self.assertEqual(repository.requests, {})
+
+    async def test_closing_service_releases_confirmation_waiter_safely(self):
+        async def handler(_: Arguments) -> dict:
+            raise AssertionError("closed confirmation must not execute")
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        waiter = asyncio.create_task(
+            service.wait_for_terminal(pending.request_id, timeout=1)
+        )
+        await asyncio.sleep(0)
+
+        await service.aclose()
+        terminal = await waiter
+
+        self.assertEqual(terminal.state, ToolRequestState.FAILED)
+        self.assertEqual(
+            terminal.error_code,
+            "confirmation_client_unavailable",
+        )
+
+    async def test_last_confirmation_client_disconnect_persists_failure(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        waiter = asyncio.create_task(
+            service.wait_for_terminal(pending.request_id, timeout=1)
+        )
+        await asyncio.sleep(0)
+
+        await service.confirmation_client_disconnected()
+        terminal = await waiter
+        persisted = await service.get_request(pending.request_id)
+        late_approval = await service.decide(
+            pending.confirmation.id,
+            ToolDecision.APPROVE,
+        )
+
+        self.assertEqual(terminal.state, ToolRequestState.FAILED)
+        self.assertEqual(persisted.state, ToolRequestState.FAILED)
+        self.assertEqual(late_approval.state, ToolRequestState.FAILED)
+        self.assertEqual(
+            persisted.error_code,
+            "confirmation_client_unavailable",
+        )
+        self.assertEqual(calls, 0)
+        self.assertNotIn(pending.request_id, service._pending_arguments)
+        self.assertEqual(
+            repository.confirmations[pending.confirmation.id].state,
+            ConfirmationState.CANCELLED,
+        )
+
+    async def test_approval_rechecks_live_confirmation_client_status(self):
+        online = True
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: online,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        online = False
+
+        terminal = await service.decide(
+            pending.confirmation.id,
+            ToolDecision.APPROVE,
+        )
+
+        self.assertEqual(terminal.state, ToolRequestState.FAILED)
+        self.assertEqual(
+            terminal.error_code,
+            "confirmation_client_unavailable",
+        )
+        self.assertEqual(calls, 0)
+
+    async def test_disconnect_serializes_a_racing_approval_before_execution(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        disconnect_entered = asyncio.Event()
+        release_disconnect = asyncio.Event()
+        fail_pending = service._fail_pending_model_confirmation_locked
+        approval_claim_entered = asyncio.Event()
+        claim_decision = service.repository.claim_decision
+
+        async def blocked_fail_pending(request_id: str):
+            disconnect_entered.set()
+            await release_disconnect.wait()
+            return await fail_pending(request_id)
+
+        async def observed_claim_decision(*args, **kwargs):
+            approval_claim_entered.set()
+            return await claim_decision(*args, **kwargs)
+
+        service._fail_pending_model_confirmation_locked = blocked_fail_pending
+        service.repository.claim_decision = observed_claim_decision
+        disconnect = asyncio.create_task(
+            service.confirmation_client_disconnected()
+        )
+        await disconnect_entered.wait()
+        approval = asyncio.create_task(
+            service.decide(
+                pending.confirmation.id,
+                ToolDecision.APPROVE,
+            )
+        )
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(
+                approval_claim_entered.wait(),
+                timeout=0.01,
+            )
+
+        release_disconnect.set()
+        await disconnect
+        terminal = await approval
+
+        self.assertEqual(terminal.state, ToolRequestState.FAILED)
+        self.assertEqual(calls, 0)
+
+    async def test_disconnect_after_execution_claim_prevents_handler_registration(self):
+        online = True
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"done": True}
+
+        service, repository = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: online,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        execution_claimed = asyncio.Event()
+        release_claim = asyncio.Event()
+        transition_request = repository.transition_request
+
+        async def block_after_execution_claim(
+            request_id,
+            expected,
+            state,
+            **kwargs,
+        ):
+            result = await transition_request(
+                request_id,
+                expected,
+                state,
+                **kwargs,
+            )
+            if (
+                expected == {ToolRequestState.RUNNING}
+                and state is ToolRequestState.RUNNING
+            ):
+                execution_claimed.set()
+                await release_claim.wait()
+            return result
+
+        repository.transition_request = block_after_execution_claim
+        approval = asyncio.create_task(
+            service.decide(
+                pending.confirmation.id,
+                ToolDecision.APPROVE,
+            )
+        )
+        await execution_claimed.wait()
+        online = False
+        disconnect = asyncio.create_task(
+            service.confirmation_client_disconnected()
+        )
+        await asyncio.sleep(0)
+        release_claim.set()
+
+        terminal, _ = await asyncio.gather(approval, disconnect)
+
+        self.assertEqual(terminal.state, ToolRequestState.FAILED)
+        self.assertEqual(
+            terminal.error_code,
+            "confirmation_client_unavailable",
+        )
+        self.assertEqual(calls, 0)
+
+    async def test_confirmation_update_subscriber_can_disconnect_without_deadlock(self):
+        async def handler(_: Arguments) -> dict:
+            raise AssertionError("rejected action must not execute")
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+
+        async def disconnect_on_update(event):
+            if event.type is ToolEventType.CONFIRMATION_UPDATED:
+                await service.confirmation_client_disconnected()
+
+        service.publisher.subscribe(disconnect_on_update)
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+
+        terminal = await asyncio.wait_for(
+            service.decide(
+                pending.confirmation.id,
+                ToolDecision.REJECT,
+            ),
+            timeout=0.1,
+        )
+
+        self.assertEqual(terminal.state, ToolRequestState.REJECTED)
+
+    async def test_execution_timeout_runs_during_confirmation_update_publish(self):
+        calls = 0
+        handler_cancelled = asyncio.Event()
+        confirmation_update_entered = asyncio.Event()
+        release_confirmation_update = asyncio.Event()
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                raise
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            timeout_seconds=0.01,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+
+        async def block_confirmation_update(event):
+            if event.type is ToolEventType.CONFIRMATION_UPDATED:
+                confirmation_update_entered.set()
+                await release_confirmation_update.wait()
+
+        service.publisher.subscribe(block_confirmation_update)
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        approval = asyncio.create_task(
+            service.decide(
+                pending.confirmation.id,
+                ToolDecision.APPROVE,
+            )
+        )
+        await confirmation_update_entered.wait()
+
+        try:
+            await asyncio.wait_for(handler_cancelled.wait(), timeout=0.1)
+        finally:
+            release_confirmation_update.set()
+        terminal = await approval
+
+        self.assertEqual(terminal.state, ToolRequestState.FAILED)
+        self.assertEqual(terminal.error_code, "execution_timeout")
+        self.assertEqual(calls, 1)
+
+    async def test_cancelled_approval_does_not_orphan_execution_supervisor(self):
+        calls = 0
+        handler_entered = asyncio.Event()
+        release_handler = asyncio.Event()
+        confirmation_update_entered = asyncio.Event()
+        release_confirmation_update = asyncio.Event()
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            handler_entered.set()
+            await release_handler.wait()
+            return {"done": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+
+        async def block_confirmation_update(event):
+            if event.type is ToolEventType.CONFIRMATION_UPDATED:
+                confirmation_update_entered.set()
+                await release_confirmation_update.wait()
+
+        service.publisher.subscribe(block_confirmation_update)
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        approval = asyncio.create_task(
+            service.decide(
+                pending.confirmation.id,
+                ToolDecision.APPROVE,
+            )
+        )
+        await confirmation_update_entered.wait()
+        await handler_entered.wait()
+        supervisor = service._running_tasks[pending.request_id]
+
+        approval.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await approval
+        release_confirmation_update.set()
+        release_handler.set()
+
+        terminal = await service.wait_for_terminal(
+            pending.request_id,
+            timeout=1,
+        )
+        await asyncio.wait_for(
+            asyncio.shield(supervisor),
+            timeout=1,
+        )
+
+        self.assertEqual(terminal.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(calls, 1)
+        self.assertTrue(supervisor.done())
+        self.assertNotIn(pending.request_id, service._running_tasks)
+
+    async def test_failed_execution_claim_transition_never_runs_handler(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, repository = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        transition_request = repository.transition_request
+
+        async def reject_execution_claim(
+            request_id,
+            expected,
+            state,
+            **kwargs,
+        ):
+            if (
+                expected == {ToolRequestState.RUNNING}
+                and state is ToolRequestState.RUNNING
+            ):
+                current = repository.requests[request_id]
+                repository.requests[request_id] = current.model_copy(
+                    update={"state": ToolRequestState.CANCELLED}
+                )
+                return None
+            return await transition_request(
+                request_id,
+                expected,
+                state,
+                **kwargs,
+            )
+
+        repository.transition_request = reject_execution_claim
+
+        terminal = await service.decide(
+            pending.confirmation.id,
+            ToolDecision.APPROVE,
+        )
+
+        self.assertEqual(terminal.state, ToolRequestState.CANCELLED)
+        self.assertEqual(calls, 0)
+
+    async def test_terminal_wait_timeout_expires_without_execution(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+
+        terminal = await service.wait_for_terminal(
+            pending.request_id,
+            timeout=0.001,
+        )
+
+        self.assertEqual(terminal.state, ToolRequestState.EXPIRED)
+        self.assertEqual(calls, 0)
+
+    async def test_terminal_wait_survives_approval_timeout_race(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"done": True}
+
+        service, repository = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        execution_claim_entered = asyncio.Event()
+        release_execution_claim = asyncio.Event()
+        transition_request = repository.transition_request
+
+        async def blocked_execution_claim(
+            request_id,
+            expected,
+            state,
+            **kwargs,
+        ):
+            if (
+                expected == {ToolRequestState.RUNNING}
+                and state is ToolRequestState.RUNNING
+            ):
+                execution_claim_entered.set()
+                await release_execution_claim.wait()
+            return await transition_request(
+                request_id,
+                expected,
+                state,
+                **kwargs,
+            )
+
+        repository.transition_request = blocked_execution_claim
+        approval = asyncio.create_task(
+            service.decide(
+                pending.confirmation.id,
+                ToolDecision.APPROVE,
+            )
+        )
+        await execution_claim_entered.wait()
+        waiter = asyncio.create_task(
+            service.wait_for_terminal(pending.request_id, timeout=0.001)
+        )
+        await asyncio.sleep(0.01)
+        release_execution_claim.set()
+
+        approved, terminal = await asyncio.gather(approval, waiter)
+
+        self.assertEqual(approved.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(terminal.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(calls, 1)
+
+    async def test_execution_timeout_prevents_late_handler_start(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"done": True}
+
+        service, _ = build_service(
+            risk=ToolRisk.HIGH,
+            handler=handler,
+            timeout_seconds=0.02,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            confirmation_client_online=lambda: True,
+        )
+        pending = await service.request(
+            request().model_copy(update={"source": ToolSource.MODEL}),
+            model_context=model_context(),
+        )
+        handler_entry_entered = asyncio.Event()
+        release_handler_entry = asyncio.Event()
+        run_confirmed_handler = service._run_confirmed_model_handler
+
+        async def delayed_handler_entry(*args, **kwargs):
+            handler_entry_entered.set()
+            await release_handler_entry.wait()
+            return await run_confirmed_handler(*args, **kwargs)
+
+        service._run_confirmed_model_handler = delayed_handler_entry
+        approval = asyncio.create_task(
+            service.decide(
+                pending.confirmation.id,
+                ToolDecision.APPROVE,
+            )
+        )
+        await handler_entry_entered.wait()
+
+        terminal = await service.wait_for_terminal(
+            pending.request_id,
+            timeout=0.001,
+        )
+        release_handler_entry.set()
+        approved = await approval
+
+        self.assertEqual(terminal.state, ToolRequestState.FAILED)
+        self.assertEqual(terminal.error_code, "execution_timeout")
+        self.assertEqual(approved.state, ToolRequestState.FAILED)
+        self.assertEqual(calls, 0)
+
+    async def test_aclose_is_retryable_after_partial_failure(self):
+        async def handler(_: Arguments) -> dict:
+            return {}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+        )
+        attempts = 0
+
+        async def flaky_disconnect():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("temporary close failure")
+
+        service.confirmation_client_disconnected = flaky_disconnect
+
+        with self.assertRaisesRegex(RuntimeError, "temporary close failure"):
+            await service.aclose()
+
+        self.assertFalse(service._closed)
+        self.assertNotIn(
+            service._receive_terminal_event,
+            service.publisher._subscribers,
+        )
+
+        await service.aclose()
+
+        self.assertTrue(service._closed)
+        self.assertEqual(attempts, 2)
+
+    async def test_concurrent_aclose_callers_share_one_closing_task(self):
+        async def handler(_: Arguments) -> dict:
+            return {}
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        attempts = 0
+
+        async def blocked_disconnect():
+            nonlocal attempts
+            attempts += 1
+            entered.set()
+            await release.wait()
+
+        service.confirmation_client_disconnected = blocked_disconnect
+        first = asyncio.create_task(service.aclose())
+        await entered.wait()
+        second = asyncio.create_task(service.aclose())
+        await asyncio.sleep(0)
+
+        self.assertFalse(second.done())
+
+        release.set()
+
+        await asyncio.gather(first, second)
+
+        self.assertEqual(attempts, 1)
+        self.assertTrue(service._closed)
+
     async def test_string_source_cannot_bypass_source_policy(self):
         calls = 0
 
@@ -429,6 +1199,97 @@ class ToolExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 0)
         self.assertEqual(repository.requests, {})
         self.assertEqual(repository.confirmations, {})
+
+    async def test_model_low_risk_execution_uses_only_trusted_context(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"read": True}
+
+        service, repository = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.READ_ONLY,
+            allowed_channels=frozenset({MessageSource.DESKTOP}),
+        )
+        forged = request().model_copy(
+            update={
+                "source": ToolSource.MODEL,
+                "origin": MessageSource.DESKTOP,
+            }
+        )
+
+        with self.assertRaises(ToolNotFoundError):
+            await service.request(forged)
+
+        result = await service.request(
+            forged.model_copy(update={"origin": MessageSource.QQ}),
+            model_context=model_context(MessageSource.DESKTOP),
+        )
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(calls, 1)
+        self.assertIs(
+            repository.requests[result.request_id].origin,
+            MessageSource.DESKTOP,
+        )
+
+    async def test_cloud_model_execution_requires_exact_allowlist_and_qq(self):
+        calls = 0
+
+        async def handler(_: Arguments) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"read": True}
+
+        request_from_model = request().model_copy(
+            update={"source": ToolSource.MODEL}
+        )
+        for allowlist, channel in (
+            (None, MessageSource.QQ),
+            (frozenset({"another.tool"}), MessageSource.QQ),
+            (frozenset({"example.tool"}), MessageSource.DESKTOP),
+        ):
+            with self.subTest(allowlist=allowlist, channel=channel):
+                service, repository = build_service(
+                    risk=ToolRisk.LOW,
+                    handler=handler,
+                    allowed_sources=frozenset({ToolSource.MODEL}),
+                    model_access=ModelAccess.READ_ONLY,
+                    allowed_channels=frozenset(
+                        {MessageSource.DESKTOP, MessageSource.QQ}
+                    ),
+                    runtime_profile="cloud",
+                    allowed_model_tool_names=allowlist,
+                )
+
+                with self.assertRaises(ToolNotFoundError):
+                    await service.request(
+                        request_from_model,
+                        model_context=model_context(channel),
+                    )
+
+                self.assertEqual(repository.requests, {})
+
+        service, _ = build_service(
+            risk=ToolRisk.LOW,
+            handler=handler,
+            allowed_sources=frozenset({ToolSource.MODEL}),
+            model_access=ModelAccess.READ_ONLY,
+            allowed_channels=frozenset({MessageSource.QQ}),
+            runtime_profile="cloud",
+            allowed_model_tool_names=frozenset({"example.tool"}),
+        )
+        result = await service.request(
+            request_from_model,
+            model_context=model_context(MessageSource.QQ),
+        )
+
+        self.assertEqual(result.state, ToolRequestState.SUCCEEDED)
+        self.assertEqual(calls, 1)
 
     async def test_model_cannot_execute_high_risk_tool_when_authorized(self):
         calls = 0

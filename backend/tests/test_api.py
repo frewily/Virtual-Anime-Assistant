@@ -14,8 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api.chat import ChatMessage, handle_message
 from api.status import get_status
 from api.ws import (
-    broadcast_json,
-    broadcast_to_desktop,
+    DesktopWebSocketHub,
     is_allowed_origin,
     parse_client_message,
 )
@@ -69,9 +68,6 @@ class ApiTests(unittest.TestCase):
         asyncio.run(self.runtime.aclose())
         asyncio.run(self.store.close())
         self.directory.cleanup()
-        from api import ws
-
-        ws._sessions.clear()
 
     def test_chat_endpoint_routes_a_message_to_the_injected_runtime(self):
         response = asyncio.run(
@@ -174,8 +170,7 @@ class ApiTests(unittest.TestCase):
             def __init__(self):
                 self.send_text = AsyncMock()
 
-        from api import ws
-
+        hub = DesktopWebSocketHub()
         socket = Socket()
         response = AssistantResponse(
             correlation_id="message-1",
@@ -183,11 +178,8 @@ class ApiTests(unittest.TestCase):
             kind=ResponseKind.ACTION,
             avatar=AvatarCue(expression="surprised", motion="tap_body"),
         )
-        ws._sessions.add(socket)
-        try:
-            asyncio.run(broadcast_to_desktop(response))
-        finally:
-            ws._sessions.discard(socket)
+        hub.attach(socket)
+        asyncio.run(hub.broadcast_response(response))
 
         payload = json.loads(socket.send_text.await_args.args[0])
         self.assertEqual(payload["type"], "action")
@@ -198,14 +190,50 @@ class ApiTests(unittest.TestCase):
         class Socket:
             send_text = AsyncMock(side_effect=RuntimeError("closed"))
 
-        from api import ws
-
+        disconnected = AsyncMock()
+        hub = DesktopWebSocketHub(on_last_disconnect=disconnected)
         socket = Socket()
-        ws._sessions.add(socket)
+        hub.attach(socket)
 
-        asyncio.run(broadcast_json({"type": "example"}))
+        asyncio.run(hub.broadcast_json({"type": "example"}))
 
-        self.assertNotIn(socket, ws._sessions)
+        self.assertEqual(hub.connected_count, 0)
+        disconnected.assert_awaited_once_with()
+
+    def test_desktop_hubs_isolate_broadcasts_and_last_disconnects(self):
+        class Socket:
+            def __init__(self):
+                self.send_text = AsyncMock()
+
+        disconnected_a = AsyncMock()
+        disconnected_b = AsyncMock()
+        hub_a = DesktopWebSocketHub(on_last_disconnect=disconnected_a)
+        hub_b = DesktopWebSocketHub(on_last_disconnect=disconnected_b)
+        socket_a1 = Socket()
+        socket_a2 = Socket()
+        socket_b = Socket()
+        hub_a.attach(socket_a1)
+        hub_a.attach(socket_a2)
+        hub_b.attach(socket_b)
+
+        asyncio.run(hub_a.broadcast_json({"type": "only-a"}))
+
+        socket_a1.send_text.assert_awaited_once()
+        socket_a2.send_text.assert_awaited_once()
+        socket_b.send_text.assert_not_awaited()
+        self.assertEqual(hub_a.connected_count, 2)
+        self.assertEqual(hub_b.connected_count, 1)
+
+        asyncio.run(hub_a.detach(socket_a1))
+        disconnected_a.assert_not_awaited()
+        asyncio.run(hub_a.detach(socket_a2))
+        disconnected_a.assert_awaited_once_with()
+        disconnected_b.assert_not_awaited()
+        asyncio.run(hub_a.detach(socket_a2))
+        disconnected_a.assert_awaited_once_with()
+
+        asyncio.run(hub_b.detach(socket_b))
+        disconnected_b.assert_awaited_once_with()
 
     def test_app_duration_scenario_triggers_after_the_configured_minutes(self):
         engine = ScenarioEngine()

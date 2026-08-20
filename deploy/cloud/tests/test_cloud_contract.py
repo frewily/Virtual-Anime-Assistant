@@ -12,9 +12,14 @@ COMPOSE_PATH = ROOT / "deploy/cloud/docker-compose.yml"
 GITIGNORE = ROOT / ".gitignore"
 DEPLOY_WORKFLOW = ROOT / ".github/workflows/deploy-cloud.yml"
 CLOUD_RUNBOOK = ROOT / "docs/deployment/cloud-qq-assistant.md"
+README = ROOT / "README.md"
 MONITOR_INSTALLER = (
     ROOT / "deploy/cloud/scripts/install-cloud-monitor.sh"
 )
+STATE_RELAY_ACCESS_INSTALLER = (
+    ROOT / "deploy/cloud/scripts/install-state-relay-access.sh"
+)
+STATE_RELAY_WRAPPER = ROOT / "deploy/cloud/scripts/vaa-state-relay.py"
 
 
 class CloudDeploymentContractTests(unittest.TestCase):
@@ -29,6 +34,30 @@ class CloudDeploymentContractTests(unittest.TestCase):
 
         self.assertIn("USER vaa", dockerfile)
         self.assertIn('CMD ["python", "main.py"]', dockerfile)
+
+    def test_computer_state_operations_document_all_safety_boundaries(self):
+        documentation = "\n".join(
+            (
+                README.read_text(encoding="utf-8"),
+                CLOUD_RUNBOOK.read_text(encoding="utf-8"),
+            )
+        )
+
+        for required in (
+            "不保存状态历史",
+            "公开、半敏感、敏感、高度敏感",
+            "QQ 只能查询",
+            "45 秒",
+            "专用 SSH 密钥",
+            "SSH stdin",
+            "逐次确认",
+            "任意 Shell",
+            "停止上报",
+            "撤销专用公钥",
+            "实际创建或安装持久 SSH 凭证前必须重新确认",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, documentation)
 
     def test_backend_image_provides_writable_audio_directory(self):
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")
@@ -123,8 +152,80 @@ class CloudDeploymentContractTests(unittest.TestCase):
 
         self.assertEqual(
             example.splitlines(),
-            ["ASSISTANT_LLM_API_KEY=", "ASSISTANT_QQ_ACCESS_TOKEN="],
+            [
+                "ASSISTANT_LLM_API_KEY=",
+                "ASSISTANT_QQ_ACCESS_TOKEN=",
+                "ASSISTANT_COMPUTER_STATE_REPORT_TOKEN=",
+            ],
         )
+
+        environment_example = (
+            ROOT / "deploy/cloud/.env.example"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "ASSISTANT_COMPUTER_STATE_REPORT_TOKEN",
+            environment_example,
+        )
+
+    def test_state_relay_access_installer_has_a_strict_key_contract(self):
+        script = STATE_RELAY_ACCESS_INSTALLER.read_text(encoding="utf-8")
+
+        for required in (
+            "(( EUID == 0 ))",
+            '[[ $# -eq 3 ]]',
+            'mapfile -t public_key_lines < "$public_key_file"',
+            '[[ ${#public_key_lines[@]} -eq 1 ]]',
+            '[[ $public_key =~ ^ssh-ed25519\\ ',
+            'ssh-keygen -l -f "$validation_file"',
+            'readonly device_id=$2',
+            'readonly token_file=$3',
+            'command=\\"/usr/local/libexec/vaa-state-relay $device_id\\",restrict',
+            "vaa-state-relay:%s\\n",
+            '"$authorized_key_options" "$key_type" "$key_data" "$device_id"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, script)
+
+    def test_state_relay_access_is_isolated_restricted_and_idempotent(self):
+        script = STATE_RELAY_ACCESS_INSTALLER.read_text(encoding="utf-8")
+
+        self.assertIn("readonly relay_user=vaa-state-relay", script)
+        self.assertIn(
+            'install -o root -g root -m 0755 "$wrapper_source" "$wrapper_path"',
+            script,
+        )
+        self.assertIn(
+            'install -d -o "$relay_user" -g "$relay_group" -m 0700',
+            script,
+        )
+        self.assertIn(
+            'install -o "$relay_user" -g "$relay_group" -m 0600',
+            ' '.join(script.splitlines()),
+        )
+        self.assertIn('"$ssh_dir/authorized_keys"', script)
+        self.assertIn(
+            'install -o root -g "$relay_group" -m 0640',
+            ' '.join(script.splitlines()),
+        )
+        self.assertTrue(STATE_RELAY_WRAPPER.is_file())
+
+        for forbidden in (
+            "permitopen",
+            "port-forwarding",
+            "sleep infinity",
+            "sshd_config",
+            "PermitRootLogin",
+            "PasswordAuthentication",
+            "nginx",
+            "firewall",
+            "iptables",
+            "firewall-cmd",
+            "ufw",
+            "ssh-rsa",
+            "ecdsa-",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, script)
 
     def test_backup_timer_is_daily_and_persistent(self):
         service = (

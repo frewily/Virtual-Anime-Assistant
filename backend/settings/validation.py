@@ -68,10 +68,17 @@ class TTSSettingsDraft(_StrictRequestModel):
     audio_max_age_seconds: int = 86400
 
 
+class ComputerSettingsDraft(_StrictRequestModel):
+    state_enabled: bool = False
+    actions_enabled: bool = False
+    remote_report_enabled: bool = False
+
+
 class SettingsDraft(_StrictRequestModel):
     llm: LLMSettingsDraft = Field(default_factory=LLMSettingsDraft)
     qq: QQSettingsDraft = Field(default_factory=QQSettingsDraft)
     tts: TTSSettingsDraft = Field(default_factory=TTSSettingsDraft)
+    computer: ComputerSettingsDraft = Field(default_factory=ComputerSettingsDraft)
 
 
 class _ValidatedModel(_StrictRequestModel):
@@ -123,10 +130,17 @@ class ValidatedTTSSettings(_ValidatedModel):
     audio_max_age_seconds: int
 
 
+class ValidatedComputerSettings(_ValidatedModel):
+    state_enabled: bool
+    actions_enabled: bool
+    remote_report_enabled: bool
+
+
 class ValidatedSettingsSnapshot(_ValidatedModel):
     llm: ValidatedLLMSettings
     qq: ValidatedQQSettings
     tts: ValidatedTTSSettings
+    computer: ValidatedComputerSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +415,14 @@ class SettingsValidationService:
             errors["tts.gptSovitsUrl"] = _FIELD_MESSAGE
         if tts.default_voice_id not in self._voice_ids:
             errors["tts.defaultVoiceId"] = _FIELD_MESSAGE
+
+        computer = draft.computer
+        if not computer.state_enabled:
+            dependency_message = "启用时必须先启用本机状态采集"
+            if computer.actions_enabled:
+                errors["computer.actionsEnabled"] = dependency_message
+            if computer.remote_report_enabled:
+                errors["computer.remoteReportEnabled"] = dependency_message
 
         if errors:
             raise SettingsValidationError(errors) from None
@@ -749,6 +771,11 @@ def _validated_snapshot(draft: SettingsDraft) -> ValidatedSettingsSnapshot:
             gpt_sovits_url=draft.tts.gpt_sovits_url,
             default_voice_id=draft.tts.default_voice_id,
             audio_max_age_seconds=draft.tts.audio_max_age_seconds,
+        ),
+        computer=ValidatedComputerSettings(
+            state_enabled=draft.computer.state_enabled,
+            actions_enabled=draft.computer.actions_enabled,
+            remote_report_enabled=draft.computer.remote_report_enabled,
         ),
     )
 

@@ -72,6 +72,7 @@ chmod 600 secrets.env
 
 - `ASSISTANT_LLM_API_KEY`
 - `ASSISTANT_QQ_ACCESS_TOKEN`
+- `ASSISTANT_COMPUTER_STATE_REPORT_TOKEN`
 
 OneBot Token 至少 16 个字符。不要使用会将秘密写入 Shell 历史或终端录屏的方式填入。秘密由环境文件提供，因此设置页将秘密字段显示为已配置且只读；模型地址、模型名、QQ 白名单等非秘密字段仍可保存与测试。
 
@@ -266,3 +267,41 @@ Git bundle，再通过 SSH 上传。服务器从
 - `VAA_DEPLOY_KNOWN_HOSTS`
 
 创建 SSH 私钥和 GitHub Secrets 会形成持久访问，必须在实际操作前再次取得用户确认。known_hosts 必须由管理员从可信路径核对，工作流不会自动使用 `ssh-keyscan` 接受未知主机。
+
+## 12. 电脑状态 relay 运维
+
+电脑状态链路为“Mac 最新脱敏快照 → 单次 SSH stdin → 强制 wrapper → 服务器回环 API”。它不使用 SSH 端口转发，不开放新公网端口，也不会改变 Nginx、防火墙、root 或密码登录设置。云端只保留每台设备最新快照，不保存状态历史；Mac 停止上报后 45 秒内显示离线。QQ 只能查询脱敏状态，不能创建、批准或执行电脑操作。
+
+隐私按公开、半敏感、敏感、高度敏感四级处理；屏幕、按键、剪贴板、文件和聊天正文属于高度敏感数据，永不进入 relay。打开应用、打开 URL、调节音量和媒体控制只能在 Mac 本机逐次确认，relay 不提供任意 Shell。
+
+### 12.1 启用顺序
+
+1. 先在 Mac 设置页开启“本机状态采集”，确认所需 macOS 辅助功能权限；只开启本地采集时不需要 SSH。
+2. 准备一对只供状态 relay 使用的 ed25519 密钥和独立 known hosts 文件，不复用部署密钥。实际创建或安装持久 SSH 凭证前必须重新确认。
+3. 在服务器用无回显方式准备 32～256 字符的 relay Token 文件；同一 Token 同时用于云端 `ASSISTANT_COMPUTER_STATE_REPORT_TOKEN` 和 wrapper 的专用 `0640` 文件，不复制到 Mac。
+4. 管理员核对公钥、设备 ID 和 Token 文件后运行：
+
+```bash
+sudo deploy/cloud/scripts/install-state-relay-access.sh \
+  /path/to/reviewed-state-relay.pub \
+  macbook-main \
+  /path/to/state-relay-token
+```
+
+安装器创建 `vaa-state-relay` 专用账号，并把公钥固定为 `command="/usr/local/libexec/vaa-state-relay macbook-main",restrict`。该身份不能执行远程命令、TTY 或任何端口转发。不要把私钥、Token 或文件正文复制到终端记录、日志或聊天。
+
+5. 在 Mac 仅配置 `ASSISTANT_COMPUTER_DEVICE_ID`、`ASSISTANT_COMPUTER_RELAY_TARGET`、`ASSISTANT_COMPUTER_RELAY_PORT`、`ASSISTANT_COMPUTER_RELAY_IDENTITY_FILE` 和 `ASSISTANT_COMPUTER_RELAY_KNOWN_HOSTS_FILE`。设置页只显示“已配置”，不返回原值。
+6. 最后开启“向云端上报脱敏状态”，保存并重启助手。通过 QQ 询问 CPU、内存、锁屏、电池或媒体状态进行只读验收；不要测试电脑操作。
+
+### 12.2 诊断
+
+- 设置页显示“未完整配置”：逐项核对 5 个 Mac 环境变量是否存在、端口是否有效、两个路径是否为绝对路径；不要输出它们的原值。
+- SSH 失败：从可信渠道核对主机密钥、公钥指纹、专用文件权限和 relay 用户状态；不要关闭 `StrictHostKeyChecking`，也不要使用 `ssh-keyscan` 自动接受未知主机。
+- wrapper 拒绝：确认设备 ID 与公钥强制命令一致、JSON 小于等于 32 KiB，并确认服务器 Token 文件与容器秘密一致；日志中不要打印请求正文或 Token。
+- QQ 显示离线：先等待一个 15 秒上报周期；超过 45 秒仍离线时检查 Mac Reporter 和云端回环健康状态，不要为排障开放 8080、6099、3000 或 3001。
+
+### 12.3 停止与撤销
+
+临时停止上报时，在 Mac 设置页关闭远端上报，保存并重启。云端最新快照会在 45 秒内过期；关闭本机状态采集还会停止本机状态工具。停用不会删除聊天、记忆或 QQ 数据。
+
+永久停用时，先完成上述停止流程，再由管理员编辑 `/var/lib/vaa-state-relay/.ssh/authorized_keys`，只删除与目标设备 ID 完全匹配的 managed 行，以撤销专用公钥；不要覆盖其他设备条目。随后安全移除或归档 Mac 上的专用私钥和独立 known hosts 文件。若不再有任何设备，轮换或停用云端 `ASSISTANT_COMPUTER_STATE_REPORT_TOKEN`，并同步处理 `/etc/virtual-anime-assistant/state-relay-token`。每项删除或密钥轮换都应先核对精确目标并单独确认。

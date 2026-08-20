@@ -1,9 +1,11 @@
 """Resolve persisted, keychain, and environment settings into runtime values."""
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import os
+from pathlib import Path
+import re
 from types import MappingProxyType
 from typing import Any, Self
 
@@ -39,11 +41,24 @@ class TTSRuntimeSettings:
     audio_max_age_seconds: int
 
 
+@dataclass(frozen=True, slots=True)
+class ComputerRuntimeSettings:
+    state_enabled: bool = False
+    actions_enabled: bool = False
+    remote_report_enabled: bool = False
+    device_id: str | None = field(default=None, repr=False)
+    relay_target: str | None = field(default=None, repr=False)
+    relay_port: int | None = field(default=None, repr=False)
+    relay_identity_file: Path | None = field(default=None, repr=False)
+    relay_known_hosts_file: Path | None = field(default=None, repr=False)
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     llm: LLMSettings
     qq: OneBotSettings
     tts: TTSRuntimeSettings
+    computer: ComputerRuntimeSettings = field(default_factory=ComputerRuntimeSettings)
 
 
 class _PresentationModel(BaseModel):
@@ -206,6 +221,23 @@ _TTS_ENVIRONMENT_VARIABLES = {
     "default_voice_id": "ASSISTANT_TTS_DEFAULT_VOICE_ID",
     "audio_max_age_seconds": "ASSISTANT_AUDIO_MAX_AGE_SECONDS",
 }
+_COMPUTER_ENVIRONMENT_VARIABLES = {
+    "state_enabled": "ASSISTANT_COMPUTER_STATE_ENABLED",
+    "actions_enabled": "ASSISTANT_COMPUTER_ACTIONS_ENABLED",
+    "remote_report_enabled": "ASSISTANT_COMPUTER_REMOTE_REPORT_ENABLED",
+}
+_COMPUTER_RELAY_ENVIRONMENT_VARIABLES = {
+    "device_id": "ASSISTANT_COMPUTER_DEVICE_ID",
+    "relay_target": "ASSISTANT_COMPUTER_RELAY_TARGET",
+    "relay_port": "ASSISTANT_COMPUTER_RELAY_PORT",
+    "relay_identity_file": "ASSISTANT_COMPUTER_RELAY_IDENTITY_FILE",
+    "relay_known_hosts_file": "ASSISTANT_COMPUTER_RELAY_KNOWN_HOSTS_FILE",
+}
+_DEVICE_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+_SSH_TARGET_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$"
+)
 
 
 class SettingsResolver:
@@ -238,7 +270,9 @@ class SettingsResolver:
         llm = LLMSettings.from_env(llm_environment)
         qq = OneBotSettings.from_env(qq_environment)
         tts = self._resolve_tts(persisted, environment)
-        runtime = RuntimeSettings(llm=llm, qq=qq, tts=tts)
+        profile = _runtime_profile(environment)
+        computer = self.resolve_computer(persisted, environment)
+        runtime = RuntimeSettings(llm=llm, qq=qq, tts=tts, computer=computer)
         presentation = SettingsPresentation(
             fields=self._presentation_fields(
                 persisted,
@@ -246,10 +280,25 @@ class SettingsResolver:
                 environment,
                 secrets,
                 qq_environment,
+                profile,
             ),
             keychain_available=keychain_available,
         )
         return ResolvedSettings(runtime=runtime, presentation=presentation)
+
+    def resolve_computer(
+        self,
+        persisted: PersistedSettings,
+        environ: Mapping[str, str] | None = None,
+    ) -> ComputerRuntimeSettings:
+        """Resolve and strictly validate local computer capability settings."""
+
+        environment = os.environ if environ is None else environ
+        return self._resolve_computer(
+            persisted,
+            environment,
+            _runtime_profile(environment),
+        )
 
     def _read_keychain_secrets(
         self, persisted: PersistedSettings
@@ -353,6 +402,72 @@ class SettingsResolver:
             audio_max_age_seconds=_parse_int(age_name, age),
         )
 
+    @staticmethod
+    def _resolve_computer(
+        persisted: PersistedSettings,
+        environment: Mapping[str, str],
+        profile: str,
+    ) -> ComputerRuntimeSettings:
+        stored = persisted.computer
+        if profile == "cloud":
+            state_enabled = actions_enabled = remote_report_enabled = False
+        else:
+            state_enabled = _environment_bool(
+                environment,
+                _COMPUTER_ENVIRONMENT_VARIABLES["state_enabled"],
+                stored.state_enabled,
+            )
+            actions_enabled = _environment_bool(
+                environment,
+                _COMPUTER_ENVIRONMENT_VARIABLES["actions_enabled"],
+                stored.actions_enabled,
+            )
+            remote_report_enabled = _environment_bool(
+                environment,
+                _COMPUTER_ENVIRONMENT_VARIABLES["remote_report_enabled"],
+                stored.remote_report_enabled,
+            )
+            if not state_enabled and (actions_enabled or remote_report_enabled):
+                raise ValueError("computer capability dependency is invalid")
+
+        device_id = _optional_environment_text(
+            environment,
+            _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["device_id"],
+        )
+        if device_id is not None and _DEVICE_ID_PATTERN.fullmatch(device_id) is None:
+            raise ValueError("invalid computer device id")
+        relay_target = _optional_environment_text(
+            environment,
+            _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_target"],
+        )
+        if relay_target is not None and _SSH_TARGET_PATTERN.fullmatch(relay_target) is None:
+            raise ValueError("invalid computer relay target")
+        relay_port = _optional_environment_port(
+            environment,
+            _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_port"],
+        )
+        identity = _optional_absolute_path(
+            environment,
+            _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_identity_file"],
+        )
+        known_hosts = _optional_absolute_path(
+            environment,
+            _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_known_hosts_file"],
+        )
+        relay_values = (device_id, relay_target, relay_port, identity, known_hosts)
+        if remote_report_enabled and any(value is None for value in relay_values):
+            raise ValueError("computer relay configuration is incomplete")
+        return ComputerRuntimeSettings(
+            state_enabled=state_enabled,
+            actions_enabled=actions_enabled,
+            remote_report_enabled=remote_report_enabled,
+            device_id=device_id,
+            relay_target=relay_target,
+            relay_port=relay_port,
+            relay_identity_file=identity,
+            relay_known_hosts_file=known_hosts,
+        )
+
     @classmethod
     def _presentation_fields(
         cls,
@@ -361,6 +476,7 @@ class SettingsResolver:
         environment: Mapping[str, str],
         secrets: Mapping[str, str | None],
         qq_environment: Mapping[str, str],
+        profile: str,
     ) -> dict[str, FieldPresentation]:
         fields: dict[str, FieldPresentation] = {}
         cls._add_nonsecret_fields(
@@ -435,7 +551,58 @@ class SettingsResolver:
             environment_variable=_QQ_ENVIRONMENT_VARIABLES["access_token"],
             environment=environment,
         )
+        if profile == "desktop":
+            cls._add_nonsecret_fields(
+                fields,
+                {
+                    "state_enabled": "computer.stateEnabled",
+                    "actions_enabled": "computer.actionsEnabled",
+                    "remote_report_enabled": "computer.remoteReportEnabled",
+                },
+                {
+                    "state_enabled": runtime.computer.state_enabled,
+                    "actions_enabled": runtime.computer.actions_enabled,
+                    "remote_report_enabled": runtime.computer.remote_report_enabled,
+                },
+                persisted.computer.model_fields_set,
+                _COMPUTER_ENVIRONMENT_VARIABLES,
+                environment,
+            )
+            cls._add_computer_relay_status(fields, runtime.computer, environment)
         return fields
+
+    @staticmethod
+    def _add_computer_relay_status(
+        fields: dict[str, FieldPresentation],
+        computer: ComputerRuntimeSettings,
+        environment: Mapping[str, str],
+    ) -> None:
+        values = {
+            "deviceIdConfigured": computer.device_id,
+            "relayTargetConfigured": computer.relay_target,
+            "relayPortConfigured": computer.relay_port,
+            "relayIdentityFileConfigured": computer.relay_identity_file,
+            "relayKnownHostsFileConfigured": computer.relay_known_hosts_file,
+        }
+        variables = {
+            "deviceIdConfigured": _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["device_id"],
+            "relayTargetConfigured": _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_target"],
+            "relayPortConfigured": _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_port"],
+            "relayIdentityFileConfigured": _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_identity_file"],
+            "relayKnownHostsFileConfigured": _COMPUTER_RELAY_ENVIRONMENT_VARIABLES["relay_known_hosts_file"],
+        }
+        for suffix, value in values.items():
+            variable = variables[suffix]
+            fields[f"computer.{suffix}"] = ValueFieldPresentation(
+                value="已配置" if value is not None else "未配置",
+                source=(
+                    FieldSource.ENVIRONMENT
+                    if variable in environment
+                    else FieldSource.DEFAULT
+                ),
+                read_only=True,
+                environment_variable=variable,
+            )
 
     @staticmethod
     def _qq_presentation_values(
@@ -516,6 +683,77 @@ class SettingsResolver:
 
 def _format_bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _runtime_profile(environment: Mapping[str, str]) -> str:
+    raw = environment.get("ASSISTANT_RUNTIME_PROFILE", "desktop")
+    if not isinstance(raw, str):
+        raise ValueError("invalid runtime profile")
+    profile = raw.strip()
+    if profile not in {"desktop", "cloud"}:
+        raise ValueError("invalid runtime profile")
+    return profile
+
+
+def _environment_bool(
+    environment: Mapping[str, str],
+    name: str,
+    default: bool,
+) -> bool:
+    raw = environment.get(name)
+    if raw is None:
+        return default
+    if not isinstance(raw, str):
+        raise ValueError(name)
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(name)
+
+
+def _optional_environment_text(
+    environment: Mapping[str, str],
+    name: str,
+) -> str | None:
+    if name not in environment:
+        return None
+    raw = environment[name]
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(name)
+    value = raw.strip()
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(name)
+    return value
+
+
+def _optional_environment_port(
+    environment: Mapping[str, str],
+    name: str,
+) -> int | None:
+    value = _optional_environment_text(environment, name)
+    if value is None:
+        return None
+    if not value.isascii() or not value.isdigit():
+        raise ValueError(name)
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError(name)
+    return port
+
+
+def _optional_absolute_path(
+    environment: Mapping[str, str],
+    name: str,
+) -> Path | None:
+    value = _optional_environment_text(environment, name)
+    if value is None:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError(name)
+    return path
 
 
 def _redacted_validation_error(

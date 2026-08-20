@@ -1,6 +1,7 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 from pydantic.errors import (
@@ -10,6 +11,8 @@ from pydantic.errors import (
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
 from pydantic_core import core_schema
 
+from computer.models import ComputerPlatform, ModelAccess
+from domain.messages import MessageSource
 from domain.tools import ToolRisk, ToolSource
 from llm.models import ModelToolDefinition
 from tools.registry import ToolDefinition, ToolRegistry
@@ -28,6 +31,73 @@ class _ClosedModelJsonSchema(GenerateJsonSchema):
 
 class _UnsupportedToolSchemaError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class ModelToolCallContext:
+    channel: MessageSource
+    advertised_tool_names: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.channel, MessageSource):
+            raise TypeError("model tool channel must be a MessageSource")
+        if not isinstance(self.advertised_tool_names, frozenset) or any(
+            not isinstance(name, str) for name in self.advertised_tool_names
+        ):
+            raise TypeError("advertised model tools must be a frozenset of names")
+
+
+class ModelToolPolicy:
+    def __init__(
+        self,
+        *,
+        platform: ComputerPlatform | None,
+        runtime_profile: Literal["desktop", "cloud"] | None,
+        confirmation_client_online: Callable[[], bool],
+        allowed_tool_names: frozenset[str] | None,
+    ) -> None:
+        self.platform = platform
+        self.runtime_profile = runtime_profile
+        self.confirmation_client_online = confirmation_client_online
+        self.allowed_tool_names = allowed_tool_names
+
+    def allows(
+        self,
+        definition: ToolDefinition,
+        channel: MessageSource,
+        risk: ToolRisk,
+    ) -> bool:
+        if (
+            not isinstance(channel, MessageSource)
+            or self.runtime_profile not in {"desktop", "cloud"}
+            or ToolSource.MODEL not in definition.allowed_sources
+            or channel not in definition.allowed_channels
+            or (
+                self.allowed_tool_names is not None
+                and definition.name not in self.allowed_tool_names
+            )
+        ):
+            return False
+        if self.runtime_profile == "cloud" and (
+            channel is not MessageSource.QQ
+            or self.allowed_tool_names is None
+        ):
+            return False
+        if risk is ToolRisk.LOW:
+            return definition.model_access is ModelAccess.READ_ONLY
+        if (
+            risk is not ToolRisk.HIGH
+            or definition.model_access
+            is not ModelAccess.PROPOSE_WITH_CONFIRMATION
+            or channel is not MessageSource.DESKTOP
+            or self.platform is not ComputerPlatform.MACOS
+            or self.runtime_profile != "desktop"
+        ):
+            return False
+        try:
+            return self.confirmation_client_online() is True
+        except Exception:
+            return False
 
 
 def build_closed_arguments_schema(
@@ -142,15 +212,53 @@ def _field_name_for_input(
 
 
 class ModelToolCatalog:
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        *,
+        platform: ComputerPlatform | None = None,
+        runtime_profile: Literal["desktop", "cloud"] = "desktop",
+        confirmation_client_online: Callable[[], bool] | None = None,
+        allowed_tool_names: frozenset[str] | None = None,
+    ) -> None:
+        if platform is not None and not isinstance(
+            platform,
+            ComputerPlatform,
+        ):
+            raise TypeError("model tool platform must be a ComputerPlatform")
+        if runtime_profile not in {"desktop", "cloud"}:
+            raise ValueError("model tool runtime profile is invalid")
+        if (
+            confirmation_client_online is not None
+            and not callable(confirmation_client_online)
+        ):
+            raise TypeError("confirmation client status must be callable")
         self.registry = registry
+        self.platform = platform
+        self.runtime_profile = runtime_profile
+        self.confirmation_client_online = (
+            confirmation_client_online or (lambda: False)
+        )
+        self.allowed_tool_names = allowed_tool_names
+        self.policy = ModelToolPolicy(
+            platform=platform,
+            runtime_profile=runtime_profile,
+            confirmation_client_online=self.confirmation_client_online,
+            allowed_tool_names=allowed_tool_names,
+        )
 
-    def list(self) -> Sequence[ModelToolDefinition]:
+    def list(
+        self,
+        source: MessageSource,
+    ) -> Sequence[ModelToolDefinition]:
+        if not isinstance(source, MessageSource):
+            raise TypeError("model tool source must be a MessageSource")
         tools: list[ModelToolDefinition] = []
         for definition in self.registry.list():
-            if (
-                definition.risk is not ToolRisk.LOW
-                or ToolSource.MODEL not in definition.allowed_sources
+            if not self.policy.allows(
+                definition,
+                source,
+                definition.risk,
             ):
                 continue
             try:

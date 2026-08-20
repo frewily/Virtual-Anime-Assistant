@@ -241,9 +241,6 @@ class ApiIntegrationTests(unittest.TestCase):
         asyncio.run(self.runtime.aclose())
         asyncio.run(self.store.close())
         self.directory.cleanup()
-        from api import ws
-
-        ws._sessions.clear()
 
     def test_status_endpoint_returns_metrics_and_safe_llm_mode(self):
         with TestClient(self.app) as client:

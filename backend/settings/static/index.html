@@ -16,7 +16,7 @@
       <div>
         <p class="eyebrow">LOCAL CONTROL DESK · 本机控制台</p>
         <h1>助手设置簿</h1>
-        <p class="lede">模型、QQ 与语音服务，都收在这一页里。</p>
+        <p class="lede">模型、QQ、语音与电脑能力，都收在这一页里。</p>
       </div>
       <div class="session-card">
         <div class="status-line">
@@ -66,6 +66,7 @@
           <button id="tab-llm" class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-llm" data-tab="llm"><span>01</span>模型</button>
           <button id="tab-qq" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-qq" tabindex="-1" data-tab="qq"><span>02</span>QQ</button>
           <button id="tab-tts" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-tts" tabindex="-1" data-tab="tts"><span>03</span>语音</button>
+          <button id="tab-computer" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-computer" tabindex="-1" data-tab="computer"><span>04</span>电脑</button>
         </div>
         <p class="rail-note">所有配置只保存在本机。敏感凭据交给操作系统保管。</p>
       </nav>
@@ -135,6 +136,22 @@
               <div class="field"><label for="tts-audio-max-age-seconds">音频保留时间（秒）</label><span class="source" data-source-for="tts.audioMaxAgeSeconds"></span><input id="tts-audio-max-age-seconds" type="number" step="1" data-path="tts.audioMaxAgeSeconds"><p class="field-error" data-error-for="tts.audioMaxAgeSeconds"></p></div>
             </fieldset>
             <p class="probe-status" data-test-status="tts" role="status" aria-live="polite"></p>
+          </section>
+
+          <section id="panel-computer" class="panel" role="tabpanel" aria-labelledby="tab-computer" data-panel="computer" hidden>
+            <header class="panel-heading"><div><p class="section-number">04 · COMPUTER</p><h2>电脑状态与受控操作</h2><p>每项能力独立启用，默认全部关闭。</p></div></header>
+            <div class="runtime-note">只采集系统资源、前台应用名称、媒体状态和勿扰状态；不会采集屏幕内容、按键、剪贴板、文件内容或聊天历史。</div>
+            <fieldset>
+              <legend>能力许可</legend>
+              <div class="field switch-field"><div><label for="computer-state-enabled">采集本机脱敏状态</label><span class="source" data-source-for="computer.stateEnabled"></span><p class="hint">部分状态需要 macOS 辅助功能权限；未授权时对应状态会显示不可用。</p><p class="field-error" data-error-for="computer.stateEnabled"></p></div><input id="computer-state-enabled" type="checkbox" data-path="computer.stateEnabled"></div>
+              <div class="field switch-field"><div><label for="computer-actions-enabled">允许本机受控操作</label><span class="source" data-source-for="computer.actionsEnabled"></span><p class="hint">需要先开启状态采集；每次操作都必须在本机逐次确认，不开放任意 Shell。</p><p class="field-error" data-error-for="computer.actionsEnabled"></p></div><input id="computer-actions-enabled" type="checkbox" data-path="computer.actionsEnabled"></div>
+              <div class="field switch-field"><div><label for="computer-remote-report-enabled">向云端上报脱敏状态</label><span class="source" data-source-for="computer.remoteReportEnabled"></span><p class="hint">需要先开启状态采集；QQ 只能查询脱敏状态，不能从 QQ 操作电脑。</p><p class="field-error" data-error-for="computer.remoteReportEnabled"></p></div><input id="computer-remote-report-enabled" type="checkbox" data-path="computer.remoteReportEnabled"></div>
+            </fieldset>
+            <fieldset>
+              <legend>安全中继</legend>
+              <p id="computer-relay-status" class="runtime-note" role="status" aria-live="polite">正在读取脱敏配置状态…</p>
+              <p class="hint">这里只显示是否已配置，不显示 SSH 目标、密钥路径、known hosts 路径或任何 Token。</p>
+            </fieldset>
           </section>
         </form>
       </div>

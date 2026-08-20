@@ -794,6 +794,10 @@ class AssistantApplicationTests(unittest.TestCase):
         self.assertEqual(second.response_id, first.response_id)
         self.assertEqual(second.text, first.text)
         orchestrator.run.assert_awaited_once()
+        self.assertIs(
+            orchestrator.run.await_args.kwargs["source"],
+            MessageSource.DESKTOP,
+        )
         self.assertEqual(len(store.model_calls), 2)
         self.assertEqual(
             [record.prompt_tokens for record in store.model_calls],

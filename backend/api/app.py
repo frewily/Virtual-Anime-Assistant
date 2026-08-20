@@ -3,6 +3,7 @@ import logging
 import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
+from functools import partial
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -11,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from api.avatar import router as avatar_router
+from api.computer import router as computer_router
 from api.chat import router as chat_router
 from api.conversations import router as conversations_router
 from api.health import router as health_router
@@ -25,8 +27,11 @@ from api.tools import (
 )
 from api.tts import router as tts_router
 from api.window import router as window_router
-from api.ws import router as ws_router
-from api.ws import broadcast_json, broadcast_to_desktop
+from api.ws import (
+    DesktopWebSocketHub,
+    notify_confirmation_client_disconnected,
+    router as ws_router,
+)
 from agent.monitor import run as run_window_monitor
 from core.runtime import AssistantRuntime
 from core.deployment import DeploymentSettings
@@ -154,7 +159,11 @@ def _safe_validation_field(request: Request, location: object) -> str:
     return "request"
 
 
-async def broadcast_tool_event(event: ToolEvent) -> None:
+async def broadcast_tool_event(
+    event: ToolEvent,
+    *,
+    hub: DesktopWebSocketHub,
+) -> None:
     payload = {
         "type": event.type.value,
         "request": request_payload(event.request),
@@ -163,7 +172,7 @@ async def broadcast_tool_event(event: ToolEvent) -> None:
         payload["confirmation"] = confirmation_payload(
             event.request.confirmation
         )
-    await broadcast_json(payload)
+    await hub.broadcast_json(payload)
 
 
 async def scenario_loop(runtime: AssistantRuntime) -> None:
@@ -194,6 +203,7 @@ def _start_background_task(coroutine, tasks: list[asyncio.Task]) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    hub: DesktopWebSocketHub = app.state.desktop_hub
     runtime = app.state.runtime
     if runtime is None:
         runtime_settings_factory = app.state.runtime_settings_factory
@@ -207,11 +217,15 @@ async def lifespan(app: FastAPI):
                         app.state.settings_service = settings_service
             settings_service.recover()
             runtime = AssistantRuntime(
-                runtime_settings=settings_service.runtime_settings()
+                runtime_settings=settings_service.runtime_settings(),
+                deployment_settings=app.state.deployment_settings,
+                confirmation_client_online=hub.has_connections,
             )
         else:
             runtime = AssistantRuntime(
-                runtime_settings=runtime_settings_factory()
+                runtime_settings=runtime_settings_factory(),
+                deployment_settings=app.state.deployment_settings,
+                confirmation_client_online=hub.has_connections,
             )
         app.state.runtime = runtime
     unsubscribe = None
@@ -219,12 +233,15 @@ async def lifespan(app: FastAPI):
     tasks: list[asyncio.Task] = []
     try:
         unsubscribe = runtime.application.publisher.subscribe(
-            broadcast_to_desktop
+            hub.broadcast_response
         )
         if runtime.tool_service is not None:
             unsubscribe_tools = runtime.tool_service.publisher.subscribe(
-                broadcast_tool_event
+                partial(broadcast_tool_event, hub=hub)
             )
+        runtime.start_computer_state(
+            profile=app.state.deployment_settings.profile
+        )
         _start_background_task(
             supervise("scenario-loop", lambda: scenario_loop(runtime)),
             tasks,
@@ -268,6 +285,13 @@ def create_app(
     deployment_settings: DeploymentSettings | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Desktop Assistant API", version="1.0.0", lifespan=lifespan)
+
+    async def on_last_desktop_disconnect() -> None:
+        await notify_confirmation_client_disconnected(app.state.runtime)
+
+    app.state.desktop_hub = DesktopWebSocketHub(
+        on_last_disconnect=on_last_desktop_disconnect
+    )
     app.state.runtime = runtime_instance
     app.state.runtime_settings_factory = runtime_settings_factory
     app.state.settings_service = settings_service
@@ -352,6 +376,8 @@ def create_app(
     )
 
     app.include_router(status_router, prefix="/api")
+    if app.state.deployment_settings.profile == "cloud":
+        app.include_router(computer_router, prefix="/api")
     app.include_router(health_router, prefix="/api")
     app.include_router(tts_router, prefix="/api")
     app.include_router(window_router, prefix="/api")

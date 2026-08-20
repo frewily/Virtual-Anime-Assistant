@@ -73,16 +73,52 @@ class SettingsResolverTests(unittest.TestCase):
         self.assertEqual(resolved.runtime.tts.default_voice_id, "character_001")
         self.assertEqual(resolved.runtime.tts.audio_max_age_seconds, 86400)
         self.assertTrue(resolved.presentation.keychain_available)
-        self.assertEqual(len(resolved.presentation.fields), 19)
-        for field in resolved.presentation.fields.values():
+        self.assertEqual(len(resolved.presentation.fields), 27)
+        relay_status_paths = {
+            path
+            for path in resolved.presentation.fields
+            if path.startswith("computer.") and path.endswith("Configured")
+        }
+        self.assertEqual(len(relay_status_paths), 5)
+        for path, field in resolved.presentation.fields.items():
             self.assertEqual(field.source, FieldSource.DEFAULT)
-            self.assertFalse(field.read_only)
+            self.assertEqual(field.read_only, path in relay_status_paths)
             self.assertFalse(field.missing)
 
         api_key = resolved.presentation.fields["llm.apiKey"]
         self.assertIsNone(api_key.value)
         self.assertFalse(api_key.configured)
         self.assertEqual(api_key.environment_variable, "ASSISTANT_LLM_API_KEY")
+
+    def test_computer_relay_environment_is_strict_and_cloud_hides_local_controls(self) -> None:
+        invalid_values = (
+            ("ASSISTANT_COMPUTER_DEVICE_ID", "INVALID_DEVICE"),
+            ("ASSISTANT_COMPUTER_RELAY_TARGET", "missing-user.example"),
+            ("ASSISTANT_COMPUTER_RELAY_PORT", "0"),
+            ("ASSISTANT_COMPUTER_RELAY_IDENTITY_FILE", "relative-key"),
+            ("ASSISTANT_COMPUTER_RELAY_KNOWN_HOSTS_FILE", "relative-hosts"),
+        )
+        for name, value in invalid_values:
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    SettingsResolver(MemorySecretStore()).resolve(
+                        PersistedSettings(),
+                        {name: value},
+                    )
+
+        cloud = SettingsResolver(MemorySecretStore()).resolve(
+            PersistedSettings(
+                computer={
+                    "stateEnabled": True,
+                    "actionsEnabled": True,
+                    "remoteReportEnabled": True,
+                }
+            ),
+            {"ASSISTANT_RUNTIME_PROFILE": "cloud"},
+        )
+        self.assertFalse(cloud.runtime.computer.state_enabled)
+        self.assertNotIn("computer.stateEnabled", cloud.presentation.fields)
+        self.assertNotIn("computer.actionsEnabled", cloud.presentation.fields)
 
     def test_explicit_persisted_nonsecret_values_are_marked_persisted(self) -> None:
         persisted = PersistedSettings(
@@ -221,6 +257,14 @@ class SettingsResolverTests(unittest.TestCase):
             "ASSISTANT_GPT_SOVITS_URL": " http://environment:9880/// ",
             "ASSISTANT_TTS_DEFAULT_VOICE_ID": " environment-voice ",
             "ASSISTANT_AUDIO_MAX_AGE_SECONDS": "3600",
+            "ASSISTANT_COMPUTER_STATE_ENABLED": "true",
+            "ASSISTANT_COMPUTER_ACTIONS_ENABLED": "true",
+            "ASSISTANT_COMPUTER_REMOTE_REPORT_ENABLED": "true",
+            "ASSISTANT_COMPUTER_DEVICE_ID": "macbook-main",
+            "ASSISTANT_COMPUTER_RELAY_TARGET": "relay-user@relay.example",
+            "ASSISTANT_COMPUTER_RELAY_PORT": "2222",
+            "ASSISTANT_COMPUTER_RELAY_IDENTITY_FILE": "/private/identity",
+            "ASSISTANT_COMPUTER_RELAY_KNOWN_HOSTS_FILE": "/private/known-hosts",
         }
 
         resolved = SettingsResolver(
@@ -266,6 +310,9 @@ class SettingsResolverTests(unittest.TestCase):
         rendered = resolved.presentation.model_dump_json()
         self.assertNotIn("environment-llm-secret", rendered)
         self.assertNotIn("environment-qq-token", rendered)
+        self.assertNotIn("relay-user@relay.example", rendered)
+        self.assertNotIn("/private/identity", rendered)
+        self.assertNotIn("/private/known-hosts", rendered)
 
     def test_empty_secret_environment_values_are_read_only_overrides(self) -> None:
         persisted = PersistedSettings(
@@ -657,6 +704,7 @@ class SettingsResolverTests(unittest.TestCase):
                 field.source is FieldSource.PERSISTED
                 for name, field in resolved.presentation.fields.items()
                 if name not in {"llm.apiKey", "qq.accessToken"}
+                and not name.endswith("Configured")
             )
         )
 

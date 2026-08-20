@@ -9,6 +9,7 @@ from settings.auth import (
 )
 from settings.models import (
     AuthRecord,
+    ComputerSettings,
     LLMSettings,
     PersistedSettings,
     QQSettings,
@@ -23,6 +24,7 @@ from settings.secrets import (
     SecretStoreUnavailable,
 )
 from settings.resolver import (
+    ComputerRuntimeSettings,
     FieldSource,
     ResolvedSettings,
     RuntimeSettings,
@@ -49,6 +51,8 @@ from settings.service import (
 __all__ = [
     "AuthError",
     "AuthRecord",
+    "ComputerRuntimeSettings",
+    "ComputerSettings",
     "FieldSource",
     "LLMSettings",
     "LoginRateLimited",

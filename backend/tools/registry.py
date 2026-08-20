@@ -5,11 +5,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from computer.models import ModelAccess
+from domain.messages import MessageSource
 from domain.tools import ToolRisk, ToolSource
 
 
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{2,99}$")
 ToolHandler = Callable[[BaseModel], Awaitable[dict[str, Any]]]
+ToolConfirmationSummary = Callable[[BaseModel], dict[str, Any]]
 
 
 class ToolNotFoundError(LookupError):
@@ -28,16 +31,27 @@ class ToolDefinition:
     timeout_seconds: float
     cancellable: bool
     handler: ToolHandler
+    model_access: ModelAccess = ModelAccess.HIDDEN
+    confirmation_summary: ToolConfirmationSummary | None = None
     sensitive_fields: frozenset[str] = field(default_factory=frozenset)
     allowed_sources: frozenset[ToolSource] = field(
         default_factory=lambda: frozenset(
             {ToolSource.DESKTOP, ToolSource.SYSTEM}
         )
     )
+    allowed_channels: frozenset[MessageSource] = field(
+        default_factory=lambda: frozenset(
+            {MessageSource.DESKTOP, MessageSource.QQ}
+        )
+    )
 
     def __post_init__(self) -> None:
         if not _TOOL_NAME_PATTERN.fullmatch(self.name):
             raise ValueError("tool name is invalid")
+        if not isinstance(self.risk, ToolRisk):
+            raise TypeError("tool risk must be a ToolRisk value")
+        if type(self.cancellable) is not bool:
+            raise TypeError("tool cancellable must be a bool")
         if not self.title.strip():
             raise ValueError("tool title must not be blank")
         if not self.impact.strip():
@@ -49,6 +63,13 @@ class ToolDefinition:
             raise TypeError("arguments_model must be a Pydantic model")
         if not callable(self.handler):
             raise TypeError("tool handler must be callable")
+        if not isinstance(self.model_access, ModelAccess):
+            raise TypeError("tool model access must be a ModelAccess value")
+        if (
+            self.confirmation_summary is not None
+            and not callable(self.confirmation_summary)
+        ):
+            raise TypeError("tool confirmation summary must be callable")
         if not 0 < self.timeout_seconds <= 300:
             raise ValueError("tool timeout must be between 0 and 300 seconds")
         normalized_sources = frozenset(self.allowed_sources)
@@ -59,6 +80,21 @@ class ToolDefinition:
             for source in normalized_sources
         ):
             raise TypeError("tool allowed sources must contain ToolSource values")
+        normalized_channels = frozenset(self.allowed_channels)
+        if not normalized_channels:
+            raise ValueError("tool allowed channels must not be empty")
+        if any(
+            not isinstance(channel, MessageSource)
+            for channel in normalized_channels
+        ):
+            raise TypeError(
+                "tool allowed channels must contain MessageSource values"
+            )
+        if any(
+            not isinstance(field_name, str)
+            for field_name in self.sensitive_fields
+        ):
+            raise TypeError("tool sensitive fields must contain strings")
         normalized_fields = frozenset(
             field_name.casefold()
             for field_name in self.sensitive_fields
@@ -68,6 +104,7 @@ class ToolDefinition:
         object.__setattr__(self, "impact", self.impact.strip())
         object.__setattr__(self, "sensitive_fields", normalized_fields)
         object.__setattr__(self, "allowed_sources", normalized_sources)
+        object.__setattr__(self, "allowed_channels", normalized_channels)
 
 
 class ToolRegistry:

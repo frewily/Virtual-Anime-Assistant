@@ -7,6 +7,8 @@ from pydantic.errors import PydanticInvalidForJsonSchema
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from domain.messages import MessageSource
+from computer.models import ComputerPlatform, ModelAccess
 from domain.tools import ToolRisk, ToolSource
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolDefinition, ToolRegistry
@@ -97,6 +99,10 @@ def definition(
         {ToolSource.DESKTOP, ToolSource.SYSTEM}
     ),
     arguments_model: type[BaseModel] = Arguments,
+    allowed_channels: frozenset[MessageSource] = frozenset(
+        {MessageSource.DESKTOP, MessageSource.QQ}
+    ),
+    model_access: ModelAccess = ModelAccess.READ_ONLY,
 ) -> ToolDefinition:
     return ToolDefinition(
         name=name,
@@ -108,10 +114,77 @@ def definition(
         cancellable=True,
         handler=handler,
         allowed_sources=allowed_sources,
+        allowed_channels=allowed_channels,
+        model_access=model_access,
     )
 
 
 class ModelToolCatalogTests(unittest.TestCase):
+    def test_high_risk_proposals_require_desktop_macos_and_online_client(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "computer.action",
+                risk=ToolRisk.HIGH,
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                allowed_channels=frozenset({MessageSource.DESKTOP}),
+                model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            )
+        )
+
+        enabled = ModelToolCatalog(
+            registry,
+            platform=ComputerPlatform.MACOS,
+            runtime_profile="desktop",
+            confirmation_client_online=lambda: True,
+        )
+        offline = ModelToolCatalog(
+            registry,
+            platform=ComputerPlatform.MACOS,
+            runtime_profile="desktop",
+            confirmation_client_online=lambda: False,
+        )
+        cloud = ModelToolCatalog(
+            registry,
+            platform=ComputerPlatform.MACOS,
+            runtime_profile="cloud",
+            confirmation_client_online=lambda: True,
+        )
+
+        self.assertEqual(
+            [tool.name for tool in enabled.list(MessageSource.DESKTOP)],
+            ["computer.action"],
+        )
+        self.assertEqual(enabled.list(MessageSource.QQ), ())
+        self.assertEqual(offline.list(MessageSource.DESKTOP), ())
+        self.assertEqual(cloud.list(MessageSource.DESKTOP), ())
+    def test_catalog_filters_tools_by_trusted_message_source(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.desktop",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                allowed_channels=frozenset({MessageSource.DESKTOP}),
+            )
+        )
+        registry.register(
+            definition(
+                "example.qq",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                allowed_channels=frozenset({MessageSource.QQ}),
+            )
+        )
+
+        catalog = ModelToolCatalog(registry)
+
+        self.assertEqual(
+            [tool.name for tool in catalog.list(MessageSource.DESKTOP)],
+            ["example.desktop"],
+        )
+        self.assertEqual(
+            [tool.name for tool in catalog.list(MessageSource.QQ)],
+            ["example.qq"],
+        )
     def test_catalog_exports_only_model_authorized_low_risk_tools_stably(self):
         registry = ToolRegistry()
         registry.register(
@@ -137,7 +210,7 @@ class ModelToolCatalogTests(unittest.TestCase):
             )
         )
 
-        tools = ModelToolCatalog(registry).list()
+        tools = ModelToolCatalog(registry).list(MessageSource.DESKTOP)
 
         self.assertEqual(
             [tool.name for tool in tools],
@@ -163,7 +236,7 @@ class ModelToolCatalogTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(ModelToolCatalog(registry).list(), ())
+        self.assertEqual(ModelToolCatalog(registry).list(MessageSource.DESKTOP), ())
 
     def test_catalog_filters_expected_schema_failures_and_keeps_valid_tools(self):
         registry = ToolRegistry()
@@ -189,7 +262,7 @@ class ModelToolCatalogTests(unittest.TestCase):
         bad_description = registry.require("example.bad-description")
         object.__setattr__(bad_description, "title", "x" * 1001)
 
-        tools = ModelToolCatalog(registry).list()
+        tools = ModelToolCatalog(registry).list(MessageSource.DESKTOP)
 
         self.assertEqual([tool.name for tool in tools], ["example.valid"])
 
@@ -204,7 +277,7 @@ class ModelToolCatalogTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "programming error"):
-            ModelToolCatalog(registry).list()
+            ModelToolCatalog(registry).list(MessageSource.DESKTOP)
 
     def test_catalog_closes_top_level_and_nested_ref_object_schemas(self):
         registry = ToolRegistry()
@@ -216,7 +289,9 @@ class ModelToolCatalogTests(unittest.TestCase):
             )
         )
 
-        parameters = ModelToolCatalog(registry).list()[0].parameters
+        parameters = ModelToolCatalog(registry).list(
+            MessageSource.DESKTOP
+        )[0].parameters
 
         self.assertIs(parameters["additionalProperties"], False)
         self.assertIs(
@@ -236,7 +311,9 @@ class ModelToolCatalogTests(unittest.TestCase):
             )
         )
 
-        parameters = ModelToolCatalog(registry).list()[0].parameters
+        parameters = ModelToolCatalog(registry).list(
+            MessageSource.DESKTOP
+        )[0].parameters
 
         self.assertNotIn("additionalProperties", SHARED_SCHEMA)
         self.assertNotIn(
@@ -259,7 +336,9 @@ class ModelToolCatalogTests(unittest.TestCase):
             )
         )
 
-        parameters = ModelToolCatalog(registry).list()[0].parameters
+        parameters = ModelToolCatalog(registry).list(
+            MessageSource.DESKTOP
+        )[0].parameters
 
         item_reference = {"$ref": "#/$defs/NestedArguments"}
         self.assertEqual(
@@ -295,7 +374,9 @@ class ModelToolCatalogTests(unittest.TestCase):
             )
         )
 
-        parameters = ModelToolCatalog(registry).list()[0].parameters
+        parameters = ModelToolCatalog(registry).list(
+            MessageSource.DESKTOP
+        )[0].parameters
 
         self.assertIs(parameters["additionalProperties"], False)
         self.assertIs(

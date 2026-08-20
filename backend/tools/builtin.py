@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from computer.models import ModelAccess
 from domain.tools import ToolRisk, ToolSource
 from tools.registry import ToolDefinition, ToolRegistry
 from tools.service import ToolExecutionError
@@ -62,6 +63,7 @@ def build_builtin_registry() -> ToolRegistry:
             timeout_seconds=2,
             cancellable=True,
             handler=current_time,
+            model_access=ModelAccess.READ_ONLY,
             allowed_sources=frozenset(
                 {
                     ToolSource.DESKTOP,

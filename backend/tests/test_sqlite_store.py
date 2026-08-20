@@ -17,6 +17,7 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from infrastructure.database_config import DatabaseSettings
+from domain.messages import MessageSource
 from domain.tools import (
     ConfirmationState,
     ToolAuditEvent,
@@ -29,6 +30,7 @@ from domain.tools import (
 )
 from infrastructure.sqlite_store import (
     _MIGRATION_1_STATEMENTS,
+    _MIGRATION_2_STATEMENTS,
     SqliteStore,
 )
 from memory.models import MemoryItem, MessageStatus, ModelCallRecord, StoredMessage
@@ -120,6 +122,7 @@ EXPECTED_COLUMNS = {
         ("error_code", "TEXT", 0, 0),
         ("created_at", "TEXT", 1, 0),
         ("updated_at", "TEXT", 1, 0),
+        ("origin", "TEXT", 1, 0),
     ],
     "tool_confirmations": [
         ("id", "TEXT", 0, 1),
@@ -185,6 +188,56 @@ def create_version_one_database(database_path: Path) -> None:
         )
 
 
+def create_version_two_tool_requests(database_path: Path) -> None:
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        for statement in (*_MIGRATION_1_STATEMENTS, *_MIGRATION_2_STATEMENTS):
+            connection.execute(statement)
+        timestamp = "2026-07-29T00:00:00+00:00"
+        connection.executemany(
+            "INSERT INTO schema_migrations (version, name, applied_at) "
+            "VALUES (?, ?, ?)",
+            (
+                (1, "initial_schema", timestamp),
+                (2, "tool_permissions", timestamp),
+            ),
+        )
+        for source in ("desktop", "qq", "system", "model"):
+            connection.execute(
+                """
+                INSERT INTO tool_requests (
+                    id, correlation_id, source, tool_name, title, risk, state,
+                    arguments_json, impact, cancellable, timeout_seconds,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"legacy-{source}",
+                    f"correlation-{source}",
+                    source,
+                    "example.tool",
+                    "旧工具",
+                    "low",
+                    "succeeded",
+                    "{}",
+                    "旧影响",
+                    1,
+                    1,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+
 def high_risk_records(
     *,
     now: datetime | None = None,
@@ -195,6 +248,7 @@ def high_risk_records(
         request_id="tool-request-1",
         correlation_id="message-1",
         source=ToolSource.DESKTOP,
+        origin=MessageSource.DESKTOP,
         tool_name="computer.open_app",
         title="打开应用",
         risk=ToolRisk.HIGH,
@@ -390,11 +444,11 @@ class SqliteStoreTests(unittest.TestCase):
         self.store = SqliteStore(self.database_path)
         return self.store
 
-    def test_new_database_has_version_two_and_exact_schema(self):
+    def test_new_database_has_version_three_and_exact_schema(self):
         store = self.open_store()
 
         self.assertTrue(self.database_path.exists())
-        self.assertEqual(store.schema_version, 2)
+        self.assertEqual(store.schema_version, 3)
         self.assertEqual(store.table_names(), EXPECTED_TABLES)
 
         with closing(sqlite3.connect(self.database_path)) as connection, connection:
@@ -446,10 +500,14 @@ class SqliteStoreTests(unittest.TestCase):
                 "SELECT version, name FROM schema_migrations"
             ).fetchall()
 
-        self.assertEqual(self.store.schema_version, 2)
+        self.assertEqual(self.store.schema_version, 3)
         self.assertEqual(
             migration_rows,
-            [(1, "initial_schema"), (2, "tool_permissions")],
+            [
+                (1, "initial_schema"),
+                (2, "tool_permissions"),
+                (3, "tool_request_origin"),
+            ],
         )
 
     def test_version_one_database_upgrades_without_data_loss(self):
@@ -457,13 +515,35 @@ class SqliteStoreTests(unittest.TestCase):
 
         store = self.open_store()
 
-        self.assertEqual(store.schema_version, 2)
+        self.assertEqual(store.schema_version, 3)
         with closing(sqlite3.connect(self.database_path)) as connection, connection:
             row = connection.execute(
                 "SELECT source, owner_id FROM conversations WHERE id = ?",
                 ("conversation-before-upgrade",),
             ).fetchone()
         self.assertEqual(row, ("desktop", "local-user"))
+
+    def test_version_two_origin_migration_fails_closed_for_legacy_model(self):
+        create_version_two_tool_requests(self.database_path)
+
+        store = self.open_store()
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            origins = dict(
+                connection.execute(
+                    "SELECT source, origin FROM tool_requests"
+                ).fetchall()
+            )
+        self.assertEqual(
+            origins,
+            {
+                "desktop": "desktop",
+                "qq": "qq",
+                "system": "system",
+                "model": "system",
+            },
+        )
+        self.assertEqual(store.schema_version, 3)
 
     def test_connection_pragmas_are_configured_without_wal(self):
         store = self.open_store()
@@ -486,7 +566,7 @@ class SqliteStoreTests(unittest.TestCase):
         active_mode = store._connection.execute("PRAGMA journal_mode").fetchone()[0]
 
         self.assertEqual(active_mode.lower(), "delete")
-        self.assertEqual(store.schema_version, 2)
+        self.assertEqual(store.schema_version, 3)
 
     def test_tool_confirmation_and_redacted_audit_round_trip_atomically(self):
         store = self.open_store()

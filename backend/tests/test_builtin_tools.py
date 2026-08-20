@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from domain.messages import MessageSource
 from domain.tools import ToolRequest, ToolRequestState, ToolRisk, ToolSource
 from infrastructure.sqlite_store import SqliteStore
 from tools.builtin import (
@@ -14,6 +15,7 @@ from tools.builtin import (
     build_builtin_registry,
     current_time,
 )
+from tools.catalog import ModelToolCallContext
 from tools.service import ToolExecutionService
 
 
@@ -120,6 +122,7 @@ class BuiltinToolTests(unittest.TestCase):
             service = ToolExecutionService(
                 registry=build_builtin_registry(),
                 repository=store,
+                runtime_profile="desktop",
             )
 
             result = asyncio.run(
@@ -129,7 +132,13 @@ class BuiltinToolTests(unittest.TestCase):
                         source=ToolSource.MODEL,
                         tool_name="system.current_time",
                         arguments={"timezone": " UTC "},
-                    )
+                    ),
+                    model_context=ModelToolCallContext(
+                        channel=MessageSource.DESKTOP,
+                        advertised_tool_names=frozenset(
+                            {"system.current_time"}
+                        ),
+                    ),
                 )
             )
             stored = asyncio.run(store.get_request(result.request_id))

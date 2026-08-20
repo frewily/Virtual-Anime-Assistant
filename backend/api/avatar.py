@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_runtime
-from api.ws import connected_count
+from api.ws import DesktopWebSocketHub
 from channels.desktop import client_payload_to_message, response_to_desktop_payload
 from core.runtime import AssistantRuntime
 
@@ -17,10 +17,12 @@ class AvatarActionRequest(BaseModel):
 
 @router.get("/avatar/status")
 def get_avatar_status(
+    request: Request,
     runtime: AssistantRuntime = Depends(get_runtime),
 ):
     del runtime
-    return {"connected": connected_count() > 0, "expression": None}
+    hub: DesktopWebSocketHub = request.app.state.desktop_hub
+    return {"connected": hub.has_connections(), "expression": None}
 
 
 @router.post("/avatar/action")

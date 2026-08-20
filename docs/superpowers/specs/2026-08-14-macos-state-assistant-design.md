@@ -5,6 +5,8 @@
 > 状态：已获用户批准
 >
 > 首版平台：macOS
+>
+> 2026-08-20 修订：状态上报改为受限 SSH stdin relay，完全取消端口转发。
 
 ## 1. 背景
 
@@ -27,7 +29,8 @@ Virtual Anime Assistant（以下简称 VAA）已经具备模型对话、SQLite �
 - 桌面模型可以提出打开应用、打开 HTTPS 网页、播放暂停和音量调整请求。
 - 所有操作必须经过 Live2D 确认卡片的「允许一次」，拒绝或超时不得执行。
 - 云端 QQ 可以查询电脑是否在线及脱敏状态，但不能提出或执行电脑操作。
-- 本机通过受限 SSH 隧道主动上报状态，不公开 8080、6099、3000 或 3001。
+- 本机通过受限 SSH stdin relay 主动上报状态，不使用端口转发，也不公开 8080、
+  6099、3000 或 3001。
 - 使用 Provider、Transport、Registry 和 Channel Policy 边界支持后续增加平台、
   设备、状态源和操作能力。
 - 任一探针、传输或操作失败都不能影响聊天、QQ、Live2D 和其他 Provider。
@@ -73,7 +76,9 @@ StateProvider 集合
     ↓
 DesktopStateService ──→ 本机 computer.current_state ──→ 桌面模型
     │
-    └──→ StateTransport ──受限 SSH 隧道──→ 云端最新快照
+    └──→ StateTransport ──单次 SSH stdin──→ 受限 relay wrapper
+                                              ↓ 回环 HTTP
+                                           云端最新快照
                                               ↓
                                  云端 computer.current_state
                                               ↓
@@ -95,7 +100,7 @@ ActionProvider ──→ 固定参数数组或固定 AppleScript 模板
 - `StateProvider`：采集一个独立状态分区，不知道模型、QQ 或传输细节。
 - `DesktopStateService`：并行调度 Provider、合并安全结果、缓存最新快照并计算过期。
 - `ActionProvider`：实现一个固定操作，不接受原始命令文本。
-- `StateTransport`：发送已过滤快照；首版实现本机内存和 SSH 隧道上报。
+- `StateTransport`：发送已过滤快照；首版实现本机内存和单次 SSH stdin 上报。
 - `CapabilityRegistry`：保存能力名称、平台、风险、参数模型、Provider 和允许渠道。
 - `ChannelPolicy`：根据运行模式、消息渠道、确认客户端状态和能力元数据生成可见目录。
 - `RemoteDeviceStateStore`：云端按设备保存最新安全快照，不保存历史。
@@ -206,25 +211,40 @@ Provider 中，不能泄漏到模型编排器、QQ 渠道或 API 路由。
 
 ### 9.2 QQ 只读状态同步
 
-Mac 使用一把独立的状态上报 SSH 密钥建立到服务器回环接口的本地端口转发。该密钥
-只能转发到服务器 `127.0.0.1:8080`，不能获得 Shell、PTY、Agent Forwarding、X11
-Forwarding 或其他端口访问。
+Mac 使用一把独立的状态上报 SSH 密钥发起短连接，并把一份安全快照写入 SSH stdin。
+该密钥在 `authorized_keys` 中固定绑定一个设备标识和服务器 relay wrapper：
+
+```text
+command="/usr/local/libexec/vaa-state-relay macbook-main",restrict
+```
+
+不启用 `port-forwarding`，客户端也不得使用 `-L`、`-R`、`-D` 或 `-N`。`restrict`
+同时禁止 Shell、PTY、Agent Forwarding、X11 Forwarding 和所有 TCP/StreamLocal 转发。
+每把公钥只对应一个 `deviceId`；增加设备时必须安装另一条独立的受限公钥记录。
 
 上报流程：
 
 1. 本机完成全部采集和隐私过滤。
-2. 隧道客户端使用 `BatchMode=yes`、`IdentitiesOnly=yes` 和
-   `StrictHostKeyChecking=yes`，known hosts 必须预先核对。
-3. 本机通过隧道向云端回环 API 提交版本化状态信封。
-4. API 使用独立的每设备 Bearer Token 鉴权，并校验设备标识、时间窗口、版本和大小。
-5. 云端只替换该设备的最新快照；比当前快照更旧或相同的 `collectedAt` 被拒绝。
-6. 上报成功或失败均不记录状态正文；失败采用有上限的指数退避。
+2. Reporter 使用 `BatchMode=yes`、`IdentitiesOnly=yes`、`StrictHostKeyChecking=yes`
+   和预先核对的 known hosts 发起一次性 SSH 会话，不携带远程命令或转发参数。
+3. Reporter 将不超过 32 KiB 的 JSON 信封写入子进程 stdin，关闭 stdin 后等待有界退出；
+   stdout 和 stderr 均定向到 `DEVNULL`，超时进程必须 terminate/kill/reap。
+4. root-owned relay wrapper 最多读取 32 KiB stdin，解析单个 JSON 对象，并确认信封中的
+   `deviceId` 与强制命令参数完全一致；任何额外字节、非法 JSON 或标识不一致都失败关闭。
+5. wrapper 从服务器本地 `0640 root:vaa-state-relay` 的专用 Token 文件读取 Bearer Token，
+   以固定 URL 和固定超时 POST 到 `127.0.0.1:8080/api/computer/state`。Mac 不保存或接触
+   云端 Bearer Token。
+6. API 再次校验 Token、设备标识、时间窗口、版本和大小。云端只替换该设备的最新快照；
+   比当前快照更旧或相同的 `collectedAt` 被拒绝。
+7. Reporter、wrapper 和 API 均不记录状态正文、Token、密钥路径或底层异常；失败采用有
+   上限的指数退避。
 
 每份快照最大 32 KiB。正常情况下每 15 秒上报一次；超过 45 秒没有新快照时，云端
 工具把设备标记为离线。云端重启后状态为空，等待下一次心跳恢复。
 
-状态 API 继续只监听回环地址。首版不修改 Nginx、网站、博客或防火墙，也不公开任何
-新的管理端口。SSH 密钥和上报 Token 不进入 Git、Web 设置响应、聊天或日志。
+状态 API 继续只监听回环地址。首版不修改 Nginx、网站、博客、防火墙或全局
+`sshd_config`，也不公开任何新的管理端口。SSH 私钥和服务器 Token 不进入 Git、Web
+设置响应、聊天或日志；Mac 只配置 SSH 身份、known hosts、目标和固定设备标识。
 
 ### 9.3 多设备扩展
 
@@ -314,8 +334,9 @@ Forwarding 或其他端口访问。
 上报前，设置页再次说明 QQ 可见范围。关闭任一开关立即停止对应后台任务；关闭远端
 上报后云端快照按 45 秒 TTL 自动离线。
 
-SSH 私钥、known hosts 和设备 Token 只能由本地环境或权限为 `0600` 的秘密文件提供。
-设置 API 只返回“已配置”状态，不返回秘密值。
+SSH 私钥和 known hosts 只能由本地环境或权限为 `0600` 的文件提供。服务器 Token 只
+存在于云端应用秘密配置和 relay 专用 `0640` 文件，不能同步到 Mac。设置 API 只返回
+“已配置”状态，不返回秘密值或路径。
 
 ## 13. 错误语义
 
@@ -334,7 +355,7 @@ SSH 私钥、known hosts 和设备 Token 只能由本地环境或权限为 `0600
 | URL 被策略拒绝 | `url_not_allowed` |
 | 播放器不可用 | `media_player_unavailable` |
 | 操作超时 | `execution_timeout` |
-| SSH 隧道或上报失败 | 本机状态继续工作，按上限退避重试 |
+| SSH relay 或上报失败 | 本机状态继续工作，按上限退避重试 |
 
 错误正文不得包含原始命令输出、窗口标题、URL 查询参数、文件路径、密钥或异常堆栈。
 
@@ -360,7 +381,7 @@ SSH 私钥、known hosts 和设备 Token 只能由本地环境或权限为 `0600
 - 快照版本、大小、设备标识、UTC 时间和 TTL 校验。
 - 最新快照替换、旧快照拒绝、45 秒离线和云端重启空状态。
 - Token 缺失或错误时拒绝上报，不回显凭证。
-- 隧道失败不影响本地状态，退避有上限且可停止。
+- SSH relay 失败不影响本地状态，退避有上限且可停止。
 - 云端契约继续保证管理端口只绑定回环地址。
 
 ### 14.4 工具与渠道测试

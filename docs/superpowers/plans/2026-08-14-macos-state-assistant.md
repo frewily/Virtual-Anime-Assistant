@@ -689,7 +689,7 @@ git commit -m "ops: add restricted computer state relay"
 - 修改：`backend/settings/static/index.html`
 - 修改：`backend/settings/static/settings.js`
 - 修改：`backend/tests/test_settings_api.py`
-- 修改：`desktop-app/tests/settings-page-contract.test.js`
+- 修改：`desktop-app/tests/settings-ui-contract.test.js`
 
 - [ ] **步骤 1：编写失败的设置契约**
 
@@ -699,7 +699,7 @@ git commit -m "ops: add restricted computer state relay"
 
 ```bash
 python3 -m unittest backend.tests.test_settings_api -v
-node --test desktop-app/tests/settings-page-contract.test.js
+node --test desktop-app/tests/settings-ui-contract.test.js
 ```
 
 预期：FAIL，新设置节不存在。
@@ -717,10 +717,10 @@ ASSISTANT_COMPUTER_REMOTE_REPORT_ENABLED
 `ComputerRuntimeSettings` 还从环境读取并严格校验 `ASSISTANT_COMPUTER_DEVICE_ID`、
 `ASSISTANT_COMPUTER_RELAY_TARGET`、`ASSISTANT_COMPUTER_RELAY_PORT`、
 `ASSISTANT_COMPUTER_RELAY_IDENTITY_FILE`、
-`ASSISTANT_COMPUTER_RELAY_KNOWN_HOSTS_FILE`、
-`ASSISTANT_COMPUTER_RELAY_LOCAL_PORT` 和 `ASSISTANT_COMPUTER_STATE_REPORT_TOKEN`。
-这些值不写入普通设置 JSON；Token 只来自 Keychain 或环境，路径和目标只在响应中显示
-“已配置”，不返回原值。
+`ASSISTANT_COMPUTER_RELAY_KNOWN_HOSTS_FILE`。这些值不写入普通设置 JSON；SSH 路径和
+目标只在响应中显示“已配置”，不返回原值。Mac 端不存在 relay 本地端口或 Bearer
+Token 配置。`ASSISTANT_COMPUTER_STATE_REPORT_TOKEN` 只属于云端接收 API 与服务器
+wrapper，不得进入桌面设置模型、响应或 Keychain。
 
 设置页必须说明采集字段、明确不采集的内容、macOS 辅助功能权限和 QQ 可见范围。所有状态使用 `textContent`，不展示 SSH 路径或 Token 内容。
 
@@ -740,7 +740,7 @@ git add -- backend/settings/models.py backend/settings/resolver.py \
   backend/settings/validation.py backend/settings/service.py \
   backend/settings/static/index.html backend/settings/static/settings.js \
   backend/tests/test_settings_api.py \
-  desktop-app/tests/settings-page-contract.test.js
+  desktop-app/tests/settings-ui-contract.test.js
 git commit -m "feat: configure computer capabilities safely"
 ```
 

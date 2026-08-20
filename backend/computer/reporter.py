@@ -1,14 +1,13 @@
-"""Report current computer state through a strictly configured SSH tunnel."""
+"""Report current computer state through one-shot restricted SSH stdin."""
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
-
-import httpx
+from typing import Protocol
 
 from computer.models import ComputerSnapshot
 
@@ -16,6 +15,8 @@ from computer.models import ComputerSnapshot
 _LOGGER = logging.getLogger("computer.reporter")
 _HEARTBEAT_SECONDS = 15
 _MAX_BACKOFF_SECONDS = 60
+_MAX_SNAPSHOT_BYTES = 32 * 1024
+_DEFAULT_PROCESS_TIMEOUT = 10.0
 _DEFAULT_PROCESS_SHUTDOWN_TIMEOUT = 5.0
 _SSH_TARGET_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*@"
@@ -30,6 +31,11 @@ class ReporterError(RuntimeError):
 class _Process(Protocol):
     returncode: int | None
 
+    async def communicate(
+        self,
+        input: bytes | None = None,
+    ) -> tuple[bytes | None, bytes | None]: ...
+
     def terminate(self) -> None: ...
 
     def kill(self) -> None: ...
@@ -37,71 +43,62 @@ class _Process(Protocol):
     async def wait(self) -> int: ...
 
 
-class _HttpClient(Protocol):
-    async def post(self, url: str, **kwargs: Any) -> Any: ...
-
-    async def aclose(self) -> None: ...
-
-
 ProcessFactory = Callable[..., Awaitable[_Process]]
 SnapshotReader = Callable[[], ComputerSnapshot | None]
 Sleep = Callable[[float], Awaitable[None]]
 
 
+def _serialize_snapshot(snapshot: ComputerSnapshot) -> bytes:
+    payload = json.dumps(
+        snapshot.model_dump(mode="json", by_alias=True),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > _MAX_SNAPSHOT_BYTES:
+        raise ReporterError("computer state report failed")
+    return payload
+
+
 class ComputerStateReporter:
-    """Own an SSH forwarding process and publish each new snapshot once."""
+    """Send each new safe snapshot through one bounded SSH session."""
 
     def __init__(
         self,
         *,
         latest_snapshot: SnapshotReader,
-        token: str,
         ssh_target: str,
         ssh_port: int,
         identity_file: Path | str,
         known_hosts_file: Path | str,
-        local_port: int,
-        report_path: str = "/api/computer/state",
         process_factory: ProcessFactory = asyncio.create_subprocess_exec,
-        http_client: _HttpClient | None = None,
         sleep: Sleep = asyncio.sleep,
+        process_timeout: float = _DEFAULT_PROCESS_TIMEOUT,
         process_shutdown_timeout: float = _DEFAULT_PROCESS_SHUTDOWN_TIMEOUT,
     ) -> None:
         if not callable(latest_snapshot):
             raise TypeError("latest snapshot reader is invalid")
-        if not token:
-            raise ValueError("computer state report token is required")
         if _SSH_TARGET_PATTERN.fullmatch(ssh_target) is None:
             raise ValueError("computer state SSH target is invalid")
         if not 1 <= ssh_port <= 65535:
             raise ValueError("computer state SSH port is invalid")
-        if not 1 <= local_port <= 65535:
-            raise ValueError("computer state local port is invalid")
-        if not report_path.startswith("/") or report_path.startswith("//"):
-            raise ValueError("computer state report path is invalid")
+        if process_timeout <= 0:
+            raise ValueError("computer state process timeout is invalid")
         if process_shutdown_timeout <= 0:
             raise ValueError("computer state process shutdown timeout is invalid")
 
         self._latest_snapshot = latest_snapshot
-        self._token = token
         self._ssh_target = ssh_target
         self._ssh_port = ssh_port
         self._identity_file = Path(identity_file)
         self._known_hosts_file = Path(known_hosts_file)
-        self._local_port = local_port
-        self._report_url = f"http://127.0.0.1:{local_port}{report_path}"
         self._process_factory = process_factory
-        self._owns_http_client = http_client is None
-        self._http_client = (
-            httpx.AsyncClient(trust_env=False, timeout=10.0)
-            if http_client is None
-            else http_client
-        )
         self._sleep = sleep
+        self._process_timeout = process_timeout
         self._process_shutdown_timeout = process_shutdown_timeout
         self._process: _Process | None = None
         self._task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
+        self._report_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._last_collected_at: datetime | None = None
         self._stop_requested = False
@@ -110,11 +107,11 @@ class ComputerStateReporter:
 
     @property
     def ssh_argv(self) -> tuple[str, ...]:
-        """Return the fixed OpenSSH invocation without any bearer secret."""
+        """Return the fixed OpenSSH invocation without forwarding."""
 
         return (
             "/usr/bin/ssh",
-            "-N",
+            "-T",
             "-F",
             "none",
             "-o",
@@ -124,11 +121,7 @@ class ComputerStateReporter:
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
-            "ExitOnForwardFailure=yes",
-            "-o",
-            "ServerAliveInterval=30",
-            "-o",
-            "ServerAliveCountMax=3",
+            "ClearAllForwardings=yes",
             "-o",
             "ProxyCommand=none",
             "-o",
@@ -136,74 +129,105 @@ class ComputerStateReporter:
             "-o",
             "PermitLocalCommand=no",
             "-o",
+            "RequestTTY=no",
+            "-o",
             f"UserKnownHostsFile={self._known_hosts_file}",
             "-i",
             str(self._identity_file),
             "-p",
             str(self._ssh_port),
-            "-L",
-            f"127.0.0.1:{self._local_port}:127.0.0.1:8080",
             self._ssh_target,
         )
 
-    async def open_tunnel(self) -> None:
-        """Start the tunnel if it is not already alive."""
+    async def report_once(self) -> bool:
+        """Send the latest not-yet-acknowledged snapshot, if one exists."""
 
-        async with self._lifecycle_lock:
+        async with self._report_lock:
             if self._closing or self._closed:
                 raise ReporterError("computer state reporter is closed")
-            if self._process is not None and self._process.returncode is None:
-                return
-            if self._process is not None:
-                if not await self._bounded_wait(self._process):
-                    _LOGGER.warning("computer state SSH tunnel reap failed")
-                    raise ReporterError("computer state SSH tunnel failed")
-                self._process = None
             try:
-                self._process = await self._process_factory(
-                    *self.ssh_argv,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
+                snapshot = self._latest_snapshot()
+                if snapshot is None:
+                    return False
+                if (
+                    self._last_collected_at is not None
+                    and snapshot.collected_at <= self._last_collected_at
+                ):
+                    return False
+                payload = _serialize_snapshot(snapshot)
+                await self._send_payload(payload)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                _LOGGER.warning("computer state SSH tunnel failed")
-                raise ReporterError("computer state SSH tunnel failed") from None
+                _LOGGER.warning("computer state report failed")
+                raise ReporterError("computer state report failed") from None
 
-    async def report_once(self) -> bool:
-        """Publish the latest not-yet-acknowledged snapshot, if one exists."""
+            self._last_collected_at = snapshot.collected_at
+            return True
 
-        if self._closing or self._closed:
-            raise ReporterError("computer state reporter is closed")
+    async def _send_payload(self, payload: bytes) -> None:
+        process: _Process | None = None
         try:
-            snapshot = self._latest_snapshot()
-            if snapshot is None:
-                return False
-            if (
-                self._last_collected_at is not None
-                and snapshot.collected_at <= self._last_collected_at
-            ):
-                return False
-            collected_at = snapshot.collected_at
-            response = await self._http_client.post(
-                self._report_url,
-                json=snapshot.model_dump(mode="json", by_alias=True),
-                headers={"Authorization": f"Bearer {self._token}"},
+            async with self._lifecycle_lock:
+                if self._closing or self._closed:
+                    raise ReporterError("computer state reporter is closed")
+                process = await self._process_factory(
+                    *self.ssh_argv,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                self._process = process
+
+            await asyncio.wait_for(
+                process.communicate(payload),
+                timeout=self._process_timeout,
             )
-            response.raise_for_status()
+            if process.returncode != 0:
+                raise ReporterError("computer state report failed")
         except asyncio.CancelledError:
+            if process is not None:
+                await self._finish_cleanup(process, force=True)
             raise
         except Exception:
-            _LOGGER.warning("computer state report failed")
-            raise ReporterError("computer state report failed") from None
+            if process is not None:
+                await self._finish_cleanup(process, force=True)
+            raise
+        else:
+            await self._clear_reaped_process(process)
 
-        self._last_collected_at = collected_at
-        return True
+    async def _finish_cleanup(self, process: _Process, *, force: bool) -> None:
+        cleanup = asyncio.create_task(
+            self._cleanup_process(process, force=force),
+            name="computer-state-ssh-cleanup",
+        )
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _cleanup_process(self, process: _Process, *, force: bool) -> None:
+        async with self._lifecycle_lock:
+            if self._process is not process:
+                return
+            reaped = True
+            if force or process.returncode is None:
+                reaped = await self._shutdown_process(process)
+            if reaped and self._process is process:
+                self._process = None
+
+    async def _clear_reaped_process(self, process: _Process) -> None:
+        async with self._lifecycle_lock:
+            if self._process is process:
+                self._process = None
 
     async def run(self) -> None:
-        """Maintain the tunnel and report with heartbeat/backoff scheduling."""
+        """Report with heartbeat and bounded exponential backoff."""
 
         if self._closing or self._closed:
             raise ReporterError("computer state reporter is closed")
@@ -211,7 +235,6 @@ class ComputerStateReporter:
         failure_count = 0
         while not self._stop_requested:
             try:
-                await self.open_tunnel()
                 await self.report_once()
             except ReporterError:
                 failure_count += 1
@@ -244,7 +267,7 @@ class ComputerStateReporter:
         return self._task is not None and not self._task.done()
 
     async def aclose(self) -> None:
-        """Stop reporting, terminate and reap SSH, then close HTTP."""
+        """Stop reporting and finish all active SSH cleanup."""
 
         if self._close_task is None:
             self._closing = True
@@ -266,11 +289,7 @@ class ComputerStateReporter:
     async def _close_impl(self) -> None:
         self._stop_requested = True
         task = self._task
-        if (
-            task is not None
-            and task is not asyncio.current_task()
-            and not task.done()
-        ):
+        if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
         if task is not None and task is not asyncio.current_task():
             try:
@@ -281,38 +300,28 @@ class ComputerStateReporter:
                 _LOGGER.warning("computer state reporter task close failed")
         self._task = None
 
-        try:
-            async with self._lifecycle_lock:
-                process = self._process
-                if process is not None and await self._shutdown_process(process):
-                    if self._process is process:
-                        self._process = None
-        finally:
-            if self._owns_http_client:
-                try:
-                    await self._http_client.aclose()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    _LOGGER.warning("computer state reporter HTTP close failed")
-            self._closed = True
+        async with self._lifecycle_lock:
+            process = self._process
+        if process is not None:
+            await self._cleanup_process(process, force=True)
+        self._closed = True
 
     async def _shutdown_process(self, process: _Process) -> bool:
         if process.returncode is None:
             try:
                 process.terminate()
             except Exception:
-                _LOGGER.warning("computer state SSH tunnel close failed")
+                _LOGGER.warning("computer state SSH close failed")
         if await self._bounded_wait(process):
             return True
 
         try:
             process.kill()
         except Exception:
-            _LOGGER.warning("computer state SSH tunnel kill failed")
+            _LOGGER.warning("computer state SSH kill failed")
         if await self._bounded_wait(process):
             return True
-        _LOGGER.warning("computer state SSH tunnel reap failed")
+        _LOGGER.warning("computer state SSH reap failed")
         return False
 
     async def _bounded_wait(self, process: _Process) -> bool:

@@ -24,6 +24,12 @@ _SSH_TARGET_PATTERN = re.compile(
 )
 
 
+def _quote_ssh_config_value(value: Path | str) -> str:
+    text = str(value)
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 class ReporterError(RuntimeError):
     """A stable, deliberately redacted reporter failure."""
 
@@ -131,7 +137,8 @@ class ComputerStateReporter:
             "-o",
             "RequestTTY=no",
             "-o",
-            f"UserKnownHostsFile={self._known_hosts_file}",
+            "UserKnownHostsFile="
+            f"{_quote_ssh_config_value(self._known_hosts_file)}",
             "-i",
             str(self._identity_file),
             "-p",

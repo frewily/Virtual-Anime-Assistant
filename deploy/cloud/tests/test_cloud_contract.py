@@ -12,6 +12,7 @@ COMPOSE_PATH = ROOT / "deploy/cloud/docker-compose.yml"
 GITIGNORE = ROOT / ".gitignore"
 DEPLOY_WORKFLOW = ROOT / ".github/workflows/deploy-cloud.yml"
 CLOUD_RUNBOOK = ROOT / "docs/deployment/cloud-qq-assistant.md"
+README = ROOT / "README.md"
 MONITOR_INSTALLER = (
     ROOT / "deploy/cloud/scripts/install-cloud-monitor.sh"
 )
@@ -33,6 +34,30 @@ class CloudDeploymentContractTests(unittest.TestCase):
 
         self.assertIn("USER vaa", dockerfile)
         self.assertIn('CMD ["python", "main.py"]', dockerfile)
+
+    def test_computer_state_operations_document_all_safety_boundaries(self):
+        documentation = "\n".join(
+            (
+                README.read_text(encoding="utf-8"),
+                CLOUD_RUNBOOK.read_text(encoding="utf-8"),
+            )
+        )
+
+        for required in (
+            "不保存状态历史",
+            "公开、半敏感、敏感、高度敏感",
+            "QQ 只能查询",
+            "45 秒",
+            "专用 SSH 密钥",
+            "SSH stdin",
+            "逐次确认",
+            "任意 Shell",
+            "停止上报",
+            "撤销专用公钥",
+            "实际创建或安装持久 SSH 凭证前必须重新确认",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, documentation)
 
     def test_backend_image_provides_writable_audio_directory(self):
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")

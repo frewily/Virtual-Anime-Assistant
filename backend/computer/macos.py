@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+from types import MappingProxyType
 import unicodedata
 from dataclasses import dataclass
 from typing import Protocol
@@ -32,21 +33,24 @@ try
 end try
 return appName & (character id 31) & bundleId & (character id 31) & windowTitle & (character id 31) & fullScreen
 end tell"""
-_MEDIA_SCRIPT = """tell application "System Events"
-if exists process "Music" then
-  tell application "Music"
-    if player state is playing then return "Music" & (character id 31) & "playing" & (character id 31) & name of current track & (character id 31) & artist of current track
-    return "Music" & (character id 31) & "paused" & (character id 31) & "" & (character id 31) & ""
-  end tell
-end if
-if exists process "Spotify" then
-  tell application "Spotify"
-    if player state is playing then return "Spotify" & (character id 31) & "playing" & (character id 31) & name of current track & (character id 31) & artist of current track
-    return "Spotify" & (character id 31) & "paused" & (character id 31) & "" & (character id 31) & ""
-  end tell
-end if
-return "" & (character id 31) & "unavailable" & (character id 31) & "" & (character id 31) & ""
+_MEDIA_PLAYER_SCRIPT = """tell application "System Events"
+set appNames to name of every application process
+if appNames contains "Music" then return "Music"
+if appNames contains "Spotify" then return "Spotify"
+return ""
 end tell"""
+_MEDIA_STATE_SCRIPTS = MappingProxyType(
+    {
+        "Music": """tell application "Music"
+if player state is playing then return "Music" & (character id 31) & "playing" & (character id 31) & name of current track & (character id 31) & artist of current track
+return "Music" & (character id 31) & "paused" & (character id 31) & "" & (character id 31) & ""
+end tell""",
+        "Spotify": """tell application "Spotify"
+if player state is playing then return "Spotify" & (character id 31) & "playing" & (character id 31) & name of current track & (character id 31) & artist of current track
+return "Spotify" & (character id 31) & "paused" & (character id 31) & "" & (character id 31) & ""
+end tell""",
+    }
+)
 _VOLUME_SCRIPT = """set settingsValue to get volume settings
 return (output volume of settingsValue as text) & (character id 31) & (output muted of settingsValue as text)"""
 _TOGGLE_MEDIA_SCRIPTS = {
@@ -373,7 +377,13 @@ class MacOSPowerProvider:
 class MacOSPresenceProvider(_CommandProvider):
     capability = "system.presence"
     command = ("/usr/sbin/ioreg", "-c", "IOHIDSystem", "-d", "4")
-    lock_command = ("/usr/sbin/ioreg", "-n", "Root", "-d", "1")
+    lock_command = (
+        "/usr/sbin/ioreg",
+        "-k",
+        "CGSSessionScreenIsLocked",
+        "-d",
+        "1",
+    )
 
     async def collect(self) -> ProviderResult:
         try:
@@ -440,7 +450,37 @@ class MacOSNetworkProvider(_CommandProvider):
 
 class MacOSMediaProvider(_CommandProvider):
     capability = "media.playback"
-    command = ("/usr/bin/osascript", "-e", _MEDIA_SCRIPT)
+    command = ("/usr/bin/osascript", "-e", _MEDIA_PLAYER_SCRIPT)
+    player_commands = MappingProxyType(
+        {
+            player: ("/usr/bin/osascript", "-e", script)
+            for player, script in _MEDIA_STATE_SCRIPTS.items()
+        }
+    )
+
+    async def collect(self) -> ProviderResult:
+        try:
+            detected = await self.runner.run(self.command, timeout=3)
+            if detected.returncode != 0:
+                raise ValueError("media detection failed")
+            player = detected.stdout.strip()
+            if not player:
+                state = {"status": "unavailable"}
+            else:
+                command = self.player_commands.get(player)
+                if command is None:
+                    raise ValueError("media player is invalid")
+                result = await self.runner.run(command, timeout=3)
+                if result.returncode != 0:
+                    raise ValueError("media probe failed")
+                state = self.parse(result.stdout)
+        except TimeoutError:
+            state = _unavailable("state_probe_timeout")
+        except (TypeError, ValueError, IndexError):
+            state = _unavailable()
+        except Exception:
+            state = _unavailable()
+        return ProviderResult(capability=self.capability, state=state)
 
     def parse(self, output: str) -> dict:
         player, status, title, artist = output.strip().split(_SEPARATOR, 3)

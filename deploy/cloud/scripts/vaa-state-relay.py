@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """Forward one bounded, device-bound snapshot to the loopback VAA API."""
 
-from __future__ import annotations
-
 import http.client
 import json
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import Any, BinaryIO, Callable, Mapping, Optional, Sequence
 
 
 MAX_SNAPSHOT_BYTES = 32 * 1024
@@ -19,28 +16,7 @@ TOKEN_PATH = Path("/etc/virtual-anime-assistant/state-relay-token")
 _DEVICE_ID_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 
 
-class _Response(Protocol):
-    status: int
-
-    def read(self, size: int = -1) -> bytes: ...
-
-
-class _Connection(Protocol):
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        body: bytes,
-        headers: Mapping[str, str],
-    ) -> None: ...
-
-    def getresponse(self) -> _Response: ...
-
-    def close(self) -> None: ...
-
-
-ConnectionFactory = Callable[..., _Connection]
+ConnectionFactory = Callable[..., Any]
 
 
 def _read_valid_token(token_path: Path) -> str:
@@ -89,7 +65,7 @@ def relay(
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return 2
 
-    connection: _Connection | None = None
+    connection = None
     try:
         connection = connection_factory("127.0.0.1", 8080, timeout=5)
         connection.request(
@@ -115,7 +91,7 @@ def relay(
                 pass
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = sys.argv if argv is None else argv
     if len(arguments) != 2:
         return 2

@@ -147,7 +147,7 @@ class ComputerReporterTests(unittest.TestCase):
                             "-o",
                             "RequestTTY=no",
                             "-o",
-                            "UserKnownHostsFile=/private/known-hosts-secret",
+                            'UserKnownHostsFile="/private/known-hosts-secret"',
                             "-i",
                             "/private/identity-secret",
                             "-p",
@@ -170,6 +170,19 @@ class ComputerReporterTests(unittest.TestCase):
             )
 
         asyncio.run(exercise())
+
+    def test_quotes_known_hosts_paths_for_openssh_option_parsing(self):
+        reporter, _ = self.make_reporter(
+            known_hosts_file=Path(
+                "/Users/example/Library/Application Support/Assistant/known_hosts"
+            )
+        )
+
+        self.assertIn(
+            'UserKnownHostsFile="/Users/example/Library/Application Support/'
+            'Assistant/known_hosts"',
+            reporter.ssh_argv,
+        )
 
     def test_does_not_repeat_same_or_older_snapshot(self):
         async def exercise():

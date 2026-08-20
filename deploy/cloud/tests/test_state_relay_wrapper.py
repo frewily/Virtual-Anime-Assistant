@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import importlib.util
 import io
@@ -73,6 +74,15 @@ class StateRelayWrapperTests(unittest.TestCase):
         path = Path(directory) / "relay-token"
         path.write_text(token + "\n", encoding="ascii")
         return path
+
+    def test_wrapper_keeps_alinux_system_python_compatibility(self):
+        source = WRAPPER_PATH.read_text(encoding="utf-8")
+
+        ast.parse(source, filename=str(WRAPPER_PATH), feature_version=(3, 6))
+        self.assertNotIn("from __future__ import annotations", source)
+        self.assertNotIn("Protocol", source)
+        self.assertNotIn("list[str]", source)
+        self.assertNotIn(" | None", source)
 
     def test_valid_payload_posts_exact_bytes_to_fixed_loopback_api(self):
         with tempfile.TemporaryDirectory() as directory:

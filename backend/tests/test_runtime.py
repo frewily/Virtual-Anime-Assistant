@@ -31,7 +31,11 @@ from llm.demo import DemoLanguageModelGateway
 from llm.openai_compatible import OpenAICompatibleGateway
 from settings.file_store import SaveJournal, SettingsFileStore
 from settings.paths import SettingsPaths
-from settings.resolver import RuntimeSettings, TTSRuntimeSettings
+from settings.resolver import (
+    ComputerRuntimeSettings,
+    RuntimeSettings,
+    TTSRuntimeSettings,
+)
 from settings.service import SettingsService, SettingsServiceError
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolDefinition, ToolRegistry
@@ -94,6 +98,7 @@ class RuntimeTests(unittest.TestCase):
         llm: LLMSettings | None = None,
         qq: OneBotSettings | None = None,
         default_voice: str = "character_002",
+        computer: ComputerRuntimeSettings | None = None,
     ) -> RuntimeSettings:
         return RuntimeSettings(
             llm=llm or llm_settings(enabled=False),
@@ -103,6 +108,7 @@ class RuntimeTests(unittest.TestCase):
                 default_voice_id=default_voice,
                 audio_max_age_seconds=3600,
             ),
+            computer=computer or ComputerRuntimeSettings(),
         )
 
     def test_runtime_builds_components_from_unified_settings(self):
@@ -317,6 +323,8 @@ class RuntimeTests(unittest.TestCase):
                     database_path=path,
                 ),
                 computer_platform="macos",
+                computer_state_enabled=True,
+                computer_actions_enabled=True,
                 confirmation_client_online=lambda: True,
                 deployment_settings=DeploymentSettings(
                     profile="desktop",
@@ -352,6 +360,56 @@ class RuntimeTests(unittest.TestCase):
                 {name for name, _ in runtime._owned_resources},
             )
             asyncio.run(runtime.aclose())
+
+    def test_runtime_settings_gate_state_actions_and_remote_reporter(self):
+        state_service = Mock()
+        state_service.start.return_value = True
+        state_service.aclose = AsyncMock()
+        reporter = Mock()
+        reporter.start.return_value = True
+        reporter.aclose = AsyncMock()
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            runtime_settings=self.runtime_settings_bundle(
+                computer=ComputerRuntimeSettings(
+                    state_enabled=True,
+                    actions_enabled=True,
+                    remote_report_enabled=True,
+                    device_id="macbook-main",
+                    relay_target="relay@cloud.example",
+                    relay_port=2222,
+                    relay_identity_file=Path("/private/identity"),
+                    relay_known_hosts_file=Path("/private/known-hosts"),
+                )
+            ),
+            computer_state_service=state_service,
+            computer_state_reporter=reporter,
+            computer_platform="macos",
+        )
+
+        names = {item.name for item in runtime.tool_registry.list()}
+        self.assertIn("computer.current_state", names)
+        self.assertIn("computer.open_application", names)
+        self.assertTrue(runtime.start_computer_state(profile="desktop"))
+        state_service.start.assert_called_once_with()
+        reporter.start.assert_called_once_with()
+        asyncio.run(runtime.aclose())
+        reporter.aclose.assert_awaited_once_with()
+        state_service.aclose.assert_awaited_once_with()
+
+    def test_disabled_computer_settings_register_no_local_tools(self):
+        runtime = AssistantRuntime(
+            application=Mock(spec=AssistantApplication),
+            runtime_settings=self.runtime_settings_bundle(),
+            computer_platform="macos",
+        )
+
+        names = {item.name for item in runtime.tool_registry.list()}
+        self.assertNotIn("computer.current_state", names)
+        self.assertNotIn("computer.open_application", names)
+        self.assertIsNone(runtime.computer_state_service)
+        self.assertIsNone(runtime.computer_state_reporter)
+        asyncio.run(runtime.aclose())
 
     def test_runtime_enables_model_tools_only_when_configured(self):
         with tempfile.TemporaryDirectory() as directory:

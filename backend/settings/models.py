@@ -124,9 +124,16 @@ class TTSSettings(PersistedModel):
     audio_max_age_seconds: int = 86400
 
 
+class ComputerSettings(PersistedModel):
+    state_enabled: bool = False
+    actions_enabled: bool = False
+    remote_report_enabled: bool = False
+
+
 class PersistedSettings(PersistedModel):
     schema_version: Literal[1] = 1
     auth: AuthRecord | None = None
     llm: LLMSettings = Field(default_factory=LLMSettings)
     qq: QQSettings = Field(default_factory=QQSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
+    computer: ComputerSettings = Field(default_factory=ComputerSettings)

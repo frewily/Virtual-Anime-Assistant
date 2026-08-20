@@ -400,6 +400,7 @@
     state.readOnlyPaths.clear();
     const fields = snapshot.presentation.fields && typeof snapshot.presentation.fields === 'object'
       ? snapshot.presentation.fields : {};
+    updateComputerSection(fields);
 
     for (const control of controls()) {
       const presentation = fields[control.dataset.path];
@@ -449,6 +450,29 @@
     state.dirty = preservedFields.size > 0 || preservedSecrets.size > 0;
     updateDirtyNotice();
     updateRestartNotice();
+  }
+
+  function updateComputerSection(fields) {
+    const available = Boolean(fields['computer.stateEnabled']);
+    byId('tab-computer').hidden = !available;
+    if (!available) {
+      byId('panel-computer').hidden = true;
+      return;
+    }
+    const suffixes = [
+      'deviceIdConfigured',
+      'relayTargetConfigured',
+      'relayPortConfigured',
+      'relayIdentityFileConfigured',
+      'relayKnownHostsFileConfigured'
+    ];
+    const configured = suffixes.filter((suffix) => {
+      const field = fields[`computer.${suffix}`];
+      return field && field.value === '已配置';
+    }).length;
+    byId('computer-relay-status').textContent = configured === suffixes.length
+      ? '安全中继：已配置'
+      : `安全中继：未完整配置（${configured}/${suffixes.length}）`;
   }
 
   function applyPresentation(path, presentation) {
@@ -662,6 +686,11 @@
         gptSovitsUrl: readControl('tts.gptSovitsUrl'),
         defaultVoiceId: readControl('tts.defaultVoiceId'),
         audioMaxAgeSeconds: readControl('tts.audioMaxAgeSeconds')
+      },
+      computer: {
+        stateEnabled: readControl('computer.stateEnabled'),
+        actionsEnabled: readControl('computer.actionsEnabled'),
+        remoteReportEnabled: readControl('computer.remoteReportEnabled')
       }
     };
   }
@@ -993,7 +1022,7 @@
       const nextKey = orientation === 'horizontal' ? 'ArrowRight' : 'ArrowDown';
       if (![previousKey, nextKey, 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
-      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]')).filter((item) => !item.hidden);
       let index = tabs.indexOf(tab);
       if (event.key === 'Home') index = 0;
       else if (event.key === 'End') index = tabs.length - 1;

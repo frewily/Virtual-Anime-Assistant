@@ -34,6 +34,7 @@ from settings.auth import (
 )
 from settings.file_store import SettingsFileError, SettingsFileStore
 from settings.models import (
+    ComputerSettings,
     LLMSettings,
     PersistedSettings,
     QQSettings,
@@ -55,6 +56,7 @@ from settings.transactions import (
     SettingsTransactionError,
 )
 from settings.validation import (
+    ComputerSettingsDraft,
     ConnectionTestCode,
     ConnectionTestResult,
     LLMSettingsDraft,
@@ -182,6 +184,12 @@ class ResponseTTSSettingsDraft(_ResponseModel):
     audio_max_age_seconds: int
 
 
+class ResponseComputerSettingsDraft(_ResponseModel):
+    state_enabled: bool
+    actions_enabled: bool
+    remote_report_enabled: bool
+
+
 class SettingsResponseDraft(_ResponseModel):
     revision: str = Field(
         min_length=64,
@@ -191,6 +199,7 @@ class SettingsResponseDraft(_ResponseModel):
     llm: ResponseLLMSettingsDraft
     qq: ResponseQQSettingsDraft
     tts: ResponseTTSSettingsDraft
+    computer: ResponseComputerSettingsDraft
 
 
 class SettingsConfigSnapshot(_ResponseModel):
@@ -363,6 +372,9 @@ _ENVIRONMENT_FIELD_PATHS = {
     "tts.gptSovitsUrl": ("tts", "gpt_sovits_url"),
     "tts.defaultVoiceId": ("tts", "default_voice_id"),
     "tts.audioMaxAgeSeconds": ("tts", "audio_max_age_seconds"),
+    "computer.stateEnabled": ("computer", "state_enabled"),
+    "computer.actionsEnabled": ("computer", "actions_enabled"),
+    "computer.remoteReportEnabled": ("computer", "remote_report_enabled"),
 }
 _SECRET_DRAFT_PATHS = {
     "llm.apiKey": ("llm", "api_key"),
@@ -388,6 +400,9 @@ _ENVIRONMENT_VARIABLES_BY_PATH = {
     "tts.gptSovitsUrl": "ASSISTANT_GPT_SOVITS_URL",
     "tts.defaultVoiceId": "ASSISTANT_TTS_DEFAULT_VOICE_ID",
     "tts.audioMaxAgeSeconds": "ASSISTANT_AUDIO_MAX_AGE_SECONDS",
+    "computer.stateEnabled": "ASSISTANT_COMPUTER_STATE_ENABLED",
+    "computer.actionsEnabled": "ASSISTANT_COMPUTER_ACTIONS_ENABLED",
+    "computer.remoteReportEnabled": "ASSISTANT_COMPUTER_REMOTE_REPORT_ENABLED",
 }
 
 
@@ -763,6 +778,17 @@ class SettingsService:
             self._existing_secrets_for_validation(snapshot, current),
         )
         proposed = self._proposed_settings(current, validated.draft)
+        if validated.draft.computer.remote_report_enabled:
+            try:
+                self._resolver.resolve_computer(proposed, self._environ)
+            except Exception:
+                raise SettingsValidationError(
+                    {
+                        "computer.remoteReportEnabled": (
+                            "启用前必须先完整配置安全中继"
+                        )
+                    }
+                ) from None
         replacements = self._replacement_values(validated)
         transaction_failed = False
         final_settings: PersistedSettings | None = None
@@ -819,6 +845,11 @@ class SettingsService:
                 gpt_sovits_url=persisted.tts.gpt_sovits_url,
                 default_voice_id=persisted.tts.default_voice_id,
                 audio_max_age_seconds=persisted.tts.audio_max_age_seconds,
+            ),
+            computer=ResponseComputerSettingsDraft(
+                state_enabled=persisted.computer.state_enabled,
+                actions_enabled=persisted.computer.actions_enabled,
+                remote_report_enabled=persisted.computer.remote_report_enabled,
             ),
         )
 
@@ -880,6 +911,11 @@ class SettingsService:
                 gpt_sovits_url=persisted.tts.gpt_sovits_url,
                 default_voice_id=persisted.tts.default_voice_id,
                 audio_max_age_seconds=persisted.tts.audio_max_age_seconds,
+            ),
+            computer=ComputerSettingsDraft(
+                state_enabled=persisted.computer.state_enabled,
+                actions_enabled=persisted.computer.actions_enabled,
+                remote_report_enabled=persisted.computer.remote_report_enabled,
             ),
         )
 
@@ -1037,6 +1073,11 @@ class SettingsService:
                 gpt_sovits_url=validated.tts.gpt_sovits_url,
                 default_voice_id=validated.tts.default_voice_id,
                 audio_max_age_seconds=validated.tts.audio_max_age_seconds,
+            ),
+            computer=ComputerSettings(
+                state_enabled=validated.computer.state_enabled,
+                actions_enabled=validated.computer.actions_enabled,
+                remote_report_enabled=validated.computer.remote_report_enabled,
             ),
         )
 

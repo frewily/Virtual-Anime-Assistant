@@ -70,7 +70,140 @@ def draft_payload() -> dict[str, object]:
             "defaultVoiceId": "character_001",
             "audioMaxAgeSeconds": 86400,
         },
+        "computer": {
+            "stateEnabled": False,
+            "actionsEnabled": False,
+            "remoteReportEnabled": False,
+        },
     }
+
+
+class ComputerSettingsContractTests(unittest.TestCase):
+    @staticmethod
+    def _catalog():
+        return VoiceCatalog(
+            voices=(
+                {
+                    "id": "character_001",
+                    "name": "默认音色",
+                    "description": "温柔",
+                },
+            ),
+            default_voice="character_001",
+            fallback_voice="character_001",
+        )
+
+    def test_computer_capabilities_default_to_disabled(self) -> None:
+        settings = PersistedSettings()
+
+        self.assertFalse(settings.computer.state_enabled)
+        self.assertFalse(settings.computer.actions_enabled)
+        self.assertFalse(settings.computer.remote_report_enabled)
+
+    def test_computer_runtime_uses_environment_overrides_without_exposing_values(self) -> None:
+        private_target = "relay-user@private.example"
+        private_identity = "/private/identity_ed25519"
+        private_known_hosts = "/private/known_hosts"
+
+        class NullSecrets:
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return None
+
+        resolved = SettingsResolver(NullSecrets()).resolve(
+            PersistedSettings(),
+            {
+                "ASSISTANT_COMPUTER_STATE_ENABLED": "true",
+                "ASSISTANT_COMPUTER_ACTIONS_ENABLED": "true",
+                "ASSISTANT_COMPUTER_REMOTE_REPORT_ENABLED": "true",
+                "ASSISTANT_COMPUTER_DEVICE_ID": "macbook-main",
+                "ASSISTANT_COMPUTER_RELAY_TARGET": private_target,
+                "ASSISTANT_COMPUTER_RELAY_PORT": "2222",
+                "ASSISTANT_COMPUTER_RELAY_IDENTITY_FILE": private_identity,
+                "ASSISTANT_COMPUTER_RELAY_KNOWN_HOSTS_FILE": private_known_hosts,
+            },
+        )
+
+        self.assertTrue(resolved.runtime.computer.state_enabled)
+        self.assertTrue(resolved.runtime.computer.actions_enabled)
+        self.assertTrue(resolved.runtime.computer.remote_report_enabled)
+        self.assertEqual(resolved.runtime.computer.device_id, "macbook-main")
+        self.assertEqual(resolved.runtime.computer.relay_port, 2222)
+        payload = resolved.presentation.model_dump_json(by_alias=True)
+        self.assertNotIn(private_target, payload)
+        self.assertNotIn(private_identity, payload)
+        self.assertNotIn(private_known_hosts, payload)
+        self.assertNotIn("ASSISTANT_COMPUTER_STATE_REPORT_TOKEN", payload)
+        self.assertEqual(
+            resolved.presentation.fields["computer.relayTargetConfigured"].value,
+            "已配置",
+        )
+        self.assertTrue(
+            resolved.presentation.fields["computer.stateEnabled"].read_only
+        )
+
+    def test_computer_actions_and_reporting_require_state_collection(self) -> None:
+        from settings.validation import SettingsValidationService
+
+        for path, computer in (
+            (
+                "computer.actionsEnabled",
+                {"actionsEnabled": True},
+            ),
+            (
+                "computer.remoteReportEnabled",
+                {"remoteReportEnabled": True},
+            ),
+        ):
+            with self.subTest(path=path):
+                payload = draft_payload()
+                payload["computer"].update(computer)
+                draft = VersionedSettingsDraft.model_validate(payload)
+                with self.assertRaises(SettingsValidationError) as caught:
+                    SettingsValidationService(self._catalog()).validate(draft, {})
+                self.assertEqual(
+                    caught.exception.fields[path],
+                    "启用时必须先启用本机状态采集",
+                )
+
+    def test_remote_reporting_cannot_save_without_complete_relay_configuration(self) -> None:
+        from settings.service import SettingsService
+
+        class NullSecrets:
+            def available(self):
+                return True
+
+            def get(self, reference):
+                return None
+
+            def set(self, reference, value):
+                raise AssertionError("unexpected secret write")
+
+            def delete(self, reference):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SettingsPaths.from_root(Path(directory))
+            service = SettingsService(
+                paths=paths,
+                file_store=SettingsFileStore(paths),
+                secret_store=NullSecrets(),
+                voice_catalog_loader=self._catalog,
+                environ={},
+            )
+            draft = service.get_draft()
+            draft.computer.state_enabled = True
+            draft.computer.remote_report_enabled = True
+
+            with self.assertRaises(SettingsValidationError) as caught:
+                service.save(draft)
+
+        self.assertEqual(
+            caught.exception.fields["computer.remoteReportEnabled"],
+            "启用前必须先完整配置安全中继",
+        )
 
 
 class FakeSettingsService:

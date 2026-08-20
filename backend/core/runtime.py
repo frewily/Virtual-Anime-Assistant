@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import sys
 import threading
+from collections.abc import Callable
 
 from application.assistant import AssistantApplication
 from application.context import ConversationContextBuilder
@@ -13,10 +14,11 @@ from channels.desktop import scenario_result_to_message
 from channels.onebot.channel import OneBotChannel
 from channels.onebot.config import OneBotSettings
 from channels.onebot.connection import OneBotConnectionManager
-from computer.macos import build_macos_state_providers
-from computer.models import ComputerPlatform
-from computer.state import DesktopStateService
-from computer.tools import build_current_state_tool
+from computer.macos import MacOSActionProvider, build_macos_state_providers
+from computer.models import ComputerPlatform, ComputerSnapshot
+from computer.state import DesktopStateService, RemoteDeviceStateStore
+from computer.tools import build_current_state_tool, build_macos_action_tools
+from core.deployment import DeploymentSettings
 from core.monitor import SystemMonitor
 from core.scenario import ScenarioEngine
 from core.tts import TTSService
@@ -30,7 +32,26 @@ from settings.resolver import RuntimeSettings
 from tools.builtin import build_builtin_registry
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolRegistry
-from tools.service import ToolExecutionService
+from tools.service import ToolExecutionError, ToolExecutionService
+
+
+class _DefaultRemoteStateReader:
+    def __init__(
+        self,
+        store: RemoteDeviceStateStore,
+        device_id: str,
+    ) -> None:
+        self._store = store
+        self._device_id = device_id
+
+    def latest(self) -> ComputerSnapshot:
+        snapshot = self._store.latest_fresh(self._device_id)
+        if snapshot is None:
+            raise ToolExecutionError("device_offline")
+        return snapshot
+
+    def is_stale(self) -> bool:
+        return False
 
 
 class AssistantRuntime:
@@ -51,6 +72,10 @@ class AssistantRuntime:
         computer_state_service: DesktopStateService | None = None,
         computer_state_enabled: bool = False,
         computer_platform: str | None = None,
+        deployment_settings: DeploymentSettings | None = None,
+        computer_remote_state_store: RemoteDeviceStateStore | None = None,
+        confirmation_client_online: Callable[[], bool] | None = None,
+        macos_action_provider: MacOSActionProvider | None = None,
     ):
         self._owned_resources: list[tuple[str, object]] = []
         self._resource_closed: dict[str, bool] = {}
@@ -62,6 +87,9 @@ class AssistantRuntime:
 
         try:
             self.monitor = monitor if monitor is not None else SystemMonitor()
+            self.deployment_settings = (
+                deployment_settings or DeploymentSettings.from_env()
+            )
             self.scenario_engine = (
                 scenario_engine
                 if scenario_engine is not None
@@ -71,19 +99,36 @@ class AssistantRuntime:
             self.computer_platform = computer_platform or (
                 "macos" if sys.platform == "darwin" else "other"
             )
+            self._computer_platform_value = (
+                ComputerPlatform.MACOS
+                if self.computer_platform == "macos"
+                else None
+            )
+            self.confirmation_client_online = (
+                confirmation_client_online or (lambda: False)
+            )
             if (
                 computer_state_service is None
+                and self.deployment_settings.profile == "desktop"
                 and self.computer_state_enabled
                 and self.computer_platform == "macos"
             ):
                 computer_state_service = DesktopStateService(
-                    device_id="local-mac",
+                    device_id=(
+                        self.deployment_settings.computer_default_device_id
+                    ),
                     platform=ComputerPlatform.MACOS,
                     providers=build_macos_state_providers(),
                 )
             self.computer_state_service = computer_state_service
             if computer_state_service is not None:
                 self._register_owned("computer_state", computer_state_service)
+            if (
+                computer_remote_state_store is None
+                and self.deployment_settings.profile == "cloud"
+            ):
+                computer_remote_state_store = RemoteDeviceStateStore()
+            self.computer_remote_state_store = computer_remote_state_store
 
             if application is None:
                 settings = (
@@ -109,20 +154,49 @@ class AssistantRuntime:
                     or build_builtin_registry()
                 )
                 self._register_computer_state_tool()
-                self.tool_service = tool_service or ToolExecutionService(
-                    registry=self.tool_registry,
-                    repository=self.store,
-                )
+                self._register_macos_action_tools(macos_action_provider)
+                if tool_service is None:
+                    tool_service = ToolExecutionService(
+                        registry=self.tool_registry,
+                        repository=self.store,
+                        confirmation_client_online=(
+                            self.confirmation_client_online
+                        ),
+                        platform=self._computer_platform_value,
+                        runtime_profile=self.deployment_settings.profile,
+                        allowed_model_tool_names=(
+                            frozenset({"computer.current_state"})
+                            if self.deployment_settings.profile == "cloud"
+                            else None
+                        ),
+                    )
+                    self._register_owned("tool_service", tool_service)
+                self.tool_service = tool_service
                 tools_enabled = (
                     settings.enabled
                     and settings.tool_calling_enabled
                 )
                 if tools_enabled:
                     self.model_tool_catalog = ModelToolCatalog(
-                        self.tool_registry
+                        self.tool_registry,
+                        platform=self._computer_platform_value,
+                        runtime_profile=self.deployment_settings.profile,
+                        confirmation_client_online=(
+                            self.confirmation_client_online
+                        ),
+                        allowed_tool_names=(
+                            frozenset({"computer.current_state"})
+                            if self.deployment_settings.profile == "cloud"
+                            else None
+                        ),
+                    )
+                    catalog_source = (
+                        MessageSource.QQ
+                        if self.deployment_settings.profile == "cloud"
+                        else MessageSource.DESKTOP
                     )
                     tools_enabled = bool(
-                        self.model_tool_catalog.list(MessageSource.DESKTOP)
+                        self.model_tool_catalog.list(catalog_source)
                     )
                 llm = (
                     OpenAICompatibleGateway(settings)
@@ -179,12 +253,24 @@ class AssistantRuntime:
                     or build_builtin_registry()
                 )
                 self._register_computer_state_tool()
+                self._register_macos_action_tools(macos_action_provider)
                 self.tool_service = tool_service
                 if self.tool_service is None and self.store is not None:
                     self.tool_service = ToolExecutionService(
                         registry=self.tool_registry,
                         repository=self.store,
+                        confirmation_client_online=(
+                            self.confirmation_client_online
+                        ),
+                        platform=self._computer_platform_value,
+                        runtime_profile=self.deployment_settings.profile,
+                        allowed_model_tool_names=(
+                            frozenset({"computer.current_state"})
+                            if self.deployment_settings.profile == "cloud"
+                            else None
+                        ),
                     )
+                    self._register_owned("tool_service", self.tool_service)
 
             self.application = application
             self.qq_settings = (
@@ -241,6 +327,20 @@ class AssistantRuntime:
 
     def _register_computer_state_tool(self) -> None:
         if (
+            self.deployment_settings.profile == "cloud"
+            and self.computer_remote_state_store is not None
+        ):
+            self.tool_registry.register(
+                build_current_state_tool(
+                    _DefaultRemoteStateReader(
+                        self.computer_remote_state_store,
+                        self.deployment_settings.computer_default_device_id,
+                    ),
+                    allowed_channels=frozenset({MessageSource.QQ}),
+                )
+            )
+            return
+        if (
             not self.computer_state_enabled
             or self.computer_state_service is None
         ):
@@ -251,6 +351,22 @@ class AssistantRuntime:
                 allowed_channels=frozenset({MessageSource.DESKTOP}),
             )
         )
+
+    def _register_macos_action_tools(
+        self,
+        provider: MacOSActionProvider | None,
+    ) -> None:
+        if (
+            self.deployment_settings.profile != "desktop"
+            or self._computer_platform_value is not ComputerPlatform.MACOS
+        ):
+            return
+        existing = {definition.name for definition in self.tool_registry.list()}
+        for definition in build_macos_action_tools(
+            provider or MacOSActionProvider()
+        ):
+            if definition.name not in existing:
+                self.tool_registry.register(definition)
 
     def _rollback_initialization(self) -> None:
         for name, resource in reversed(self._owned_resources):

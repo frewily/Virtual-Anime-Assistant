@@ -17,6 +17,7 @@ from domain.tools import (
     ToolRisk,
     ToolSource,
 )
+from domain.messages import MessageSource
 from memory.models import MemoryItem, MessageStatus, ModelCallRecord, StoredMessage
 
 
@@ -155,6 +156,23 @@ _MIGRATION_2_STATEMENTS = (
     """
     CREATE INDEX idx_tool_audit_request_created
     ON tool_audit_events(request_id, created_at)
+    """,
+)
+
+_MIGRATION_3_STATEMENTS = (
+    """
+    ALTER TABLE tool_requests
+    ADD COLUMN origin TEXT NOT NULL DEFAULT 'system'
+        CHECK (origin IN ('desktop', 'qq', 'scenario', 'system'))
+    """,
+    """
+    UPDATE tool_requests
+    SET origin = CASE source
+        WHEN 'desktop' THEN 'desktop'
+        WHEN 'qq' THEN 'qq'
+        WHEN 'system' THEN 'system'
+        ELSE 'system'
+    END
     """,
 )
 
@@ -1096,16 +1114,17 @@ class SqliteStore:
         self._connection.execute(
             """
             INSERT INTO tool_requests (
-                id, correlation_id, source, tool_name, title, risk, state,
+                id, correlation_id, source, origin, tool_name, title, risk, state,
                 arguments_json, impact, cancellable, timeout_seconds,
                 result_json, error_code, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.request_id,
                 record.correlation_id,
                 record.source.value,
+                record.origin.value,
                 record.tool_name,
                 record.title,
                 record.risk.value,
@@ -1277,6 +1296,7 @@ class SqliteStore:
             request_id=str(row["id"]),
             correlation_id=str(row["correlation_id"]),
             source=ToolSource(str(row["source"])),
+            origin=MessageSource(str(row["origin"])),
             tool_name=str(row["tool_name"]),
             title=str(row["title"]),
             risk=ToolRisk(str(row["risk"])),
@@ -1381,6 +1401,7 @@ class SqliteStore:
             migrations = (
                 (1, "initial_schema", _MIGRATION_1_STATEMENTS),
                 (2, "tool_permissions", _MIGRATION_2_STATEMENTS),
+                (3, "tool_request_origin", _MIGRATION_3_STATEMENTS),
             )
             for version, name, statements in migrations:
                 if version in applied_versions:

@@ -8,6 +8,7 @@ from pydantic.errors import PydanticInvalidForJsonSchema
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from domain.messages import MessageSource
+from computer.models import ComputerPlatform, ModelAccess
 from domain.tools import ToolRisk, ToolSource
 from tools.catalog import ModelToolCatalog
 from tools.registry import ToolDefinition, ToolRegistry
@@ -101,6 +102,7 @@ def definition(
     allowed_channels: frozenset[MessageSource] = frozenset(
         {MessageSource.DESKTOP, MessageSource.QQ}
     ),
+    model_access: ModelAccess = ModelAccess.READ_ONLY,
 ) -> ToolDefinition:
     return ToolDefinition(
         name=name,
@@ -113,10 +115,49 @@ def definition(
         handler=handler,
         allowed_sources=allowed_sources,
         allowed_channels=allowed_channels,
+        model_access=model_access,
     )
 
 
 class ModelToolCatalogTests(unittest.TestCase):
+    def test_high_risk_proposals_require_desktop_macos_and_online_client(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "computer.action",
+                risk=ToolRisk.HIGH,
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                allowed_channels=frozenset({MessageSource.DESKTOP}),
+                model_access=ModelAccess.PROPOSE_WITH_CONFIRMATION,
+            )
+        )
+
+        enabled = ModelToolCatalog(
+            registry,
+            platform=ComputerPlatform.MACOS,
+            runtime_profile="desktop",
+            confirmation_client_online=lambda: True,
+        )
+        offline = ModelToolCatalog(
+            registry,
+            platform=ComputerPlatform.MACOS,
+            runtime_profile="desktop",
+            confirmation_client_online=lambda: False,
+        )
+        cloud = ModelToolCatalog(
+            registry,
+            platform=ComputerPlatform.MACOS,
+            runtime_profile="cloud",
+            confirmation_client_online=lambda: True,
+        )
+
+        self.assertEqual(
+            [tool.name for tool in enabled.list(MessageSource.DESKTOP)],
+            ["computer.action"],
+        )
+        self.assertEqual(enabled.list(MessageSource.QQ), ())
+        self.assertEqual(offline.list(MessageSource.DESKTOP), ())
+        self.assertEqual(cloud.list(MessageSource.DESKTOP), ())
     def test_catalog_filters_tools_by_trusted_message_source(self):
         registry = ToolRegistry()
         registry.register(

@@ -3,7 +3,15 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from domain.messages import MessageSource
 
 
 def utc_now() -> datetime:
@@ -55,6 +63,22 @@ class ToolEventType(str, Enum):
 class StrictToolModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def default_trusted_origin(cls, value):
+        if not isinstance(value, dict) or "origin" in value:
+            return value
+        source = value.get("source")
+        origins = {
+            ToolSource.DESKTOP: MessageSource.DESKTOP,
+            ToolSource.QQ: MessageSource.QQ,
+            ToolSource.SYSTEM: MessageSource.SYSTEM,
+            ToolSource.MODEL: MessageSource.SYSTEM,
+        }
+        if isinstance(source, ToolSource):
+            return {**value, "origin": origins[source]}
+        return value
+
     @field_validator("*", mode="after")
     @classmethod
     def require_aware_datetimes(cls, value):
@@ -71,6 +95,7 @@ class ToolRequest(StrictToolModel):
     )
     correlation_id: str = Field(min_length=1, max_length=200)
     source: ToolSource
+    origin: MessageSource = MessageSource.SYSTEM
     tool_name: str = Field(pattern=r"^[a-z][a-z0-9_.-]{2,99}$")
     arguments: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
@@ -80,6 +105,7 @@ class ToolRequestRecord(StrictToolModel):
     request_id: str = Field(min_length=1, max_length=200)
     correlation_id: str = Field(min_length=1, max_length=200)
     source: ToolSource
+    origin: MessageSource = MessageSource.SYSTEM
     tool_name: str = Field(pattern=r"^[a-z][a-z0-9_.-]{2,99}$")
     title: str = Field(min_length=1, max_length=200)
     risk: ToolRisk

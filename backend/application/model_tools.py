@@ -24,7 +24,7 @@ from llm.models import (
     ModelToolCall,
     ModelToolResult,
 )
-from tools.catalog import ModelToolCatalog
+from tools.catalog import ModelToolCallContext, ModelToolCatalog
 from tools.registry import ToolNotFoundError
 from tools.service import ToolArgumentsError, ToolExecutionService
 
@@ -141,6 +141,7 @@ class ModelToolOrchestrator:
                     model_round,
                     call_index,
                     advertised_tool_names,
+                    source,
                 )
                 messages.append(self._tool_message(result))
 
@@ -185,6 +186,7 @@ class ModelToolOrchestrator:
         model_round: int,
         call_index: int,
         advertised_tool_names: set[str],
+        source: MessageSource,
     ) -> ModelToolResult:
         if (
             call.name not in advertised_tool_names
@@ -203,11 +205,18 @@ class ModelToolOrchestrator:
         tool_request = ToolRequest(
             correlation_id=correlation_id,
             source=ToolSource.MODEL,
+            origin=source,
             tool_name=call.name,
             arguments=call.arguments,
         )
         try:
-            view = await self.tool_service.request(tool_request)
+            view = await self.tool_service.request(
+                tool_request,
+                model_context=ModelToolCallContext(
+                    channel=source,
+                    advertised_tool_names=frozenset(advertised_tool_names),
+                ),
+            )
         except ToolNotFoundError:
             return self._failed_tool_result(
                 call,
@@ -217,6 +226,11 @@ class ModelToolOrchestrator:
             return self._failed_tool_result(
                 call,
                 "tool_arguments_invalid",
+            )
+        if view.state is ToolRequestState.PENDING_CONFIRMATION:
+            view = await self.tool_service.wait_for_terminal(
+                view.request_id,
+                timeout=60,
             )
         return self._result_from_view(call, view)
 

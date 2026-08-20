@@ -29,6 +29,7 @@ from llm.models import (
     ModelToolResult,
 )
 from tools.registry import ToolNotFoundError
+from tools.catalog import ModelToolCallContext
 from tools.service import ToolArgumentsError
 
 
@@ -137,6 +138,95 @@ def configured_orchestrator(
 
 
 class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_desktop_action_waits_then_resumes_with_terminal_result(self):
+        call = tool_call("action-1", "computer.open_application")
+        gateway = FakeGateway(
+            [
+                ModelReply(tool_calls=[call], model="fake"),
+                ModelReply(text="已打开", model="fake"),
+            ]
+        )
+        service = AsyncMock()
+        service.request.return_value = ToolRequestView(
+            request_id="pending-action",
+            correlation_id="model-action",
+            tool=call.name,
+            state=ToolRequestState.PENDING_CONFIRMATION,
+        )
+        service.wait_for_terminal.return_value = ToolRequestView(
+            request_id="pending-action",
+            correlation_id="model-action",
+            tool=call.name,
+            state=ToolRequestState.SUCCEEDED,
+            result={"opened": True},
+        )
+
+        result = await configured_orchestrator(
+            gateway,
+            service,
+            tools=[tool_definition(call.name)],
+        ).run(base_request(), source=MessageSource.DESKTOP)
+
+        requested = service.request.await_args.args[0]
+        self.assertIs(requested.origin, MessageSource.DESKTOP)
+        trusted_context = service.request.await_args.kwargs["model_context"]
+        self.assertIsInstance(trusted_context, ModelToolCallContext)
+        self.assertIs(trusted_context.channel, MessageSource.DESKTOP)
+        self.assertEqual(
+            trusted_context.advertised_tool_names,
+            frozenset({call.name}),
+        )
+        service.wait_for_terminal.assert_awaited_once_with(
+            "pending-action",
+            timeout=60,
+        )
+        self.assertEqual(result.reply.text, "已打开")
+        self.assertEqual(
+            json.loads(gateway.requests[1].messages[-1].content)["result"],
+            {"opened": True},
+        )
+
+    async def test_pending_action_returns_each_non_success_terminal_state_to_model(self):
+        for state, error_code in (
+            (ToolRequestState.REJECTED, None),
+            (ToolRequestState.EXPIRED, None),
+            (ToolRequestState.CANCELLED, None),
+            (ToolRequestState.FAILED, "macos_action_failed"),
+        ):
+            with self.subTest(state=state):
+                call = tool_call("action-terminal", "computer.set_volume")
+                gateway = FakeGateway(
+                    [
+                        ModelReply(tool_calls=[call], model="fake"),
+                        ModelReply(text="收到终态", model="fake"),
+                    ]
+                )
+                service = AsyncMock()
+                service.request.return_value = ToolRequestView(
+                    request_id="pending-terminal",
+                    correlation_id="model-terminal",
+                    tool=call.name,
+                    state=ToolRequestState.PENDING_CONFIRMATION,
+                )
+                service.wait_for_terminal.return_value = ToolRequestView(
+                    request_id="pending-terminal",
+                    correlation_id="model-terminal",
+                    tool=call.name,
+                    state=state,
+                    error_code=error_code,
+                )
+
+                await configured_orchestrator(
+                    gateway,
+                    service,
+                    tools=[tool_definition(call.name)],
+                ).run(base_request(), source=MessageSource.DESKTOP)
+
+                payload = json.loads(
+                    gateway.requests[1].messages[-1].content
+                )
+                self.assertEqual(payload["state"], state.value)
+                self.assertEqual(payload["error_code"], error_code)
     async def test_plain_text_reply_finishes_without_tools(self):
         gateway = FakeGateway(
             [
@@ -256,7 +346,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         await configured_orchestrator(gateway, service).run(
             base_request(),
@@ -279,7 +369,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         result = await configured_orchestrator(
             gateway,
@@ -299,7 +389,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             tool_call("call-second", "example.second"),
         ]
 
-        async def request_tool(request):
+        async def request_tool(request, **_):
             events.append(request.tool_name)
             return succeeded_view(request)
 
@@ -333,7 +423,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         with self.assertRaises(ModelToolOrchestrationError) as raised:
             await configured_orchestrator(
@@ -393,7 +483,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         with self.assertRaises(ModelToolLimitError) as raised:
             await configured_orchestrator(
@@ -416,7 +506,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         with self.assertRaises(ModelToolLimitError) as raised:
             await configured_orchestrator(
@@ -447,7 +537,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         with self.assertRaises(ModelToolLimitError) as raised:
             await configured_orchestrator(
@@ -470,7 +560,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         await configured_orchestrator(
             gateway,
@@ -746,7 +836,7 @@ class ModelToolOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             model_name="configured-model",
         )
         service = AsyncMock()
-        service.request.side_effect = lambda request: succeeded_view(request)
+        service.request.side_effect = lambda request, **_: succeeded_view(request)
 
         with self.assertRaises(ModelToolOrchestrationError) as raised:
             await configured_orchestrator(

@@ -233,6 +233,7 @@ class OneBotApplicationIntegrationTests(unittest.TestCase):
         tool_service = ToolExecutionService(
             registry=registry,
             repository=store,
+            runtime_profile="desktop",
         )
         catalog = ModelToolCatalog(registry)
         orchestrator = ModelToolOrchestrator(

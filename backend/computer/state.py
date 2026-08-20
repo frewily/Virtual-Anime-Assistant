@@ -1,6 +1,9 @@
 """In-memory collection and freshness tracking for computer state."""
 
 import asyncio
+import math
+import threading
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -124,3 +127,94 @@ class DesktopStateService:
         with suppress(asyncio.CancelledError):
             await task
         self._task = None
+
+
+class RemoteDeviceStateStore:
+    """Keep one defensive in-memory snapshot per remotely reporting device."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ) -> None:
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic = monotonic or time.monotonic
+        self._snapshots: dict[
+            str,
+            tuple[ComputerSnapshot, float],
+        ] = {}
+        self._lock = threading.Lock()
+
+    def now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("remote computer state clock must include timezone")
+        return value.astimezone(timezone.utc)
+
+    def _monotonic_now(self) -> float:
+        value = self._monotonic()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("remote computer monotonic clock is invalid")
+        return float(value)
+
+    def put(self, snapshot: ComputerSnapshot) -> bool:
+        """Atomically replace a device snapshot only when it is newer."""
+
+        if not isinstance(snapshot, ComputerSnapshot):
+            raise TypeError("remote computer snapshot is invalid")
+        safe_snapshot = snapshot.model_copy(deep=True)
+        received_at = self._monotonic_now()
+        with self._lock:
+            current_entry = self._snapshots.get(snapshot.device_id)
+            current = current_entry[0] if current_entry is not None else None
+            if (
+                current is not None
+                and snapshot.collected_at <= current.collected_at
+            ):
+                return False
+            self._snapshots[snapshot.device_id] = (
+                safe_snapshot,
+                received_at,
+            )
+        return True
+
+    def latest(self, device_id: str) -> ComputerSnapshot | None:
+        with self._lock:
+            entry = self._snapshots.get(device_id)
+            if entry is None:
+                return None
+            snapshot, _ = entry
+            return snapshot.model_copy(deep=True)
+
+    def latest_fresh(self, device_id: str) -> ComputerSnapshot | None:
+        """Return one atomic fresh view bounded by receipt and envelope TTLs."""
+
+        now = self.now()
+        monotonic_now = self._monotonic_now()
+        with self._lock:
+            entry = self._snapshots.get(device_id)
+            if entry is None:
+                return None
+            snapshot, received_at = entry
+            receipt_age = monotonic_now - received_at
+            if (
+                not snapshot.is_fresh(now)
+                or receipt_age < 0
+                or receipt_age >= _SNAPSHOT_TTL.total_seconds()
+            ):
+                return None
+            return snapshot.model_copy(deep=True)
+
+    def is_offline(self, device_id: str) -> bool:
+        return self.latest_fresh(device_id) is None
+
+    @property
+    def device_count(self) -> int:
+        with self._lock:
+            return len(self._snapshots)

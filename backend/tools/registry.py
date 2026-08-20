@@ -12,6 +12,7 @@ from domain.tools import ToolRisk, ToolSource
 
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{2,99}$")
 ToolHandler = Callable[[BaseModel], Awaitable[dict[str, Any]]]
+ToolConfirmationSummary = Callable[[BaseModel], dict[str, Any]]
 
 
 class ToolNotFoundError(LookupError):
@@ -31,6 +32,7 @@ class ToolDefinition:
     cancellable: bool
     handler: ToolHandler
     model_access: ModelAccess = ModelAccess.HIDDEN
+    confirmation_summary: ToolConfirmationSummary | None = None
     sensitive_fields: frozenset[str] = field(default_factory=frozenset)
     allowed_sources: frozenset[ToolSource] = field(
         default_factory=lambda: frozenset(
@@ -63,6 +65,11 @@ class ToolDefinition:
             raise TypeError("tool handler must be callable")
         if not isinstance(self.model_access, ModelAccess):
             raise TypeError("tool model access must be a ModelAccess value")
+        if (
+            self.confirmation_summary is not None
+            and not callable(self.confirmation_summary)
+        ):
+            raise TypeError("tool confirmation summary must be callable")
         if not 0 < self.timeout_seconds <= 300:
             raise ValueError("tool timeout must be between 0 and 300 seconds")
         normalized_sources = frozenset(self.allowed_sources)

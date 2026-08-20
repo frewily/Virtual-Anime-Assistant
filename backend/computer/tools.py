@@ -189,6 +189,9 @@ def build_macos_action_tools(
             impact="在默认浏览器中打开指定的公开 HTTPS 链接",
             handler=open_url,
             sensitive_fields=frozenset({"url"}),
+            confirmation_summary=lambda arguments: {
+                "url": summarize_open_url(arguments.url)
+            },
             **common,
         ),
         ToolDefinition(

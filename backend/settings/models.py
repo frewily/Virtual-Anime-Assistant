@@ -130,6 +130,10 @@ class ComputerSettings(PersistedModel):
     remote_report_enabled: bool = False
 
 
+class DesktopSettings(PersistedModel):
+    open_at_login: bool = False
+
+
 class PersistedSettings(PersistedModel):
     schema_version: Literal[1] = 1
     auth: AuthRecord | None = None
@@ -137,3 +141,4 @@ class PersistedSettings(PersistedModel):
     qq: QQSettings = Field(default_factory=QQSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
     computer: ComputerSettings = Field(default_factory=ComputerSettings)
+    desktop: DesktopSettings = Field(default_factory=DesktopSettings)

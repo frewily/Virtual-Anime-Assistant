@@ -157,7 +157,8 @@ function snapshot(revision, overrides = {}) {
         revision,
         llm: { enabled: true, baseUrl: 'persisted-url', model: 'saved-model', timeoutSeconds: 60, maxContextMessages: 20, maxContextChars: 12000, toolCallingEnabled: false, apiKey: { operation: 'retain' } },
         qq: { enabled: false, allowedGroupIds: [], allowedUserIds: [], ratePerMinute: 10, rateBurst: 2, maxConcurrency: 4, actionTimeoutSeconds: 10, accessToken: { operation: 'retain' } },
-        tts: { gptSovitsUrl: 'persisted-tts', defaultVoiceId: 'character_001', audioMaxAgeSeconds: 86400 }
+        tts: { gptSovitsUrl: 'persisted-tts', defaultVoiceId: 'character_001', audioMaxAgeSeconds: 86400 },
+        desktop: { openAtLogin: false }
     };
     return {
         restartRequired: true,
@@ -165,6 +166,16 @@ function snapshot(revision, overrides = {}) {
         draft: Object.assign(draft, overrides.draft || {})
     };
 }
+
+test('desktop startup remains opt-in and is included in the save draft', () => {
+    const harness = makeHarness(async () => response({}));
+    const { hooks, ids } = harness;
+    hooks.applySnapshot(snapshot('a'.repeat(64)));
+
+    assert.equal(hooks.collectDraft().desktop.openAtLogin, false);
+    ids.get('desktop-open-at-login').checked = true;
+    assert.equal(hooks.collectDraft().desktop.openAtLogin, true);
+});
 
 function response(payload, status = 200) {
     return { status, ok: status >= 200 && status < 300, json: async () => payload };

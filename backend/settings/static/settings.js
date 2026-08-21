@@ -691,6 +691,9 @@
         stateEnabled: readControl('computer.stateEnabled'),
         actionsEnabled: readControl('computer.actionsEnabled'),
         remoteReportEnabled: readControl('computer.remoteReportEnabled')
+      },
+      desktop: {
+        openAtLogin: readControl('desktop.openAtLogin')
       }
     };
   }

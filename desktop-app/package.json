@@ -17,7 +17,7 @@
     "live2d",
     "assistant"
   ],
-  "author": "",
+  "author": "frewily",
   "license": "MIT",
   "devDependencies": {
     "electron": "^43.2.0",

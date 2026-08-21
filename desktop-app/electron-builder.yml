@@ -1,5 +1,6 @@
-appId: com.assistant.desktop
+appId: com.frewily.virtual-anime-assistant
 productName: Desktop Assistant
+copyright: "Copyright © 2026 frewily"
 directories:
   output: dist
 files:
@@ -22,5 +23,6 @@ artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
 mac:
   target: dmg
   category: public.app-category.productivity
+  icon: build/icon.icns
 win:
   target: nsis

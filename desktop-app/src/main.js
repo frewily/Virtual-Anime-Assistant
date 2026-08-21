@@ -1,11 +1,13 @@
 const { app, BrowserWindow, Tray, Menu, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { createDesktopBackendSupervisor } = require('./backend-supervisor');
 
 const SETTINGS_URL = 'http://127.0.0.1:8080/settings';
 
 let mainWindow;
 let tray;
+const backendSupervisor = createDesktopBackendSupervisor({ app });
 
 async function openSettings() {
     try {
@@ -63,9 +65,14 @@ function createTray() {
     tray.setContextMenu(contextMenu);
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+    await backendSupervisor.start();
     createWindow();
     createTray();
+});
+
+app.on('before-quit', () => {
+    backendSupervisor.stop();
 });
 
 app.on('window-all-closed', () => {

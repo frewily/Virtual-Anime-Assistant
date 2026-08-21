@@ -60,6 +60,8 @@ npm start
 
 `npm start` 会先通过 esbuild 生成本地 renderer bundle，再启动 Electron。页面不会从远程 CDN 执行脚本。
 
+Electron 会先检查固定的 `127.0.0.1:8080` 健康接口：已有后端时直接复用，未运行时在开发环境以 `python3 backend/main.py` 启动，并在异常退出后执行最多 5 次有界重试。退出 Electron 时只终止由它创建的后端，不会终止用户预先启动的服务。打包环境固定查找 `resources/backend/vaa-backend`；生成并随安装包附带该后端可执行文件属于后续打包任务。
+
 `npm run setup:live2d-dev` 仅用于恢复本地开发样例。没有执行该命令时，Electron 仍可启动，并显示缺少 Live2D 开发资源的提示。
 
 ## Web 配置界面
@@ -144,6 +146,8 @@ export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
 |---|---|---|
 | `ASSISTANT_HOST` | `127.0.0.1` | FastAPI 监听地址；建议保持为回环地址 |
 | `ASSISTANT_PORT` | `8080` | FastAPI 监听端口 |
+| `ASSISTANT_BACKEND_EXECUTABLE` | 空 | Electron 托管的后端可执行文件绝对路径；不接受命令参数或相对路径 |
+| `ASSISTANT_PYTHON_EXECUTABLE` | `python3`（Windows 为 `python`） | 仅开发环境使用的 Python 可执行文件绝对路径 |
 | `ASSISTANT_GPT_SOVITS_URL` | `http://127.0.0.1:9880` | GPT-SoVITS 服务地址 |
 | `ASSISTANT_TTS_DEFAULT_VOICE_ID` | `character_001` | 默认音色 ID；必须存在于 `config/voices.yml` |
 | `ASSISTANT_AUDIO_MAX_AGE_SECONDS` | `86400` | 生成音频的最大保留时间 |

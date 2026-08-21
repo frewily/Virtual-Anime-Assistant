@@ -28,6 +28,31 @@ test('electron-builder includes only the staged backend and public config files'
     assert.doesNotMatch(source, /config\/local|\.env|secrets/);
 });
 
+test('macOS package uses stable release identity and a production icon', () => {
+    const packageJson = JSON.parse(read(path.join(desktopRoot, 'package.json')));
+    const source = read(path.join(desktopRoot, 'electron-builder.yml'));
+    const iconPath = path.join(desktopRoot, 'build', 'icon.icns');
+    const iconHeader = fs.readFileSync(iconPath).subarray(0, 4).toString('ascii');
+
+    assert.equal(packageJson.author, 'frewily');
+    assert.match(source, /^appId: com\.frewily\.virtual-anime-assistant$/m);
+    assert.match(source, /^copyright: "Copyright © 2026 frewily"$/m);
+    assert.match(source, /^\s+icon: build\/icon\.icns$/m);
+    assert.equal(iconHeader, 'icns');
+    assert.doesNotMatch(source, /com\.assistant\.desktop/);
+});
+
+test('local macOS builds use ad-hoc signing without overriding release signing', () => {
+    const packageJson = JSON.parse(read(path.join(desktopRoot, 'package.json')));
+    const localBuild = packageJson.scripts['build:mac:local'];
+
+    assert.match(localBuild, /build:renderer/);
+    assert.match(localBuild, /build:backend/);
+    assert.match(localBuild, /electron-builder --mac dmg/);
+    assert.match(localBuild, /--config\.mac\.identity=-/);
+    assert.doesNotMatch(packageJson.scripts.build, /config\.mac\.identity/);
+});
+
 test('PyInstaller spec carries local settings assets and dynamic keyring backends', () => {
     const source = read(path.join(repositoryRoot, 'backend', 'vaa-backend.spec'));
 

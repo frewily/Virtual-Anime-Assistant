@@ -30,6 +30,11 @@ Thumbs.db
 # Build
 dist/
 build/
+!desktop-app/build/
+desktop-app/build/*
+!desktop-app/build/icon-master.png
+!desktop-app/build/icon.png
+!desktop-app/build/icon.icns
 target/
 *.exe
 

@@ -77,7 +77,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r backend/requirements.txt -r backend/requirements-build.txt
 npm --prefix desktop-app ci
-ASSISTANT_PACKAGING_PYTHON="$PWD/.venv/bin/python" npm --prefix desktop-app run build
+ASSISTANT_PACKAGING_PYTHON="$PWD/.venv/bin/python" npm --prefix desktop-app run build:mac:local
 ```
 
 产物位于 `desktop-app/dist/`，后端暂存文件位于被 Git 忽略的
@@ -86,8 +86,9 @@ ASSISTANT_PACKAGING_PYTHON="$PWD/.venv/bin/python" npm --prefix desktop-app run 
 设置、SQLite、音频分别写入 Electron 用户数据目录下的 `config/`、`data/`、
 `audio/`，不会尝试写入只读应用包。
 
-当前本地构建未进行 Apple Developer ID 签名和公证，只适合开发验收；公开分发前
-必须补齐签名、公证和正式应用图标。受许可限制的 Live2D 开发样例仍不会进入安装包。
+本地 macOS 构建会使用临时签名，保证安装包结构可正常验收，但不会进行 Apple
+Developer ID 签名和公证；公开分发时应使用常规 `build` 命令并提供正式签名和
+公证凭据。受许可限制的 Live2D 开发样例仍不会进入安装包。
 
 ## Web 配置界面
 

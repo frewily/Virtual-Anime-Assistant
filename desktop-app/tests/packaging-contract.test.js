@@ -42,6 +42,17 @@ test('macOS package uses stable release identity and a production icon', () => {
     assert.doesNotMatch(source, /com\.assistant\.desktop/);
 });
 
+test('local macOS builds use ad-hoc signing without overriding release signing', () => {
+    const packageJson = JSON.parse(read(path.join(desktopRoot, 'package.json')));
+    const localBuild = packageJson.scripts['build:mac:local'];
+
+    assert.match(localBuild, /build:renderer/);
+    assert.match(localBuild, /build:backend/);
+    assert.match(localBuild, /electron-builder --mac dmg/);
+    assert.match(localBuild, /--config\.mac\.identity=-/);
+    assert.doesNotMatch(packageJson.scripts.build, /config\.mac\.identity/);
+});
+
 test('PyInstaller spec carries local settings assets and dynamic keyring backends', () => {
     const source = read(path.join(repositoryRoot, 'backend', 'vaa-backend.spec'));
 

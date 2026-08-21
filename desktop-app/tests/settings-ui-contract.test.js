@@ -23,6 +23,7 @@ test('settings page is self-contained, semantic, and covers every editable field
         'tts-audio-max-age-seconds', 'save-settings', 'restart-notice',
         'computer-state-enabled', 'computer-actions-enabled',
         'computer-remote-report-enabled', 'computer-relay-status',
+        'desktop-open-at-login',
         'dirty-notice', 'error-summary', 'keychain-status'
     ];
 
@@ -56,6 +57,9 @@ test('computer settings explain consent boundaries and redact relay configuratio
     assert.match(source, /relayTargetConfigured/);
     assert.match(source, /textContent/);
     assert.doesNotMatch(source, /ASSISTANT_COMPUTER_STATE_REPORT_TOKEN/);
+    assert.match(html, /data-path="desktop\.openAtLogin"/);
+    assert.match(html, /默认关闭/);
+    assert.match(source, /openAtLogin:\s*readControl\('desktop\.openAtLogin'\)/);
 });
 
 test('settings favicon is a local self-contained SVG asset', () => {

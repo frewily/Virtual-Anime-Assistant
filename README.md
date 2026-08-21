@@ -62,6 +62,8 @@ npm start
 
 Electron 会先检查固定的 `127.0.0.1:8080` 健康接口：已有后端时直接复用，未运行时在开发环境以 `python3 backend/main.py` 启动，并在异常退出后执行最多 5 次有界重试。退出 Electron 时只终止由它创建的后端，不会终止用户预先启动的服务。打包环境固定查找 `resources/backend/vaa-backend`；生成并随安装包附带该后端可执行文件属于后续打包任务。
 
+“电脑”设置中的“登录系统时自动启动助手”默认关闭。保存后，正式安装版会在下次启动时通过 Electron 的系统原生登录启动接口应用该选项；开发版不会注册 Electron 开发运行时，Linux 当前也不会修改系统启动项。
+
 `npm run setup:live2d-dev` 仅用于恢复本地开发样例。没有执行该命令时，Electron 仍可启动，并显示缺少 Live2D 开发资源的提示。
 
 ## Web 配置界面
@@ -326,6 +328,7 @@ HTTP 和 WebSocket 聊天请求可以提供长度为 1～200 的 `messageId`。�
 | POST | `/api/settings/setup`、`/api/settings/login`、`/api/settings/logout` | 初始化管理密码、登录或退出 |
 | GET / PUT | `/api/settings/config` | 获取脱敏配置快照或原子保存完整草稿 |
 | GET | `/api/settings/voices` | 获取可选音色摘要 |
+| GET | `/api/status/desktop-startup` | 供 Electron 读取单个非敏感开机启动布尔值 |
 | POST | `/api/settings/test/llm`、`/api/settings/test/qq`、`/api/settings/test/tts` | 使用未保存草稿执行脱敏连接测试 |
 | WS | `/ws/avatar` | 双向角色消息通道 |
 | WS | `/ws/qq` | OneBot 11 反向 WebSocket；需要 Bearer Token 和 `X-Self-ID` |

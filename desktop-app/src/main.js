@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { createDesktopBackendSupervisor } = require('./backend-supervisor');
+const { reconcileDesktopStartup } = require('./desktop-startup');
 
 const SETTINGS_URL = 'http://127.0.0.1:8080/settings';
 
@@ -67,6 +68,7 @@ function createTray() {
 
 app.whenReady().then(async () => {
     await backendSupervisor.start();
+    await reconcileDesktopStartup({ app });
     createWindow();
     createTray();
 });

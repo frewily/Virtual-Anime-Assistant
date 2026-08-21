@@ -23,6 +23,7 @@ from settings.paths import SettingsPaths
 from settings.resolver import SettingsResolver
 from settings.security import SettingsSecurityMiddleware
 from settings.service import (
+    DesktopStartupStatus,
     SaveResult,
     SettingsConfigSnapshot,
     SettingsSaveSnapshot,
@@ -75,6 +76,7 @@ def draft_payload() -> dict[str, object]:
             "actionsEnabled": False,
             "remoteReportEnabled": False,
         },
+        "desktop": {"openAtLogin": False},
     }
 
 
@@ -99,6 +101,21 @@ class ComputerSettingsContractTests(unittest.TestCase):
         self.assertFalse(settings.computer.state_enabled)
         self.assertFalse(settings.computer.actions_enabled)
         self.assertFalse(settings.computer.remote_report_enabled)
+        self.assertFalse(settings.desktop.open_at_login)
+
+    def test_desktop_startup_is_strictly_opt_in_and_persists_with_the_draft(self) -> None:
+        from settings.service import SettingsService
+        from settings.validation import SettingsValidationService
+
+        payload = draft_payload()
+        payload["desktop"]["openAtLogin"] = True
+        draft = VersionedSettingsDraft.model_validate(payload)
+        validated = SettingsValidationService(self._catalog()).validate(draft, {})
+        proposed = SettingsService._proposed_settings(
+            PersistedSettings(), validated.draft
+        )
+
+        self.assertTrue(proposed.desktop.open_at_login)
 
     def test_computer_runtime_uses_environment_overrides_without_exposing_values(self) -> None:
         private_target = "relay-user@private.example"
@@ -285,6 +302,9 @@ class FakeSettingsService:
     def get_voices(self):
         return [{"id": "character_001", "name": "默认音色", "description": "温柔"}]
 
+    def desktop_startup_status(self):
+        return DesktopStartupStatus(open_at_login=False)
+
     async def test_llm(self, request):
         self.calls.append(("test_llm", request))
         return ConnectionTestResult(ok=True, code=ConnectionTestCode.SUCCESS)
@@ -342,6 +362,14 @@ class SettingsApiTests(unittest.TestCase):
                 self.assertIn(content_type, response.headers["content-type"])
                 self.assertIn(marker, response.text)
                 self.assert_safe_headers(response)
+
+    def test_desktop_startup_status_is_public_but_contains_only_a_boolean(self) -> None:
+        response = self.client.get("/api/status/desktop-startup")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"openAtLogin": False})
+        self.assertNotIn("path", response.text.lower())
+        self.assertNotIn("token", response.text.lower())
 
     def test_settings_page_and_assets_support_head_without_a_body(self) -> None:
         for path, content_type in (

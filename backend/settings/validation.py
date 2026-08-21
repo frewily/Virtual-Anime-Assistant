@@ -74,11 +74,16 @@ class ComputerSettingsDraft(_StrictRequestModel):
     remote_report_enabled: bool = False
 
 
+class DesktopSettingsDraft(_StrictRequestModel):
+    open_at_login: bool = False
+
+
 class SettingsDraft(_StrictRequestModel):
     llm: LLMSettingsDraft = Field(default_factory=LLMSettingsDraft)
     qq: QQSettingsDraft = Field(default_factory=QQSettingsDraft)
     tts: TTSSettingsDraft = Field(default_factory=TTSSettingsDraft)
     computer: ComputerSettingsDraft = Field(default_factory=ComputerSettingsDraft)
+    desktop: DesktopSettingsDraft = Field(default_factory=DesktopSettingsDraft)
 
 
 class _ValidatedModel(_StrictRequestModel):
@@ -136,11 +141,16 @@ class ValidatedComputerSettings(_ValidatedModel):
     remote_report_enabled: bool
 
 
+class ValidatedDesktopSettings(_ValidatedModel):
+    open_at_login: bool
+
+
 class ValidatedSettingsSnapshot(_ValidatedModel):
     llm: ValidatedLLMSettings
     qq: ValidatedQQSettings
     tts: ValidatedTTSSettings
     computer: ValidatedComputerSettings
+    desktop: ValidatedDesktopSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -776,6 +786,9 @@ def _validated_snapshot(draft: SettingsDraft) -> ValidatedSettingsSnapshot:
             state_enabled=draft.computer.state_enabled,
             actions_enabled=draft.computer.actions_enabled,
             remote_report_enabled=draft.computer.remote_report_enabled,
+        ),
+        desktop=ValidatedDesktopSettings(
+            open_at_login=draft.desktop.open_at_login,
         ),
     )
 

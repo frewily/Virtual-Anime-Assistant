@@ -35,6 +35,7 @@ from settings.auth import (
 from settings.file_store import SettingsFileError, SettingsFileStore
 from settings.models import (
     ComputerSettings,
+    DesktopSettings,
     LLMSettings,
     PersistedSettings,
     QQSettings,
@@ -57,6 +58,7 @@ from settings.transactions import (
 )
 from settings.validation import (
     ComputerSettingsDraft,
+    DesktopSettingsDraft,
     ConnectionTestCode,
     ConnectionTestResult,
     LLMSettingsDraft,
@@ -190,6 +192,10 @@ class ResponseComputerSettingsDraft(_ResponseModel):
     remote_report_enabled: bool
 
 
+class ResponseDesktopSettingsDraft(_ResponseModel):
+    open_at_login: bool
+
+
 class SettingsResponseDraft(_ResponseModel):
     revision: str = Field(
         min_length=64,
@@ -200,6 +206,11 @@ class SettingsResponseDraft(_ResponseModel):
     qq: ResponseQQSettingsDraft
     tts: ResponseTTSSettingsDraft
     computer: ResponseComputerSettingsDraft
+    desktop: ResponseDesktopSettingsDraft
+
+
+class DesktopStartupStatus(_ResponseModel):
+    open_at_login: bool
 
 
 class SettingsConfigSnapshot(_ResponseModel):
@@ -606,6 +617,13 @@ class SettingsService:
             raise SettingsServiceError("VOICE_CATALOG_INVALID")
         return summaries
 
+    def desktop_startup_status(self) -> DesktopStartupStatus:
+        """Return the single non-sensitive preference consumed by Electron."""
+
+        return DesktopStartupStatus(
+            open_at_login=self._load_settings().desktop.open_at_login,
+        )
+
     def save(self, draft: VersionedSettingsDraft) -> SaveResult:
         """Validate and atomically persist a complete browser draft."""
 
@@ -851,6 +869,9 @@ class SettingsService:
                 actions_enabled=persisted.computer.actions_enabled,
                 remote_report_enabled=persisted.computer.remote_report_enabled,
             ),
+            desktop=ResponseDesktopSettingsDraft(
+                open_at_login=persisted.desktop.open_at_login,
+            ),
         )
 
     def _resolve(self, persisted: PersistedSettings) -> ResolvedSettings:
@@ -916,6 +937,9 @@ class SettingsService:
                 state_enabled=persisted.computer.state_enabled,
                 actions_enabled=persisted.computer.actions_enabled,
                 remote_report_enabled=persisted.computer.remote_report_enabled,
+            ),
+            desktop=DesktopSettingsDraft(
+                open_at_login=persisted.desktop.open_at_login,
             ),
         )
 
@@ -1079,6 +1103,9 @@ class SettingsService:
                 actions_enabled=validated.computer.actions_enabled,
                 remote_report_enabled=validated.computer.remote_report_enabled,
             ),
+            desktop=DesktopSettings(
+                open_at_login=validated.desktop.open_at_login,
+            ),
         )
 
     @staticmethod
@@ -1103,6 +1130,7 @@ def create_settings_service(paths: SettingsPaths | None = None) -> SettingsServi
 
 __all__ = [
     "LLMProbeDraft",
+    "DesktopStartupStatus",
     "QQProbeDraft",
     "SaveResult",
     "SettingsConfigSnapshot",

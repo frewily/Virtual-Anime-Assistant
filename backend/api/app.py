@@ -73,6 +73,7 @@ _SETTINGS_FIELD_ALIASES = {
     "gpt_sovits_url": "gptSovitsUrl",
     "default_voice_id": "defaultVoiceId",
     "audio_max_age_seconds": "audioMaxAgeSeconds",
+    "open_at_login": "openAtLogin",
 }
 _DRAFT_FIELDS = frozenset(
     {
@@ -103,6 +104,12 @@ _DRAFT_FIELDS = frozenset(
         "tts.gptSovitsUrl",
         "tts.defaultVoiceId",
         "tts.audioMaxAgeSeconds",
+        "computer",
+        "computer.stateEnabled",
+        "computer.actionsEnabled",
+        "computer.remoteReportEnabled",
+        "desktop",
+        "desktop.openAtLogin",
     }
 )
 _REQUEST_FIELDS_BY_ROUTE = {

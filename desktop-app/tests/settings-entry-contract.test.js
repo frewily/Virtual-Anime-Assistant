@@ -13,6 +13,7 @@ async function loadMain({ openExternal = async () => {} } = {}) {
         openExternalCalls: [],
         backendStarts: 0,
         backendStops: 0,
+        startupReconciles: 0,
         quitCalls: 0,
         templates: [],
         appEvents: new Map(),
@@ -81,6 +82,13 @@ async function loadMain({ openExternal = async () => {} } = {}) {
                     }
                 };
             }
+            if (request === './desktop-startup') {
+                return {
+                    async reconcileDesktopStartup() {
+                        state.startupReconciles += 1;
+                    }
+                };
+            }
             throw new Error(`Unexpected require: ${request}`);
         }
     };
@@ -94,6 +102,7 @@ test('tray settings entry opens only the fixed local settings URL', async () => 
     const { state } = await loadMain();
     assert.equal(state.templates.length, 1);
     assert.equal(state.backendStarts, 1);
+    assert.equal(state.startupReconciles, 1);
 
     const template = state.templates[0];
     const labels = Array.from(template)

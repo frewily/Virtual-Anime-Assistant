@@ -73,6 +73,7 @@ test('macOS release workflow separates ad-hoc artifacts from official releases',
     assert.match(workflow, /secrets\.CSC_LINK/);
     assert.match(workflow, /secrets\.APPLE_APP_SPECIFIC_PASSWORD/);
     assert.match(workflow, /test "\$release_mode" = "official"/);
+    assert.match(workflow, /unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID/);
     assert.match(workflow, /hdiutil verify/);
     assert.match(workflow, /codesign --verify --deep --strict/);
     assert.match(workflow, /shasum -a 256/);

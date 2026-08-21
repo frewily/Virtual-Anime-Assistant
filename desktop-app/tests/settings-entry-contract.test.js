@@ -11,8 +11,11 @@ async function loadMain({ openExternal = async () => {} } = {}) {
     const source = fs.readFileSync(mainPath, 'utf8');
     const state = {
         openExternalCalls: [],
+        backendStarts: 0,
+        backendStops: 0,
         quitCalls: 0,
         templates: [],
+        appEvents: new Map(),
         errors: []
     };
     const shell = {
@@ -42,7 +45,7 @@ async function loadMain({ openExternal = async () => {} } = {}) {
     const electron = {
         app: {
             whenReady: () => Promise.resolve(),
-            on() {},
+            on(event, callback) { state.appEvents.set(event, callback); },
             quit: () => { state.quitCalls += 1; }
         },
         BrowserWindow,
@@ -68,18 +71,29 @@ async function loadMain({ openExternal = async () => {} } = {}) {
             if (request === 'electron') return electron;
             if (request === 'fs') return { existsSync: () => true };
             if (request === 'path') return path;
+            if (request === './backend-supervisor') {
+                return {
+                    createDesktopBackendSupervisor() {
+                        return {
+                            async start() { state.backendStarts += 1; },
+                            stop() { state.backendStops += 1; }
+                        };
+                    }
+                };
+            }
             throw new Error(`Unexpected require: ${request}`);
         }
     };
 
     vm.runInNewContext(source, sandbox, { filename: mainPath });
-    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
     return { source, state };
 }
 
 test('tray settings entry opens only the fixed local settings URL', async () => {
     const { state } = await loadMain();
     assert.equal(state.templates.length, 1);
+    assert.equal(state.backendStarts, 1);
 
     const template = state.templates[0];
     const labels = Array.from(template)
@@ -91,6 +105,15 @@ test('tray settings entry opens only the fixed local settings URL', async () => 
     assert.equal(typeof settingsItem.click, 'function');
     await settingsItem.click({ url: 'https://attacker.invalid' });
     assert.deepEqual(state.openExternalCalls, [[SETTINGS_URL]]);
+});
+
+test('desktop lifecycle starts and stops the managed backend', async () => {
+    const { state } = await loadMain();
+
+    assert.equal(state.backendStarts, 1);
+    assert.equal(typeof state.appEvents.get('before-quit'), 'function');
+    state.appEvents.get('before-quit')();
+    assert.equal(state.backendStops, 1);
 });
 
 test('settings entry handles browser launch rejection without quitting', async () => {

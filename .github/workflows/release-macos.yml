@@ -76,6 +76,7 @@ jobs:
           if [[ "$RELEASE_MODE" == "official" ]]; then
             npm --prefix desktop-app run build:mac:release
           else
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
             npm --prefix desktop-app run build:mac:local
           fi
 

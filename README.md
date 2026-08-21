@@ -60,11 +60,31 @@ npm start
 
 `npm start` 会先通过 esbuild 生成本地 renderer bundle，再启动 Electron。页面不会从远程 CDN 执行脚本。
 
-Electron 会先检查固定的 `127.0.0.1:8080` 健康接口：已有后端时直接复用，未运行时在开发环境以 `python3 backend/main.py` 启动，并在异常退出后执行最多 5 次有界重试。退出 Electron 时只终止由它创建的后端，不会终止用户预先启动的服务。打包环境固定查找 `resources/backend/vaa-backend`；生成并随安装包附带该后端可执行文件属于后续打包任务。
+Electron 会先检查固定的 `127.0.0.1:8080` 健康接口：已有后端时直接复用，未运行时在开发环境以 `python3 backend/main.py` 启动，并在异常退出后执行最多 5 次有界重试。退出 Electron 时只终止由它创建的后端，不会终止用户预先启动的服务。打包环境固定查找 `resources/backend/vaa-backend`（Windows 为 `.exe`）；桌面构建会先用 PyInstaller 生成并附带该文件。
 
 “电脑”设置中的“登录系统时自动启动助手”默认关闭。保存后，正式安装版会在下次启动时通过 Electron 的系统原生登录启动接口应用该选项；开发版不会注册 Electron 开发运行时，Linux 当前也不会修改系统启动项。
 
 `npm run setup:live2d-dev` 仅用于恢复本地开发样例。没有执行该命令时，Electron 仍可启动，并显示缺少 Live2D 开发资源的提示。
+
+### 构建 macOS 安装包
+
+构建依赖与运行依赖分开安装，避免把 PyInstaller 加入云端运行镜像：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r backend/requirements.txt -r backend/requirements-build.txt
+npm --prefix desktop-app ci
+ASSISTANT_PACKAGING_PYTHON="$PWD/.venv/bin/python" npm --prefix desktop-app run build
+```
+
+产物位于 `desktop-app/dist/`，后端暂存文件位于被 Git 忽略的
+`desktop-app/build-resources/`。安装包只附带公开的根级 `config/*.yml`，不会附带
+`config/local/`、Token、API Key、SSH 私钥或本机设置文件。打包后的后端会把生成
+音频写入 Electron 用户数据目录，不会尝试写入只读应用包。
+
+当前本地构建未进行 Apple Developer ID 签名和公证，只适合开发验收；公开分发前
+必须补齐签名、公证和正式应用图标。受许可限制的 Live2D 开发样例仍不会进入安装包。
 
 ## Web 配置界面
 

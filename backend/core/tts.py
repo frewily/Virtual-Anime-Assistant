@@ -13,7 +13,12 @@ from core.config_loader import load_voice_catalog
 
 logger = logging.getLogger(__name__)
 
-AUDIO_DIR = Path(__file__).resolve().parent.parent / "audio"
+_configured_audio_dir = os.getenv("ASSISTANT_AUDIO_DIR", "").strip()
+AUDIO_DIR = (
+    Path(_configured_audio_dir).expanduser()
+    if _configured_audio_dir
+    else Path(__file__).resolve().parent.parent / "audio"
+)
 DEFAULT_GPT_SOVITS_URL = "http://127.0.0.1:9880"
 DEFAULT_AUDIO_MAX_AGE_SECONDS = 24 * 60 * 60
 

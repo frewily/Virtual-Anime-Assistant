@@ -7,5 +7,20 @@ files:
   - "!src/renderer/assets/dev-live2d/**/*"
   - package.json
 asar: true
+extraResources:
+  - from: build-resources/backend
+    to: backend
+    filter:
+      - vaa-backend
+      - vaa-backend.exe
+  - from: ../config
+    to: config
+    filter:
+      - "*.yml"
+      - "*.yaml"
+artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+mac:
+  target: dmg
+  category: public.app-category.productivity
 win:
   target: nsis

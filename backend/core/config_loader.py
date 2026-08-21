@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -7,7 +8,12 @@ from typing import Any
 import yaml
 
 _workspace = Path(__file__).resolve().parent.parent.parent
-_config_dir = _workspace / "config"
+_bundled_config_dir = os.getenv("ASSISTANT_BUNDLED_CONFIG_DIR", "").strip()
+_config_dir = (
+    Path(_bundled_config_dir).expanduser()
+    if _bundled_config_dir
+    else _workspace / "config"
+)
 _VOICE_CATALOG_ERROR = "invalid voice catalog"
 
 

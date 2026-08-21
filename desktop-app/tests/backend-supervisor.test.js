@@ -127,6 +127,31 @@ test('forces the managed backend to the fixed loopback endpoint', () => {
     assert.equal(environment.ASSISTANT_COMPUTER_DEVICE_ID, 'macbook-main');
 });
 
+test('packaged backend receives only fixed bundled and writable resource paths', () => {
+    const environment = createBackendEnvironment({
+        ASSISTANT_BUNDLED_CONFIG_DIR: '/attacker/config',
+        ASSISTANT_AUDIO_DIR: '/attacker/audio'
+    }, {
+        isPackaged: true,
+        resourcesPath: '/Applications/Assistant.app/Contents/Resources',
+        userDataPath: '/Users/example/Library/Application Support/Assistant'
+    });
+
+    assert.equal(
+        environment.ASSISTANT_BUNDLED_CONFIG_DIR,
+        '/Applications/Assistant.app/Contents/Resources/config'
+    );
+    assert.equal(
+        environment.ASSISTANT_AUDIO_DIR,
+        '/Users/example/Library/Application Support/Assistant/audio'
+    );
+    assert.throws(() => createBackendEnvironment({}, {
+        isPackaged: true,
+        resourcesPath: 'relative/resources',
+        userDataPath: '/absolute/user-data'
+    }), /absolute/);
+});
+
 test('attaches to an already healthy backend without spawning or owning it', async () => {
     const { supervisor, spawnCalls } = makeSupervisor({ probes: [true] });
 

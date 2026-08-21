@@ -57,6 +57,12 @@ async function loadMain({ openExternal = async () => {} } = {}) {
                 return template;
             }
         },
+        nativeImage: {
+            createFromDataURL(value) {
+                assert.match(value, /^data:image\/svg\+xml;base64,/);
+                return { isEmpty: () => false };
+            }
+        },
         shell
     };
     const sandbox = {
@@ -67,10 +73,14 @@ async function loadMain({ openExternal = async () => {} } = {}) {
         module: { exports: {} },
         exports: {},
         process: { platform: 'darwin' },
+        Buffer,
         __dirname: path.dirname(mainPath),
         require(request) {
             if (request === 'electron') return electron;
-            if (request === 'fs') return { existsSync: () => true };
+            if (request === 'fs') return {
+                existsSync: () => true,
+                readFileSync: fs.readFileSync
+            };
             if (request === 'path') return path;
             if (request === './backend-supervisor') {
                 return {

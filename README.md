@@ -21,7 +21,7 @@ Virtual Anime Assistant 是一个实验阶段的跨平台桌面助手。Electron
 - 支持客户端提供 `messageId` 作为幂等键；重复消息不会再次调用模型，冲突或模型故障只返回安全错误。
 - 默认监听 `127.0.0.1` 回环地址，Electron renderer 不具备 Node.js 权限。
 
-QQ 私聊与群聊文字接入已通过真实 NapCat 联调，但默认关闭；NapCat 登录和 WebUI 配置仍需要用户手动完成。macOS 电脑能力也默认全部关闭，只包含读取状态、打开应用、打开公开 HTTPS 地址、调节音量和控制已知播放器，不是通用远程控制。正式安装包仍未实现。仓库当前工作树不直接提供受授权限制的 Live2D 模型或 Cubism Core SDK；本地开发时可以按下文说明从归档标签恢复 Hiyori 样例资源。
+QQ 私聊与群聊文字接入已通过真实 NapCat 联调，但默认关闭；NapCat 登录和 WebUI 配置仍需要用户手动完成。macOS 电脑能力也默认全部关闭，只包含读取状态、打开应用、打开公开 HTTPS 地址、调节音量和控制已知播放器，不是通用远程控制。macOS 本地验收安装包已经实现，公开发布仍需 Apple Developer ID 签名与公证；Windows 安装包尚未实现。仓库当前工作树不直接提供受授权限制的 Live2D 模型或 Cubism Core SDK；本地开发时可以按下文说明从归档标签恢复 Hiyori 样例资源。
 
 ## 环境要求
 
@@ -87,8 +87,22 @@ ASSISTANT_PACKAGING_PYTHON="$PWD/.venv/bin/python" npm --prefix desktop-app run 
 `audio/`，不会尝试写入只读应用包。
 
 本地 macOS 构建会使用临时签名，保证安装包结构可正常验收，但不会进行 Apple
-Developer ID 签名和公证；公开分发时应使用常规 `build` 命令并提供正式签名和
-公证凭据。受许可限制的 Live2D 开发样例仍不会进入安装包。
+Developer ID 签名和公证；公开分发时应使用 `build:mac:release` 命令并提供正式
+签名和公证凭据。受许可限制的 Live2D 开发样例仍不会进入安装包。
+
+### GitHub macOS 发布流水线
+
+`Build macOS Release` 工作流支持两种模式：
+
+- 从 GitHub Actions 手动运行时，如果没有配置 Apple 凭据，会生成临时签名的 DMG、
+  blockmap 和 `SHA256SUMS`，仅作为保留 14 天的验收产物。
+- 推送与 `desktop-app/package.json` 版本完全一致的 `v*` 标签时，必须同时配置
+  `CSC_LINK`、`CSC_KEY_PASSWORD`、`APPLE_ID`、
+  `APPLE_APP_SPECIFIC_PASSWORD` 和 `APPLE_TEAM_ID`。工作流会执行 Developer ID
+  签名、公证校验，并创建带自动发布说明的 GitHub Release；任一凭据缺失都会在
+  发布前失败，不会把临时签名版本公开发布。
+
+正式签名凭据只保存在 GitHub Actions Secrets 中，不写入仓库、日志或构建产物。
 
 ## Web 配置界面
 

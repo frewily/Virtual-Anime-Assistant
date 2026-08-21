@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
@@ -35,6 +36,10 @@ from api.ws import (
 from agent.monitor import run as run_window_monitor
 from core.runtime import AssistantRuntime
 from core.deployment import DeploymentSettings
+from core.desktop_access import (
+    DesktopAccessMiddleware,
+    normalize_desktop_access_token,
+)
 from core.tts import AUDIO_DIR
 from domain.tools import ToolEvent
 from settings.auth import LoginRateLimited, PasswordPolicyError
@@ -290,6 +295,7 @@ def create_app(
         [], SettingsService
     ] = create_settings_service,
     deployment_settings: DeploymentSettings | None = None,
+    desktop_access_token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Desktop Assistant API", version="1.0.0", lifespan=lifespan)
 
@@ -306,6 +312,11 @@ def create_app(
     app.state.settings_service_lock = threading.Lock()
     app.state.deployment_settings = (
         deployment_settings or DeploymentSettings.from_env()
+    )
+    app.state.desktop_access_token = normalize_desktop_access_token(
+        desktop_access_token
+        if desktop_access_token is not None
+        else os.getenv("ASSISTANT_DESKTOP_ACCESS_TOKEN")
     )
 
     @app.exception_handler(SettingsHttpError)
@@ -379,7 +390,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=["null", "file://"],
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "X-VAA-Desktop-Token"],
     )
 
     app.include_router(status_router, prefix="/api")
@@ -405,6 +416,10 @@ def create_app(
     )
 
     app.add_middleware(SettingsSecurityMiddleware)
+    app.add_middleware(
+        DesktopAccessMiddleware,
+        token=app.state.desktop_access_token,
+    )
 
     return app
 

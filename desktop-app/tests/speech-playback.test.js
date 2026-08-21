@@ -76,6 +76,36 @@ test('requests TTS once for text-only speak and plays the result', async () => {
     ]);
 });
 
+test('packaged playback fetches audio with the ephemeral token before playing', async () => {
+    const audio = audioHarness();
+    const requests = [];
+    const revoked = [];
+    const playback = createSpeechPlayback({
+        AudioCtor: audio.AudioCtor,
+        accessToken: 'a'.repeat(43),
+        fetchImpl: async (url, options) => {
+            requests.push({ url, options });
+            return {
+                ok: true,
+                async blob() { return { type: 'audio/mpeg' }; }
+            };
+        },
+        urlApi: {
+            createObjectURL: () => 'blob:authorized-audio',
+            revokeObjectURL: (url) => revoked.push(url)
+        }
+    });
+
+    assert.equal(await playback.handleSpeakAudio({
+        correlationId: 'protected-audio',
+        audioUrl: '/api/tts/audio/protected.mp3'
+    }), true);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].options.headers['X-VAA-Desktop-Token'], 'a'.repeat(43));
+    assert.deepEqual(audio.urls, ['blob:authorized-audio']);
+    assert.deepEqual(revoked, []);
+});
+
 test('ignores blank text and rejects cross-origin audio URLs', async () => {
     const audio = audioHarness();
     let fetchCalls = 0;

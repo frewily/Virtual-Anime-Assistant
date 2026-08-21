@@ -1,18 +1,65 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, shell } = require('electron');
-const fs = require('fs');
+const {
+    app,
+    BrowserWindow,
+    ipcMain,
+    Tray,
+    Menu,
+    nativeImage,
+    shell
+} = require('electron');
 const path = require('path');
+const { pathToFileURL } = require('node:url');
 const { createDesktopBackendSupervisor } = require('./backend-supervisor');
 const { reconcileDesktopStartup } = require('./desktop-startup');
+const { createRuntimeConnection } = require('./runtime-connection');
 
-const SETTINGS_URL = 'http://127.0.0.1:8080/settings';
+const RUNTIME_CHANNEL = 'desktop-runtime:get';
 
 let mainWindow;
 let tray;
-const backendSupervisor = createDesktopBackendSupervisor({ app });
+let backendSupervisor = null;
+let runtimeConnection = null;
+
+function rendererEntryUrl() {
+    return pathToFileURL(
+        path.join(__dirname, 'renderer/index.html')
+    ).toString();
+}
+
+function publicRuntimeConnection(connection) {
+    return {
+        host: connection.host,
+        port: connection.port,
+        accessToken: connection.accessToken,
+        httpOrigin: connection.httpOrigin,
+        wsOrigin: connection.wsOrigin
+    };
+}
+
+function installRuntimeIpc(connection) {
+    const allowedUrl = rendererEntryUrl();
+    ipcMain.on(RUNTIME_CHANNEL, (event) => {
+        const senderUrl = event.senderFrame?.url;
+        event.returnValue = senderUrl === allowedUrl
+            ? publicRuntimeConnection(connection)
+            : null;
+    });
+}
+
+function settingsUrl(connection) {
+    const url = new URL('/settings', connection.httpOrigin);
+    if (connection.accessToken) {
+        url.hash = new URLSearchParams({
+            desktopToken: connection.accessToken
+        }).toString();
+    }
+    return url.toString();
+}
 
 async function openSettings() {
     try {
-        await shell.openExternal(SETTINGS_URL);
+        if (!runtimeConnection) throw new Error('runtime unavailable');
+        await shell.openExternal(settingsUrl(runtimeConnection));
     } catch {
         console.error('[Settings] Unable to open settings page.');
     }
@@ -45,16 +92,8 @@ function createWindow() {
 }
 
 function createTray() {
-    const iconPath = path.join(__dirname, 'assets/tray-icon.svg');
-    if (!fs.existsSync(iconPath)) {
-        console.warn(`[Tray] Icon not found: ${iconPath}`);
-        return;
-    }
-
-    const source = fs.readFileSync(iconPath, 'utf8');
-    const icon = nativeImage.createFromDataURL(
-        `data:image/svg+xml;base64,${Buffer.from(source).toString('base64')}`
-    );
+    const iconPath = path.join(__dirname, 'assets/tray-icon.png');
+    const icon = nativeImage.createFromPath(iconPath);
     if (icon.isEmpty()) {
         console.warn('[Tray] Icon could not be loaded.');
         return;
@@ -75,14 +114,25 @@ function createTray() {
 }
 
 app.whenReady().then(async () => {
+    runtimeConnection = await createRuntimeConnection({
+        isPackaged: app.isPackaged
+    });
+    installRuntimeIpc(runtimeConnection);
+    backendSupervisor = createDesktopBackendSupervisor({
+        app,
+        connection: runtimeConnection
+    });
     await backendSupervisor.start();
     await reconcileDesktopStartup({ app });
     createWindow();
     createTray();
+}).catch(() => {
+    console.error('[Desktop] Unable to initialize local runtime.');
+    app.quit();
 });
 
 app.on('before-quit', () => {
-    backendSupervisor.stop();
+    backendSupervisor?.stop();
 });
 
 app.on('window-all-closed', () => {

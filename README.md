@@ -60,7 +60,9 @@ npm start
 
 `npm start` 会先通过 esbuild 生成本地 renderer bundle，再启动 Electron。页面不会从远程 CDN 执行脚本。
 
-Electron 会先检查固定的 `127.0.0.1:8080` 健康接口：已有后端时直接复用，未运行时在开发环境以 `python3 backend/main.py` 启动，并在异常退出后执行最多 5 次有界重试。退出 Electron 时只终止由它创建的后端，不会终止用户预先启动的服务。打包环境固定查找 `resources/backend/vaa-backend`（Windows 为 `.exe`）；桌面构建会先用 PyInstaller 生成并附带该文件。
+开发环境下，Electron 会先检查固定的 `127.0.0.1:8080` 健康接口：已有后端时直接复用，未运行时以 `python3 backend/main.py` 启动。正式安装版每次启动会分配一个临时回环端口和 256 位随机访问令牌，不复用固定端口上的服务；HTTP、语音文件和桌面 WebSocket 都必须携带该次启动的凭据。令牌只在本次 Electron 与后端进程中存在，不写入配置、日志或安装包。后端异常退出后最多执行 5 次有界重试，退出 Electron 时只终止由它创建的后端。
+
+打包环境固定查找 `resources/backend/vaa-backend`（Windows 为 `.exe`）；桌面构建会先用 PyInstaller 生成并附带该文件。安装版允许后端单文件程序冷启动最多等待 30 秒，开发版保持 10 秒就绪窗口。
 
 “电脑”设置中的“登录系统时自动启动助手”默认关闭。保存后，正式安装版会在下次启动时通过 Electron 的系统原生登录启动接口应用该选项；开发版不会注册 Electron 开发运行时，Linux 当前也不会修改系统启动项。
 
@@ -81,14 +83,15 @@ ASSISTANT_PACKAGING_PYTHON="$PWD/.venv/bin/python" npm --prefix desktop-app run 
 产物位于 `desktop-app/dist/`，后端暂存文件位于被 Git 忽略的
 `desktop-app/build-resources/`。安装包只附带公开的根级 `config/*.yml`，不会附带
 `config/local/`、Token、API Key、SSH 私钥或本机设置文件。打包后的后端会把生成
-音频写入 Electron 用户数据目录，不会尝试写入只读应用包。
+设置、SQLite、音频分别写入 Electron 用户数据目录下的 `config/`、`data/`、
+`audio/`，不会尝试写入只读应用包。
 
 当前本地构建未进行 Apple Developer ID 签名和公证，只适合开发验收；公开分发前
 必须补齐签名、公证和正式应用图标。受许可限制的 Live2D 开发样例仍不会进入安装包。
 
 ## Web 配置界面
 
-后端启动后，访问 `http://127.0.0.1:8080/settings`，或点击 Electron 托盘菜单中的「设置」。首次访问需要创建长度为 10～128 个字符的本地管理密码；后续操作使用 30 分钟绝对有效期的内存会话。会话 Cookie 设为 `HttpOnly`、`SameSite=Strict`、`Path=/` 且不指定 `Domain`，所有写操作还需要 CSRF Token。
+开发后端启动后，可访问 `http://127.0.0.1:8080/settings`。安装版应从 Electron 托盘菜单点击「设置」：应用通过 URL 片段把本次临时令牌交给页面，页面立即清除片段，并换取仅当前浏览器会话有效的 HttpOnly Cookie。首次访问还需要创建长度为 10～128 个字符的本地管理密码；后续操作使用 30 分钟绝对有效期的内存会话。会话 Cookie 设为 `HttpOnly`、`SameSite=Strict`、`Path=/` 且不指定 `Domain`，所有写操作还需要 CSRF Token。
 
 页面可以管理以下内容：
 
@@ -100,7 +103,7 @@ ASSISTANT_PACKAGING_PYTHON="$PWD/.venv/bin/python" npm --prefix desktop-app run 
 
 非敏感值写入平台配置目录下的 `settings.json`。LLM API Key 和 QQ Access Token 通过 Python `keyring` 写入 macOS Keychain 或 Windows Credential Manager，不会写入 `settings.json`；页面只允许以 `retain`、`replace`、`delete`（保留、替换、删除）表达凭据操作，也不会回显已有秘密。首版正式支持 macOS 与 Windows 的系统凭据库；Linux 的凭据存储尚未作为支持目标，凭据库不可用时页面会禁用秘密修改并给出提示。
 
-默认配置文件位置如下：
+直接运行后端时，默认配置文件位置如下；安装版统一使用 Electron 用户数据目录下的 `config/settings.json`：
 
 - macOS：`~/Library/Application Support/Virtual Anime Assistant/settings.json`
 - Windows：`%LOCALAPPDATA%\Virtual Anime Assistant\settings.json`
@@ -355,7 +358,7 @@ HTTP 和 WebSocket 聊天请求可以提供长度为 1～200 的 `messageId`。�
 
 记忆与会话管理 API 当前仅支持本机 `local-user`：来源固定为 `desktop`，可管理的会话固定为 `desktop:local-user`。其他用户或来源的数据不会由这些端点返回或删除。
 
-`/settings` 和 `/api/settings/*` 具有独立的本机安全边界：客户端地址只允许 `127.0.0.1` 或 `::1`，`Host` 必须精确为 `127.0.0.1:8080`，状态变更请求的 `Origin` 必须精确为 `http://127.0.0.1:8080`；受保护接口还需要密码会话和 CSRF Token。这些限制不代表上方旧有管理 API 已获得相同鉴权，部署时仍须遵守前文的本机监听安全提示。
+`/settings` 和 `/api/settings/*` 具有独立的本机安全边界：客户端地址只允许 `127.0.0.1` 或 `::1`，`Host` 与状态变更请求的 `Origin` 必须精确匹配后端当前回环端口；受保护接口还需要密码会话和 CSRF Token。安装版还在全部本机 HTTP API 外增加每次启动的临时令牌，并为 `/ws/avatar` 使用同一令牌派生的 WebSocket 子协议；QQ `/ws/qq` 继续使用独立的 OneBot 鉴权。直接开发运行未配置桌面令牌时，其他旧有管理 API 不会自动获得这层鉴权，仍须遵守本机监听安全提示。
 
 ## 测试
 

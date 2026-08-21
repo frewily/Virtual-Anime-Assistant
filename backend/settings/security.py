@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from starlette.datastructures import MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
-SETTINGS_HOST = b"127.0.0.1:8080"
-SETTINGS_ORIGIN = b"http://127.0.0.1:8080"
 SETTINGS_SESSION_COOKIE = "vaa_settings_session"
 LOCAL_CLIENTS = frozenset({"127.0.0.1", "::1"})
 STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
@@ -68,6 +67,11 @@ class SettingsSecurityMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
+        port = os.getenv("ASSISTANT_PORT", "8080").strip()
+        if not port.isascii() or not port.isdigit() or not (1 <= int(port) <= 65535):
+            raise ValueError("invalid settings port")
+        self.settings_host = f"127.0.0.1:{port}".encode("ascii")
+        self.settings_origin = f"http://127.0.0.1:{port}".encode("ascii")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "websocket" and is_settings_path(scope.get("path")):
@@ -82,8 +86,8 @@ class SettingsSecurityMiddleware:
         host = _single_header(scope, b"host")
         origin_ok = True
         if scope.get("method", "").upper() in STATE_CHANGING_METHODS:
-            origin_ok = _single_header(scope, b"origin") == SETTINGS_ORIGIN
-        if client_host not in LOCAL_CLIENTS or host != SETTINGS_HOST or not origin_ok:
+            origin_ok = _single_header(scope, b"origin") == self.settings_origin
+        if client_host not in LOCAL_CLIENTS or host != self.settings_host or not origin_ok:
             await access_denied_response()(scope, receive, send)
             return
 

@@ -5,6 +5,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from channels.desktop import client_payload_to_message, response_to_desktop_payload
 from domain.responses import AssistantResponse
+from core.desktop_access import desktop_websocket_subprotocol
 
 router = APIRouter()
 
@@ -93,8 +94,14 @@ async def avatar_websocket(ws: WebSocket):
         await ws.close(code=1008, reason="origin not allowed")
         return
 
+    access_token = ws.app.state.desktop_access_token
+    subprotocol = desktop_websocket_subprotocol(ws.scope, access_token)
+    if access_token is not None and subprotocol is None:
+        await ws.close(code=1008, reason="access denied")
+        return
+
     hub: DesktopWebSocketHub = ws.app.state.desktop_hub
-    await ws.accept()
+    await ws.accept(subprotocol=subprotocol)
     hub.attach(ws)
     try:
         while True:

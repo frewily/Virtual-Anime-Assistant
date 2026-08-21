@@ -5,7 +5,9 @@ function createSpeechPlayback({
     fetchImpl = (...args) => window.fetch(...args),
     AudioCtor = window.Audio,
     logger = console,
-    backendUrl = DEFAULT_BACKEND_URL
+    backendUrl = DEFAULT_BACKEND_URL,
+    accessToken = null,
+    urlApi = globalThis.URL
 } = {}) {
     const backend = new URL(backendUrl);
     const processed = new Set();
@@ -35,14 +37,40 @@ function createSpeechPlayback({
         }
     }
 
+    function accessHeaders(headers = {}) {
+        return accessToken
+            ? { ...headers, 'X-VAA-Desktop-Token': accessToken }
+            : { ...headers };
+    }
+
+    async function authorizedAudioUrl(url) {
+        if (!accessToken) return { url, revoke: null };
+        const response = await fetchImpl(url, {
+            headers: accessHeaders({ Accept: 'audio/*' })
+        });
+        if (!response.ok) throw new Error('audio request failed');
+        const objectUrl = urlApi.createObjectURL(await response.blob());
+        return {
+            url: objectUrl,
+            revoke: () => urlApi.revokeObjectURL(objectUrl)
+        };
+    }
+
     async function playAudio(value) {
         const url = resolveAudioUrl(value);
         if (!url) return false;
+        let playable = null;
         try {
-            const audio = new AudioCtor(url);
+            playable = await authorizedAudioUrl(url);
+            const audio = new AudioCtor(playable.url);
+            if (playable.revoke && typeof audio.addEventListener === 'function') {
+                audio.addEventListener('ended', playable.revoke, { once: true });
+                audio.addEventListener('error', playable.revoke, { once: true });
+            }
             await Promise.resolve(audio.play());
             return true;
         } catch {
+            if (playable?.revoke) playable.revoke();
             logger.warn('Live2D audio playback failed');
             return false;
         }
@@ -62,7 +90,7 @@ function createSpeechPlayback({
                 new URL('/api/tts/speak', backend).toString(),
                 {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: accessHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({ text })
                 }
             );

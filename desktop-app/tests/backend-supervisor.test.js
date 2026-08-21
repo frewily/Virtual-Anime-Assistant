@@ -6,8 +6,15 @@ const test = require('node:test');
 const {
     BackendSupervisor,
     createBackendEnvironment,
+    probeBackend,
     resolveBackendLaunch
 } = require('../src/backend-supervisor');
+const { buildConnection } = require('../src/runtime-connection');
+
+const PACKAGED_CONNECTION = buildConnection(
+    49152,
+    'a'.repeat(43)
+);
 
 class FakeChild extends EventEmitter {
     constructor() {
@@ -22,7 +29,11 @@ class FakeChild extends EventEmitter {
     }
 }
 
-function makeSupervisor({ probes = [false, true], child = new FakeChild() } = {}) {
+function makeSupervisor({
+    probes = [false, true],
+    child = new FakeChild(),
+    readyAttempts
+} = {}) {
     const spawnCalls = [];
     const timers = [];
     const logs = [];
@@ -52,6 +63,7 @@ function makeSupervisor({ probes = [false, true], child = new FakeChild() } = {}
         cancel(timer) {
             timer.cancelled = true;
         },
+        ...(readyAttempts === undefined ? {} : { readyAttempts }),
         logger: {
             info: (message) => logs.push(['info', message]),
             warn: (message) => logs.push(['warn', message]),
@@ -60,6 +72,22 @@ function makeSupervisor({ probes = [false, true], child = new FakeChild() } = {}
     });
     return { supervisor, spawnCalls, timers, logs, child };
 }
+
+test('readiness budget is configurable for slower packaged cold starts', async () => {
+    const { supervisor, child } = makeSupervisor({
+        probes: [false],
+        readyAttempts: 3
+    });
+
+    assert.equal(await supervisor.start(), false);
+    assert.deepEqual(child.kills, ['SIGTERM']);
+    assert.equal(supervisor.readyAttempts, 3);
+    assert.throws(() => new BackendSupervisor({
+        launch: { command: '/safe/backend', args: [], cwd: '/safe' },
+        environment: {},
+        readyAttempts: 0
+    }), /positive integer/);
+});
 
 test('resolves fixed development and packaged backend launches', () => {
     const development = resolveBackendLaunch({
@@ -134,7 +162,8 @@ test('packaged backend receives only fixed bundled and writable resource paths',
     }, {
         isPackaged: true,
         resourcesPath: '/Applications/Assistant.app/Contents/Resources',
-        userDataPath: '/Users/example/Library/Application Support/Assistant'
+        userDataPath: '/Users/example/Library/Application Support/Assistant',
+        connection: PACKAGED_CONNECTION
     });
 
     assert.equal(
@@ -145,11 +174,48 @@ test('packaged backend receives only fixed bundled and writable resource paths',
         environment.ASSISTANT_AUDIO_DIR,
         '/Users/example/Library/Application Support/Assistant/audio'
     );
+    assert.equal(environment.ASSISTANT_PORT, '49152');
+    assert.equal(environment.ASSISTANT_DESKTOP_ACCESS_TOKEN, 'a'.repeat(43));
+    assert.equal(
+        environment.ASSISTANT_CONFIG_DIR,
+        '/Users/example/Library/Application Support/Assistant/config'
+    );
+    assert.equal(
+        environment.ASSISTANT_DATA_DIR,
+        '/Users/example/Library/Application Support/Assistant/data'
+    );
     assert.throws(() => createBackendEnvironment({}, {
         isPackaged: true,
         resourcesPath: 'relative/resources',
-        userDataPath: '/absolute/user-data'
+        userDataPath: '/absolute/user-data',
+        connection: PACKAGED_CONNECTION
     }), /absolute/);
+    assert.throws(() => createBackendEnvironment({}, {
+        isPackaged: true,
+        resourcesPath: '/absolute/resources',
+        userDataPath: '/absolute/user-data'
+    }), /access token/);
+});
+
+test('health probe targets the runtime port and authenticates without logging secrets', async () => {
+    let options;
+    const request = (received, callback) => {
+        options = received;
+        const response = new EventEmitter();
+        response.statusCode = 200;
+        response.resume = () => {};
+        const requestInstance = new EventEmitter();
+        requestInstance.destroy = () => {};
+        queueMicrotask(() => callback(response));
+        return requestInstance;
+    };
+
+    assert.equal(await probeBackend({
+        request,
+        connection: PACKAGED_CONNECTION
+    }), true);
+    assert.equal(options.port, 49152);
+    assert.equal(options.headers['X-VAA-Desktop-Token'], 'a'.repeat(43));
 });
 
 test('attaches to an already healthy backend without spawning or owning it', async () => {

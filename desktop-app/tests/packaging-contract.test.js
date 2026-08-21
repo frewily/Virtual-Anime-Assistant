@@ -53,6 +53,34 @@ test('local macOS builds use ad-hoc signing without overriding release signing',
     assert.doesNotMatch(packageJson.scripts.build, /config\.mac\.identity/);
 });
 
+test('macOS release workflow separates ad-hoc artifacts from official releases', () => {
+    const packageJson = JSON.parse(read(path.join(desktopRoot, 'package.json')));
+    const workflow = read(path.join(repositoryRoot, '.github', 'workflows', 'release-macos.yml'));
+
+    assert.match(packageJson.scripts['build:mac:release'], /build:renderer/);
+    assert.match(packageJson.scripts['build:mac:release'], /build:backend/);
+    assert.match(packageJson.scripts['build:mac:release'], /electron-builder --mac dmg/);
+    assert.doesNotMatch(packageJson.scripts['build:mac:release'], /identity=-/);
+    assert.match(workflow, /workflow_dispatch:/);
+    assert.match(workflow, /tags:\s*\["v\*"\]/);
+    assert.doesNotMatch(workflow, /pull_request:/);
+    assert.match(workflow, /permissions:\s*\n\s+contents: write/);
+    assert.match(workflow, /runs-on: macos-14/);
+    assert.match(workflow, /backend\/requirements-build\.txt/);
+    assert.match(workflow, /npm ci --prefix desktop-app/);
+    assert.match(workflow, /build:mac:local/);
+    assert.match(workflow, /build:mac:release/);
+    assert.match(workflow, /secrets\.CSC_LINK/);
+    assert.match(workflow, /secrets\.APPLE_APP_SPECIFIC_PASSWORD/);
+    assert.match(workflow, /test "\$release_mode" = "official"/);
+    assert.match(workflow, /hdiutil verify/);
+    assert.match(workflow, /codesign --verify --deep --strict/);
+    assert.match(workflow, /shasum -a 256/);
+    assert.match(workflow, /actions\/upload-artifact@v4/);
+    assert.match(workflow, /gh release create/);
+    assert.match(workflow, /github\.ref_type == 'tag'/);
+});
+
 test('PyInstaller spec carries local settings assets and dynamic keyring backends', () => {
     const source = read(path.join(repositoryRoot, 'backend', 'vaa-backend.spec'));
 

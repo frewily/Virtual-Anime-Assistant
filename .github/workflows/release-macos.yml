@@ -1,0 +1,123 @@
+name: Build macOS Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vaa-macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-build.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Validate release mode and version tag
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -Eeuo pipefail
+          release_mode=ad-hoc
+          if [[ -n "$CSC_LINK" && -n "$CSC_KEY_PASSWORD" && -n "$APPLE_ID" && -n "$APPLE_APP_SPECIFIC_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+            release_mode=official
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="$(node -p "require('./desktop-app/package.json').version")"
+            test "$GITHUB_REF_NAME" = "v$version"
+            test "$release_mode" = "official"
+          fi
+          echo "RELEASE_MODE=$release_mode" >> "$GITHUB_ENV"
+
+      - name: Install packaging dependencies
+        run: |
+          set -Eeuo pipefail
+          python -m pip install -r backend/requirements.txt -r backend/requirements-build.txt
+          npm ci --prefix desktop-app
+          python_path="$(python -c 'import sys; print(sys.executable)')"
+          echo "ASSISTANT_PACKAGING_PYTHON=$python_path" >> "$GITHUB_ENV"
+
+      - name: Run desktop tests
+        run: npm test --prefix desktop-app
+
+      - name: Build signed macOS disk image
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$RELEASE_MODE" == "official" ]]; then
+            npm --prefix desktop-app run build:mac:release
+          else
+            npm --prefix desktop-app run build:mac:local
+          fi
+
+      - name: Verify application and disk image
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          apps=(desktop-app/dist/mac-*/*.app)
+          dmgs=(desktop-app/dist/*.dmg)
+          test "${#apps[@]}" -eq 1
+          test "${#dmgs[@]}" -eq 1
+          app_path="${apps[0]}"
+          dmg_path="${dmgs[0]}"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          hdiutil verify "$dmg_path"
+          if [[ "$RELEASE_MODE" == "official" ]]; then
+            xcrun stapler validate "$app_path"
+          fi
+          shasum -a 256 "$dmg_path" | sed 's#  desktop-app/dist/#  #' > desktop-app/dist/SHA256SUMS
+          echo "DMG_PATH=$dmg_path" >> "$GITHUB_ENV"
+
+      - name: Upload verified macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-Assistant-macOS-${{ github.sha }}
+          path: |
+            ${{ env.DMG_PATH }}
+            ${{ env.DMG_PATH }}.blockmap
+            desktop-app/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish versioned GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "$DMG_PATH" \
+            "$DMG_PATH.blockmap" \
+            desktop-app/dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "Desktop Assistant $GITHUB_REF_NAME"

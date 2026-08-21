@@ -67,7 +67,11 @@ function resolveBackendLaunch({
     };
 }
 
-function createBackendEnvironment(environment) {
+function createBackendEnvironment(environment, {
+    isPackaged = false,
+    resourcesPath = '',
+    userDataPath = ''
+} = {}) {
     const childEnvironment = {
         ...environment,
         ASSISTANT_HOST: BACKEND_HOST,
@@ -75,6 +79,16 @@ function createBackendEnvironment(environment) {
     };
     delete childEnvironment.ASSISTANT_BACKEND_EXECUTABLE;
     delete childEnvironment.ASSISTANT_PYTHON_EXECUTABLE;
+    if (isPackaged) {
+        if (!path.isAbsolute(resourcesPath) || !path.isAbsolute(userDataPath)) {
+            throw new Error('packaged backend paths must be absolute');
+        }
+        childEnvironment.ASSISTANT_BUNDLED_CONFIG_DIR = path.join(
+            resourcesPath,
+            'config'
+        );
+        childEnvironment.ASSISTANT_AUDIO_DIR = path.join(userDataPath, 'audio');
+    }
     return childEnvironment;
 }
 
@@ -275,7 +289,11 @@ function createDesktopBackendSupervisor({
     });
     return new BackendSupervisor({
         launch,
-        environment: createBackendEnvironment(managedEnvironment),
+        environment: createBackendEnvironment(managedEnvironment, {
+            isPackaged: app.isPackaged,
+            resourcesPath,
+            userDataPath: app.getPath('userData')
+        }),
         logger
     });
 }

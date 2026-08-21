@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { createDesktopBackendSupervisor } = require('./backend-supervisor');
@@ -45,13 +45,21 @@ function createWindow() {
 }
 
 function createTray() {
-    const iconPath = path.join(__dirname, 'assets/icon.png');
+    const iconPath = path.join(__dirname, 'assets/tray-icon.svg');
     if (!fs.existsSync(iconPath)) {
         console.warn(`[Tray] Icon not found: ${iconPath}`);
         return;
     }
 
-    tray = new Tray(iconPath);
+    const source = fs.readFileSync(iconPath, 'utf8');
+    const icon = nativeImage.createFromDataURL(
+        `data:image/svg+xml;base64,${Buffer.from(source).toString('base64')}`
+    );
+    if (icon.isEmpty()) {
+        console.warn('[Tray] Icon could not be loaded.');
+        return;
+    }
+    tray = new Tray(icon);
     
     const contextMenu = Menu.buildFromTemplate([
         { label: '显示', click: () => mainWindow?.show() },

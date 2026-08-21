@@ -3,6 +3,7 @@ node_modules/
 desktop-app/dist/
 desktop-app/node_modules/
 desktop-app/src/renderer/dist/
+desktop-app/build-resources/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

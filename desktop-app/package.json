@@ -6,10 +6,11 @@
   "scripts": {
     "build:renderer": "esbuild src/renderer/js/renderer.js --bundle --platform=browser --format=iife --outfile=src/renderer/dist/renderer.js",
     "setup:live2d-dev": "node scripts/setup-live2d-dev.js",
+    "build:backend": "node scripts/build-backend.js",
     "start": "npm run build:renderer && electron .",
     "test": "npm run test:unit && npm run build:renderer && node --check src/main.js && node --check src/preload.js",
     "test:unit": "node --test tests/*.test.js",
-    "build": "npm run build:renderer && electron-builder"
+    "build": "npm run build:renderer && npm run build:backend && electron-builder"
   },
   "keywords": [
     "electron",

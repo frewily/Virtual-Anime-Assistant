@@ -1,6 +1,7 @@
 const { spawn } = require('node:child_process');
 const http = require('node:http');
 const path = require('node:path');
+const { loadDesktopBackendEnvironment } = require('./backend-environment-store');
 
 const BACKEND_HOST = '127.0.0.1';
 const BACKEND_PORT = '8080';
@@ -259,16 +260,22 @@ function createDesktopBackendSupervisor({
     resourcesPath = process.resourcesPath,
     logger = console
 }) {
+    const managedEnvironment = loadDesktopBackendEnvironment({
+        directory: app.getPath('userData'),
+        environment,
+        platform,
+        logger
+    });
     const launch = resolveBackendLaunch({
         appPath: app.getAppPath(),
         isPackaged: app.isPackaged,
         resourcesPath,
         platform,
-        environment
+        environment: managedEnvironment
     });
     return new BackendSupervisor({
         launch,
-        environment: createBackendEnvironment(environment),
+        environment: createBackendEnvironment(managedEnvironment),
         logger
     });
 }

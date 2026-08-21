@@ -179,6 +179,12 @@ export ASSISTANT_GPT_SOVITS_URL=http://127.0.0.1:9880
 
 以上与 Web 页面重叠的环境变量优先于页面保存值。被环境变量接管的字段会在页面中标记为只读。
 
+Electron 收到一套完整且合法的 relay 环境变量后，会把上表中的 5 项
+`ASSISTANT_COMPUTER_*` relay 参数保存到 Electron 私有用户目录下的
+`backend-environment.json`，供电脑或应用重启后恢复使用。该文件在 macOS 和
+Linux 上使用仅当前用户可读写的权限，不保存模型 API Key、QQ Token 或 SSH
+私钥正文；再次提供环境变量时，环境变量始终优先。
+
 > **安全提示：** 记忆、会话等管理 API 当前没有鉴权。CORS 只能约束浏览器，不能阻止非浏览器客户端访问。除非服务位于具备鉴权能力的可信反向代理和网络隔离之后，否则不要把 `ASSISTANT_HOST` 设置为 `0.0.0.0` 或其他非回环地址。
 
 `ASSISTANT_DATA_DIR` 未配置时使用以下目录：

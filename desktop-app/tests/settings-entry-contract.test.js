@@ -3,11 +3,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { pathToFileURL } = require('node:url');
 
 const mainPath = path.resolve(__dirname, '..', 'src', 'main.js');
 const SETTINGS_URL = 'http://127.0.0.1:8080/settings';
+const ACCESS_TOKEN = 't'.repeat(43);
 
-async function loadMain({ openExternal = async () => {} } = {}) {
+async function loadMain({
+    openExternal = async () => {},
+    packaged = false
+} = {}) {
     const source = fs.readFileSync(mainPath, 'utf8');
     const state = {
         openExternalCalls: [],
@@ -17,6 +22,7 @@ async function loadMain({ openExternal = async () => {} } = {}) {
         quitCalls: 0,
         templates: [],
         appEvents: new Map(),
+        ipcHandlers: new Map(),
         errors: []
     };
     const shell = {
@@ -45,11 +51,15 @@ async function loadMain({ openExternal = async () => {} } = {}) {
 
     const electron = {
         app: {
+            isPackaged: packaged,
             whenReady: () => Promise.resolve(),
             on(event, callback) { state.appEvents.set(event, callback); },
             quit: () => { state.quitCalls += 1; }
         },
         BrowserWindow,
+        ipcMain: {
+            on(channel, handler) { state.ipcHandlers.set(channel, handler); }
+        },
         Tray,
         Menu: {
             buildFromTemplate(template) {
@@ -58,8 +68,8 @@ async function loadMain({ openExternal = async () => {} } = {}) {
             }
         },
         nativeImage: {
-            createFromDataURL(value) {
-                assert.match(value, /^data:image\/svg\+xml;base64,/);
+            createFromPath(value) {
+                assert.match(value, /assets[\\/]tray-icon\.png$/);
                 return { isEmpty: () => false };
             }
         },
@@ -73,15 +83,13 @@ async function loadMain({ openExternal = async () => {} } = {}) {
         module: { exports: {} },
         exports: {},
         process: { platform: 'darwin' },
-        Buffer,
+        URL,
+        URLSearchParams,
         __dirname: path.dirname(mainPath),
         require(request) {
             if (request === 'electron') return electron;
-            if (request === 'fs') return {
-                existsSync: () => true,
-                readFileSync: fs.readFileSync
-            };
             if (request === 'path') return path;
+            if (request === 'node:url') return { pathToFileURL };
             if (request === './backend-supervisor') {
                 return {
                     createDesktopBackendSupervisor() {
@@ -99,6 +107,21 @@ async function loadMain({ openExternal = async () => {} } = {}) {
                     }
                 };
             }
+            if (request === './runtime-connection') {
+                return {
+                    async createRuntimeConnection({ isPackaged }) {
+                        const port = isPackaged ? 49152 : 8080;
+                        const accessToken = isPackaged ? ACCESS_TOKEN : null;
+                        return {
+                            host: '127.0.0.1',
+                            port,
+                            accessToken,
+                            httpOrigin: `http://127.0.0.1:${port}`,
+                            wsOrigin: `ws://127.0.0.1:${port}`
+                        };
+                    }
+                };
+            }
             throw new Error(`Unexpected require: ${request}`);
         }
     };
@@ -108,7 +131,7 @@ async function loadMain({ openExternal = async () => {} } = {}) {
     return { source, state };
 }
 
-test('tray settings entry opens only the fixed local settings URL', async () => {
+test('development tray entry keeps the fixed local settings URL', async () => {
     const { state } = await loadMain();
     assert.equal(state.templates.length, 1);
     assert.equal(state.backendStarts, 1);
@@ -124,6 +147,18 @@ test('tray settings entry opens only the fixed local settings URL', async () => 
     assert.equal(typeof settingsItem.click, 'function');
     await settingsItem.click({ url: 'https://attacker.invalid' });
     assert.deepEqual(state.openExternalCalls, [[SETTINGS_URL]]);
+});
+
+test('packaged settings entry carries the ephemeral token only in the fragment', async () => {
+    const { state } = await loadMain({ packaged: true });
+    const settingsItem = state.templates[0].find((item) => item.label === '设置');
+
+    await settingsItem.click();
+    const opened = new URL(state.openExternalCalls[0][0]);
+    assert.equal(opened.origin, 'http://127.0.0.1:49152');
+    assert.equal(opened.pathname, '/settings');
+    assert.equal(opened.search, '');
+    assert.equal(new URLSearchParams(opened.hash.slice(1)).get('desktopToken'), ACCESS_TOKEN);
 });
 
 test('desktop lifecycle starts and stops the managed backend', async () => {
@@ -147,10 +182,23 @@ test('settings entry handles browser launch rejection without quitting', async (
     assert.doesNotMatch(state.errors.flat().join(' '), /secret|token|https?:\/\//i);
 });
 
-test('main process exposes no dynamic settings URL or credential IPC path', async () => {
-    const { source } = await loadMain();
-    assert.match(source, /const SETTINGS_URL\s*=\s*['"]http:\/\/127\.0\.0\.1:8080\/settings['"]/);
-    assert.match(source, /shell\.openExternal\(SETTINGS_URL\)/);
-    assert.doesNotMatch(source, /ipcMain|ipcRenderer/);
+test('runtime IPC returns credentials only to the exact renderer entry', async () => {
+    const { source, state } = await loadMain({ packaged: true });
+    const handler = state.ipcHandlers.get('desktop-runtime:get');
+    assert.equal(typeof handler, 'function');
+
+    const denied = { senderFrame: { url: 'file:///tmp/attacker.html' } };
+    handler(denied);
+    assert.equal(denied.returnValue, null);
+
+    const allowed = {
+        senderFrame: {
+            url: pathToFileURL(path.join(path.dirname(mainPath), 'renderer/index.html')).toString()
+        }
+    };
+    handler(allowed);
+    assert.equal(allowed.returnValue.accessToken, ACCESS_TOKEN);
+    assert.equal(allowed.returnValue.port, 49152);
+    assert.match(source, /senderUrl === allowedUrl/);
     assert.doesNotMatch(source, /BrowserWindow[^;]*settings|loadURL\([^)]*settings/i);
 });

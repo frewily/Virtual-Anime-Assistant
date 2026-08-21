@@ -1,17 +1,25 @@
-const WS_URL = 'ws://127.0.0.1:8080/ws/avatar';
 const { createSpeechPlayback } = require('./speech-playback');
+const { getRuntimeConnection } = require('./runtime-connection');
 const {
     enqueueConfirmation,
     handleConfirmationUpdate,
     restorePendingConfirmations
 } = require('./tool-confirmation');
 
-const speechPlayback = createSpeechPlayback();
+const runtime = getRuntimeConnection();
+const speechPlayback = createSpeechPlayback({
+    backendUrl: runtime.httpOrigin,
+    accessToken: runtime.accessToken
+});
 
 let ws;
 
 function connectWebSocket() {
-    ws = new WebSocket(WS_URL);
+    const url = `${runtime.wsOrigin}/ws/avatar`;
+    const protocols = runtime.accessToken
+        ? [`vaa.desktop.${runtime.accessToken}`]
+        : undefined;
+    ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
     
     ws.onopen = () => {
         console.log('WebSocket connected');

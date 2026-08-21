@@ -2,6 +2,24 @@
   'use strict';
 
   const API = '/api/settings';
+  function consumeDesktopAccessToken() {
+    let token = null;
+    try {
+      const fragment = new URLSearchParams(window.location.hash.slice(1));
+      const supplied = fragment.get('desktopToken');
+      if (supplied && /^[A-Za-z0-9_-]{43}$/.test(supplied)) {
+        token = supplied;
+      }
+      if (window.location.hash) {
+        window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+      }
+    } catch (_) {
+      token = null;
+    }
+    return token && /^[A-Za-z0-9_-]{43}$/.test(token) ? token : null;
+  }
+
+  const desktopAccessToken = consumeDesktopAccessToken();
   const SOURCE_LABELS = Object.freeze({
     default: '默认值',
     persisted: '已保存',
@@ -234,6 +252,7 @@
       ? (Number.isInteger(options.sessionGeneration) ? options.sessionGeneration : state.sessionGeneration)
       : null;
     const headers = { Accept: 'application/json' };
+    if (desktopAccessToken) headers['X-VAA-Desktop-Token'] = desktopAccessToken;
     const init = {
       method: options.method || 'GET',
       credentials: 'same-origin',

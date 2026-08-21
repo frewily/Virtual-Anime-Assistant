@@ -48,7 +48,7 @@ test('backend build script uses argv execution and an isolated staging directory
     assert.doesNotMatch(source, /execSync|shell:\s*true/);
 });
 
-test('packaged runtime relocates config and generated audio out of the bundle', () => {
+test('packaged runtime relocates writable state and requires ephemeral access', () => {
     const configLoader = read(path.join(repositoryRoot, 'backend', 'core', 'config_loader.py'));
     const tts = read(path.join(repositoryRoot, 'backend', 'core', 'tts.py'));
     const supervisor = read(path.join(desktopRoot, 'src', 'backend-supervisor.js'));
@@ -57,17 +57,17 @@ test('packaged runtime relocates config and generated audio out of the bundle', 
     assert.match(tts, /ASSISTANT_AUDIO_DIR/);
     assert.match(supervisor, /resourcesPath[\s\S]*'config'/);
     assert.match(supervisor, /userDataPath[\s\S]*'audio'/);
+    assert.match(supervisor, /ASSISTANT_CONFIG_DIR/);
+    assert.match(supervisor, /ASSISTANT_DATA_DIR/);
+    assert.match(supervisor, /ASSISTANT_DESKTOP_ACCESS_TOKEN/);
+    assert.match(supervisor, /PACKAGED_READY_ATTEMPTS\s*=\s*120/);
 });
 
 test('packaged application carries a local tray icon without a remote source', () => {
-    const icon = read(path.join(desktopRoot, 'src', 'assets', 'tray-icon.svg'));
+    const iconPath = path.join(desktopRoot, 'src', 'assets', 'tray-icon.png');
     const main = read(path.join(desktopRoot, 'src', 'main.js'));
 
-    assert.match(icon, /^<svg\b/);
-    assert.doesNotMatch(
-        icon.replace('http://www.w3.org/2000/svg', ''),
-        /https?:\/\/|<script\b|<foreignObject\b/i
-    );
-    assert.match(main, /nativeImage\.createFromDataURL/);
-    assert.match(main, /assets\/tray-icon\.svg|assets', 'tray-icon\.svg/);
+    assert.equal(fs.readFileSync(iconPath).subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.match(main, /nativeImage\.createFromPath/);
+    assert.match(main, /assets\/tray-icon\.png|assets', 'tray-icon\.png/);
 });

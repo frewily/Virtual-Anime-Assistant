@@ -1,7 +1,15 @@
-const API_BASE = 'http://127.0.0.1:8080/api';
+const {
+    getRuntimeConnection,
+    withDesktopAccessHeader
+} = require('./runtime-connection');
 
 async function requestJson(path, options = {}) {
-    const response = await fetch(`${API_BASE}${path}`, options);
+    const runtime = getRuntimeConnection();
+    const headers = withDesktopAccessHeader(options.headers);
+    const response = await fetch(`${runtime.httpOrigin}/api${path}`, {
+        ...options,
+        headers
+    });
     const payload = response.status === 204
         ? null
         : await response.json();

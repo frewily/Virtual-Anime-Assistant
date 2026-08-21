@@ -2,11 +2,12 @@ const { spawn } = require('node:child_process');
 const http = require('node:http');
 const path = require('node:path');
 const { loadDesktopBackendEnvironment } = require('./backend-environment-store');
+const { buildConnection, DEVELOPMENT_PORT } = require('./runtime-connection');
 
 const BACKEND_HOST = '127.0.0.1';
-const BACKEND_PORT = '8080';
 const HEALTH_PATH = '/api/health/live';
 const READY_ATTEMPTS = 40;
+const PACKAGED_READY_ATTEMPTS = 120;
 const READY_DELAY_MS = 250;
 const MAX_RESTARTS = 5;
 const MAX_RESTART_DELAY_MS = 30_000;
@@ -70,12 +71,13 @@ function resolveBackendLaunch({
 function createBackendEnvironment(environment, {
     isPackaged = false,
     resourcesPath = '',
-    userDataPath = ''
+    userDataPath = '',
+    connection = buildConnection(DEVELOPMENT_PORT, null)
 } = {}) {
     const childEnvironment = {
         ...environment,
         ASSISTANT_HOST: BACKEND_HOST,
-        ASSISTANT_PORT: BACKEND_PORT
+        ASSISTANT_PORT: String(connection.port)
     };
     delete childEnvironment.ASSISTANT_BACKEND_EXECUTABLE;
     delete childEnvironment.ASSISTANT_PYTHON_EXECUTABLE;
@@ -83,16 +85,28 @@ function createBackendEnvironment(environment, {
         if (!path.isAbsolute(resourcesPath) || !path.isAbsolute(userDataPath)) {
             throw new Error('packaged backend paths must be absolute');
         }
+        if (!connection.accessToken) {
+            throw new Error('packaged backend requires a desktop access token');
+        }
         childEnvironment.ASSISTANT_BUNDLED_CONFIG_DIR = path.join(
             resourcesPath,
             'config'
         );
         childEnvironment.ASSISTANT_AUDIO_DIR = path.join(userDataPath, 'audio');
+        childEnvironment.ASSISTANT_CONFIG_DIR = path.join(userDataPath, 'config');
+        childEnvironment.ASSISTANT_DATA_DIR = path.join(userDataPath, 'data');
+        childEnvironment.ASSISTANT_DESKTOP_ACCESS_TOKEN = connection.accessToken;
+    } else {
+        delete childEnvironment.ASSISTANT_DESKTOP_ACCESS_TOKEN;
     }
     return childEnvironment;
 }
 
-function probeBackend({ request = http.get, timeoutMilliseconds = 1000 } = {}) {
+function probeBackend({
+    request = http.get,
+    timeoutMilliseconds = 1000,
+    connection = buildConnection(DEVELOPMENT_PORT, null)
+} = {}) {
     return new Promise((resolve) => {
         let settled = false;
         const finish = (value) => {
@@ -102,9 +116,12 @@ function probeBackend({ request = http.get, timeoutMilliseconds = 1000 } = {}) {
         };
         const requestInstance = request({
             host: BACKEND_HOST,
-            port: Number(BACKEND_PORT),
+            port: connection.port,
             path: HEALTH_PATH,
             method: 'GET',
+            headers: connection.accessToken
+                ? { 'X-VAA-Desktop-Token': connection.accessToken }
+                : {},
             timeout: timeoutMilliseconds
         }, (response) => {
             response.resume();
@@ -129,8 +146,12 @@ class BackendSupervisor {
         ),
         schedule = setTimeout,
         cancel = clearTimeout,
+        readyAttempts = READY_ATTEMPTS,
         logger = console
     }) {
+        if (!Number.isInteger(readyAttempts) || readyAttempts < 1) {
+            throw new Error('backend readiness attempts must be a positive integer');
+        }
         this.launch = launch;
         this.environment = environment;
         this.spawnProcess = spawnProcess;
@@ -138,6 +159,7 @@ class BackendSupervisor {
         this.delay = delay;
         this.schedule = schedule;
         this.cancel = cancel;
+        this.readyAttempts = readyAttempts;
         this.logger = logger;
         this.child = null;
         this.externalBackend = false;
@@ -199,7 +221,7 @@ class BackendSupervisor {
         child.once('error', () => this._handleChildExit(child));
         child.once('exit', () => this._handleChildExit(child));
 
-        for (let attempt = 0; attempt < READY_ATTEMPTS; attempt += 1) {
+        for (let attempt = 0; attempt < this.readyAttempts; attempt += 1) {
             if (this.stopping || this.child !== child) return false;
             if (await this.probe()) {
                 this.logger.info('[Backend] Local service is ready.');
@@ -269,6 +291,7 @@ class BackendSupervisor {
 
 function createDesktopBackendSupervisor({
     app,
+    connection = buildConnection(DEVELOPMENT_PORT, null),
     environment = process.env,
     platform = process.platform,
     resourcesPath = process.resourcesPath,
@@ -292,8 +315,13 @@ function createDesktopBackendSupervisor({
         environment: createBackendEnvironment(managedEnvironment, {
             isPackaged: app.isPackaged,
             resourcesPath,
-            userDataPath: app.getPath('userData')
+            userDataPath: app.getPath('userData'),
+            connection
         }),
+        probe: () => probeBackend({ connection }),
+        readyAttempts: app.isPackaged
+            ? PACKAGED_READY_ATTEMPTS
+            : READY_ATTEMPTS,
         logger
     });
 }

@@ -56,7 +56,8 @@ test('websocket delegates speak audio to the bounded playback module', () => {
     );
 
     assert.match(source, /require\('\.\/speech-playback'\)/);
-    assert.match(source, /createSpeechPlayback\(\)/);
+    assert.match(source, /createSpeechPlayback\(\{[\s\S]*accessToken/);
+    assert.match(source, /vaa\.desktop\.\$\{runtime\.accessToken\}/);
     assert.match(source, /speechPlayback\.handleSpeakAudio\(message\)/);
     assert.doesNotMatch(source, /new Audio\(/);
 });

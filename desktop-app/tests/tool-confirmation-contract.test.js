@@ -34,6 +34,7 @@ test('desktop API uses the exact tool confirmation endpoints', () => {
     assert.match(source, /\/tools\/confirmations/);
     assert.match(source, /\/decision/);
     assert.match(source, /encodeURIComponent/);
+    assert.match(source, /withDesktopAccessHeader/);
 });
 
 test('websocket restores and updates the confirmation queue', () => {

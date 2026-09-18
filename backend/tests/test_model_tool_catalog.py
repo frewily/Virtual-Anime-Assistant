@@ -2,8 +2,11 @@ import sys
 import unittest
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, RootModel
-from pydantic.errors import PydanticInvalidForJsonSchema
+from pydantic import BaseModel, ConfigDict, RootModel, ValidationError
+from pydantic.errors import (
+    PydanticInvalidForJsonSchema,
+    PydanticSchemaGenerationError,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -64,6 +67,25 @@ class ProgrammingErrorArguments(BaseModel):
     @classmethod
     def model_json_schema(cls, *args, **kwargs):
         raise RuntimeError("programming error")
+
+
+class ValidationProgrammingErrorArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        raise ValidationError.from_exception_data(
+            "SchemaProgrammingError",
+            [],
+        )
+
+
+class SchemaGenerationErrorArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        raise PydanticSchemaGenerationError("unsupported generated schema")
 
 
 SHARED_SCHEMA = {
@@ -205,6 +227,39 @@ class ModelToolCatalogTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "programming error"):
             ModelToolCatalog(registry).list()
+
+    def test_catalog_does_not_swallow_schema_validation_errors(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.schema-programming-error",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=ValidationProgrammingErrorArguments,
+            )
+        )
+
+        with self.assertRaises(ValidationError):
+            ModelToolCatalog(registry).list()
+
+    def test_catalog_filters_schema_generation_errors(self):
+        registry = ToolRegistry()
+        registry.register(
+            definition(
+                "example.schema-generation-error",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+                arguments_model=SchemaGenerationErrorArguments,
+            )
+        )
+        registry.register(
+            definition(
+                "example.valid",
+                allowed_sources=frozenset({ToolSource.MODEL}),
+            )
+        )
+
+        tools = ModelToolCatalog(registry).list()
+
+        self.assertEqual([tool.name for tool in tools], ["example.valid"])
 
     def test_catalog_closes_top_level_and_nested_ref_object_schemas(self):
         registry = ToolRegistry()

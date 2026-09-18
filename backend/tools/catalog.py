@@ -155,17 +155,19 @@ class ModelToolCatalog:
                 continue
             try:
                 parameters = build_closed_arguments_schema(definition)
+            except (
+                _UnsupportedToolSchemaError,
+                PydanticInvalidForJsonSchema,
+                PydanticSchemaGenerationError,
+            ):
+                continue
+            try:
                 tool = ModelToolDefinition(
                     name=definition.name,
                     description=f"{definition.title}。{definition.impact}",
                     parameters=parameters,
                 )
-            except (
-                _UnsupportedToolSchemaError,
-                PydanticInvalidForJsonSchema,
-                PydanticSchemaGenerationError,
-                ValidationError,
-            ):
+            except ValidationError:
                 continue
             tools.append(tool)
         return tuple(tools)
